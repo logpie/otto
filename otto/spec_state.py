@@ -77,6 +77,7 @@ EVENT_KINDS: tuple[str, ...] = (
     "group.check.started",
     "group.check.finished",
     "group.check.feedback",     # authoritative check evidence fed to same repair thread
+    "group.self_check.report",  # build agent's own bounded self-check summary
     "group.attempt.failed",
     "group.repair.progress_extension",  # repair failure changed; grant bounded retry
     "group.merge.eligible",
@@ -131,6 +132,7 @@ EventKind = Literal[
     "group.check.started",
     "group.check.finished",
     "group.check.feedback",
+    "group.self_check.report",
     "group.attempt.failed",
     "group.merge.eligible",
     "group.merge.started",

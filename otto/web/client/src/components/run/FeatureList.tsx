@@ -42,6 +42,7 @@ interface FeatureVisualState {
 
 function buildStatusLabel(status: GroupStatus): string {
   if (status === "passing" || status === "landed") return "built";
+  if (status === "degraded") return "degraded";
   if (status === "redundant") return "satisfied";
   if (status === "in_progress") return "building";
   if (status === "blocked" || status === "failed_scope") return "blocked";
@@ -60,6 +61,9 @@ function visualState(verdict: FeatureVerdict | null, buildStatus: GroupStatus): 
   }
   if (buildStatus === "passing" || buildStatus === "landed") {
     return { glyph: "✓", tone: "ok", pillTone: "ok", label: buildStatusLabel(buildStatus), bucket: "passing" };
+  }
+  if (buildStatus === "degraded") {
+    return { glyph: "⚠", tone: "warn", pillTone: "warn", label: buildStatusLabel(buildStatus), bucket: "partial" };
   }
   if (buildStatus === "in_progress") {
     return { glyph: "●", tone: "info", pillTone: "info", label: buildStatusLabel(buildStatus), bucket: "building" };

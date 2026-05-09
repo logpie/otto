@@ -394,6 +394,10 @@ async def _drive_full_pipeline(
         f"groups passing, ${build_result.total_cost_usd:.2f}, "
         f"{build_result.total_wall_s:.0f}s"
     )
+    if getattr(build_result, "degraded_ids", []):
+        console.print(
+            f"  [yellow]Degraded groups:[/yellow] {', '.join(build_result.degraded_ids)}"
+        )
     if build_result.blocked_ids:
         console.print(
             f"  [yellow]Blocked groups:[/yellow] {', '.join(build_result.blocked_ids)}"
@@ -1114,6 +1118,10 @@ def _print_run_result(run_result: RunResult) -> None:
             f"groups passing, ${br.total_cost_usd:.2f}, "
             f"{br.total_wall_s:.0f}s"
         )
+        if getattr(br, "degraded_ids", []):
+            console.print(
+                f"  [yellow]Degraded groups:[/yellow] {', '.join(br.degraded_ids)}"
+            )
         if br.blocked_ids:
             console.print(
                 f"  [yellow]Blocked groups:[/yellow] {', '.join(br.blocked_ids)}"

@@ -264,6 +264,7 @@ export type GroupStatus =
   | "pending"
   | "in_progress"
   | "passing"
+  | "degraded"
   | "blocked"
   | "landed"
   | "redundant"

@@ -97,6 +97,14 @@ def _failing_check() -> RepoTestCheck:
     return RepoTestCheck(command=("python", "-c", "import sys; sys.exit(1)"), timeout_s=10)
 
 
+def _failing_browser_check() -> BrowserJourney:
+    return BrowserJourney(
+        command=("python", "-c", "import sys; sys.exit(1)"),
+        evidence_globs=(),
+        timeout_s=10,
+    )
+
+
 def _passing_state_invariant(predicate: str) -> StateInvariant:
     return StateInvariant(description="cross-slice", expression=predicate)
 
@@ -197,6 +205,18 @@ def test_passing_group_ids_latest_result_supersedes_older_pass(tmp_path: Path) -
     assert passing_group_ids(build_result) == []
 
 
+def test_degraded_group_is_merge_candidate_but_not_passing_id(tmp_path: Path) -> None:
+    build_result = BuildResult(
+        spec_session_dir=tmp_path,
+        group_results=[
+            GroupResult(group_id="a", status=GroupStatus.DEGRADED, attempts=1, branch="x", worktree=tmp_path),
+        ],
+    )
+
+    assert passing_group_ids(build_result) == []
+    assert build_result.merge_candidate_ids == ["a"]
+
+
 # ---------------------------------------------------------------------------
 # run_merge_queue — happy path
 # ---------------------------------------------------------------------------
@@ -227,9 +247,106 @@ def test_run_merge_queue_lands_single_slice_when_checks_pass(tmp_path: Path) -> 
         run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
     )
     assert result.landed_ids == ["s1"]
+
+
+def test_run_merge_queue_lands_degraded_slice_despite_behavior_check_failure(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    subprocess.run(["git", "checkout", "-q", "-b", "b1"], cwd=tmp_path, check=True)
+    (tmp_path / "feature.txt").write_text("best effort", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feature", "--no-verify"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=tmp_path, check=True)
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="x",
+                dependencies=[],
+                owned_paths=["feature.txt"],
+                feature_ids=[],
+                checks=[_failing_browser_check()],
+            ),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="s1",
+                status=GroupStatus.DEGRADED,
+                attempts=1,
+                branch="b1",
+                worktree=tmp_path,
+            ),
+        ],
+        base_branch="main",
+    )
+
+    result = asyncio.run(
+        run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
+    )
+
+    assert result.landed_ids == ["s1"]
+    assert result.results[0].group_recheck_evidence[0].passed is False
+    assert "degraded_continue" in result.results[0].failure_narrative
     assert result.blocked_ids == []
     assert result.results[0].status == MergeStatus.LANDED
     assert result.results[0].landed_commit  # short hash present
+
+
+def test_run_merge_queue_blocks_degraded_slice_on_structural_check_failure(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    _ensure_main(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    subprocess.run(["git", "checkout", "-q", "-b", "b1"], cwd=tmp_path, check=True)
+    (tmp_path / "feature.txt").write_text("best effort", encoding="utf-8")
+    subprocess.run(["git", "add", "feature.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feature", "--no-verify"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=tmp_path, check=True)
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="x",
+                dependencies=[],
+                owned_paths=["feature.txt"],
+                feature_ids=[],
+                checks=[_failing_check()],
+            ),
+        ]
+    )
+    build_result = BuildResult(
+        spec_session_dir=session_dir,
+        group_results=[
+            GroupResult(
+                group_id="s1",
+                status=GroupStatus.DEGRADED,
+                attempts=1,
+                branch="b1",
+                worktree=tmp_path,
+            ),
+        ],
+        base_branch="main",
+    )
+
+    result = asyncio.run(
+        run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
+    )
+
+    assert result.landed_ids == []
+    assert result.blocked_ids == ["s1"]
 
 
 def test_run_merge_queue_carries_build_blocked_ids_to_final_result(tmp_path: Path) -> None:

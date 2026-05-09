@@ -51,6 +51,7 @@ from otto.build import (
     ContractDelta,
     GroupResult,
     GroupStatus,
+    _failed_checks_are_non_structural,
     detect_scope_violations,
     resolve_integration_base_branch,
     _write_build_context_packet,
@@ -79,7 +80,7 @@ class MergeStatus(str, Enum):
 
 @dataclass
 class MergeCandidate:
-    """A slice that build.py marked PASSING — eligible to land."""
+    """A slice that build.py marked PASSING/DEGRADED — eligible to land."""
 
     group_id: str
     branch: str
@@ -87,6 +88,7 @@ class MergeCandidate:
     worktree: Path  # slice branch worktree used for repair
     merge_worktree: Path | None = None  # integration target worktree
     contract_deltas: list[ContractDelta] = field(default_factory=list)
+    degraded: bool = False
 
 
 @dataclass
@@ -143,7 +145,7 @@ def eligible_candidates(
     """Return Groups that are merge candidates, in dep-topological FIFO order.
 
     Eligibility:
-        * group.id is in `passing_ids` (build.py reported PASSING)
+        * group.id is in `passing_ids` (build.py reported PASSING or DEGRADED)
         * group.id is NOT in `landed_ids` (already landed)
         * group.id is NOT in `blocked_ids` (terminally failed merge)
         * every dep in `group.dependencies` is in `landed_ids`
@@ -194,7 +196,7 @@ def eligible_components(
     """Return Components that are merge candidates, in dep-topological FIFO order.
 
     Eligibility mirrors `eligible_candidates` for Groups:
-        * component.id is in `passing_ids` (build.py reported PASSING)
+            * component.id is in `passing_ids` (build.py reported PASSING)
         * component.id is NOT in `landed_ids` (already landed)
         * component.id is NOT in `blocked_ids` (terminally failed merge)
         * all of component.dependencies are in `landed_ids`
@@ -378,7 +380,7 @@ async def run_merge_queue(
     passing_ids = [
         group_id
         for group_id, result in latest_group_results.items()
-        if result.status == GroupStatus.PASSING
+        if result.status in (GroupStatus.PASSING, GroupStatus.DEGRADED)
     ]
     # A1c.3: Components participate in the same FIFO queue as Groups so
     # their branches go through the same conflict-repair flow. We pull
@@ -472,6 +474,11 @@ async def run_merge_queue(
                 unit_kind=unit_kind,
                 latest_group_results=latest_group_results,
                 latest_component_results=latest_component_results,
+            ),
+            degraded=(
+                unit_kind == "group"
+                and latest_group_results.get(group_obj.id) is not None
+                and latest_group_results[group_obj.id].status == GroupStatus.DEGRADED
             ),
         )
         if candidate.contract_deltas:
@@ -862,6 +869,35 @@ async def _process_candidate(
                     cost_usd=cost_total,
                     wall_s=time.monotonic() - t0,
                     failure_narrative="",
+                )
+
+            degraded_failure_pairs = [*slice_pairs, *cross_pairs]
+            degraded_can_land = (
+                candidate.degraded
+                and not missing_cross_evidence
+                and _failed_checks_are_non_structural(degraded_failure_pairs)
+            )
+            if degraded_can_land:
+                failed_details = [
+                    ev.detail
+                    for ev in [*group_evidence, *cross_evidence]
+                    if not ev.passed
+                ]
+                return MergeResult(
+                    group_id=group_obj.id,
+                    status=merge_status,
+                    landed_commit=outcome.head_after,
+                    cross_slice_evidence=cross_evidence,
+                    group_recheck_evidence=group_evidence,
+                    contract_deltas=list(candidate.contract_deltas),
+                    repair_attempts=repair_attempts,
+                    cost_usd=cost_total,
+                    wall_s=time.monotonic() - t0,
+                    failure_narrative=(
+                        "degraded_continue: landed best-effort group despite "
+                        "remaining non-structural check failures: "
+                        + "; ".join(failed_details[:5])
+                    ),
                 )
 
             # Post-merge checks failed — rollback the merge so the slice

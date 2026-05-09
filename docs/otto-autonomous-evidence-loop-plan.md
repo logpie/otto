@@ -177,3 +177,11 @@ the planned behavior contract is satisfied.
   packets, emits `contract.delta.merge`, and includes them in audit summaries
   so integration validates the final product invariant instead of policing a
   broad path glob.
+- 2026-05-08: Implemented Phase 1 build-loop simplification. Build-agent
+  prompts now carry stronger slice-local product expectations plus a bounded
+  self-check loop and `otto_artifacts/self-check.json` evidence report. Groups
+  with usable product diffs and only non-structural behavior-check failures now
+  continue as `degraded` merge candidates instead of blocking downstream work;
+  structural repo/native failures still block. Merge can land degraded groups
+  only when post-merge failures remain non-structural, while final audit caps
+  the run at `PARTIAL` until those degraded groups are repaired or verified.

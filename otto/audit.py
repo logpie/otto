@@ -1174,6 +1174,7 @@ async def run_audit(
             expected_feature_ids=scoped_feature_ids or [feature.id for feature in spec.features],
             merge_blocked_ids=list(merge_result.blocked_ids or []),
             merge_redundant_ids=list(getattr(merge_result, "redundant_ids", []) or []),
+            build_degraded_ids=list(getattr(build_result, "degraded_ids", []) or []),
             total_passing_groups=len(getattr(merge_result, "landed_ids", []) or [])
                 + len(merge_result.blocked_ids or []),
         )
@@ -1679,6 +1680,8 @@ def _build_summary(build_result: BuildResult) -> dict:
     return {
         "all_passing": build_result.all_passing,
         "passing_ids": list(build_result.passing_ids),
+        "degraded_ids": list(getattr(build_result, "degraded_ids", []) or []),
+        "merge_candidate_ids": list(getattr(build_result, "merge_candidate_ids", build_result.passing_ids)),
         "blocked_ids": list(build_result.blocked_ids),
         "total_cost_usd": build_result.total_cost_usd,
         "total_wall_s": build_result.total_wall_s,
@@ -1694,6 +1697,7 @@ def _build_summary(build_result: BuildResult) -> dict:
                 "wall_s": r.wall_s,
                 "cost_usd": r.cost_usd,
                 "narrative": r.failure_narrative,
+                "self_check": dict(getattr(r, "self_check", {}) or {}),
                 "contract_deltas": [
                     delta.to_dict() for delta in getattr(r, "contract_deltas", [])
                 ],
@@ -2226,6 +2230,7 @@ def _compose_verdict(
     expected_feature_ids: Iterable[str] | None = None,
     merge_blocked_ids: list[str] | None = None,
     merge_redundant_ids: list[str] | None = None,
+    build_degraded_ids: list[str] | None = None,
     total_passing_groups: int = 0,
 ) -> tuple[AuditVerdict, str]:
     """Compose final verdict + narrative from all caps, order-independent.
@@ -2302,6 +2307,16 @@ def _compose_verdict(
             + "\n".join(
                 f"  - {sid} was dependency-satisfied but did not add a product diff"
                 for sid in redundant_ids
+            )
+        )
+
+    degraded_ids = list(build_degraded_ids or [])
+    if degraded_ids:
+        sections.append(
+            f"[build: {len(degraded_ids)} group(s) continued best-effort]\n"
+            + "\n".join(
+                f"  - {sid} had non-structural build/check gaps, but landed for integrated audit"
+                for sid in degraded_ids
             )
         )
 

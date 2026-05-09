@@ -2477,3 +2477,40 @@ def test_compose_verdict_narrates_redundant_merge_without_downgrade() -> None:
     assert verdict == AuditVerdict.PASSED
     assert "redundant/no-diff" in narrative
     assert "profile-actions" in narrative
+
+
+def test_compose_verdict_integrated_pass_supersedes_degraded_build_history() -> None:
+    """A stale degraded group should not hold a green integrated audit hostage."""
+    from otto.audit import _compose_verdict, AuditAgentOutput, AuditVerdict
+    from otto.spec_amend import ChainVerification
+
+    agent_output = AuditAgentOutput(
+        verdict=AuditVerdict.PASSED,
+        narrative="integrated app passes",
+        group_verdicts=[],
+        feature_audits=[
+            FeatureAudit(
+                feature_id="finance-dashboard",
+                name="Finance dashboard",
+                status="passed",
+                detail="Covered by live browser audit.",
+            )
+        ],
+        quality_score=4,
+        quality_findings=[],
+    )
+    chain = ChainVerification(verdict_cap="passed", findings=[])
+    verdict, narrative = _compose_verdict(
+        agent_output=agent_output,
+        contract_passed=True,
+        contract_detail="",
+        chain_review=chain,
+        merge_blocked_ids=[],
+        build_degraded_ids=["foundation"],
+        expected_feature_ids=["finance-dashboard"],
+        total_passing_groups=1,
+    )
+
+    assert verdict == AuditVerdict.PASSED
+    assert "continued best-effort" in narrative
+    assert "foundation" in narrative

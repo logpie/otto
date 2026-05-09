@@ -109,16 +109,20 @@ class TestLoadConfig:
     def test_build_section_defaults_present(self, tmp_bare_git_repo):
         cfg = load_config(tmp_bare_git_repo / "otto.yaml")
         assert cfg["build"]["group_concurrent"] == 3
+        assert cfg["build"]["self_check_max_passes"] == 2
+        assert cfg["build"]["self_check_required_for_web"] is True
 
     def test_build_partial_override_preserves_other_defaults(self, tmp_bare_git_repo):
         config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({"build": {"group_concurrent": 2}}))
         cfg = load_config(config_path)
         assert cfg["build"]["group_concurrent"] == 2
+        assert cfg["build"]["self_check_max_passes"] == 2
+        assert cfg["build"]["self_check_required_for_web"] is True
 
     def test_workflow_section_defaults_present(self, tmp_bare_git_repo):
         cfg = load_config(tmp_bare_git_repo / "otto.yaml")
-        assert cfg["workflow"]["enable_audit_repair"] is False
+        assert cfg["workflow"]["enable_audit_repair"] is True
         assert cfg["workflow"]["allow_in_flight_spec_edits"] is False
 
     def test_workflow_partial_override_preserves_other_defaults(self, tmp_bare_git_repo):

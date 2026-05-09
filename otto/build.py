@@ -32,6 +32,7 @@ to `otto.agent.run_agent_with_timeout`; tests pass a mock instead.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -102,6 +103,7 @@ class GroupStatus(str, Enum):
     PENDING = "pending"  # deps not yet met, OR not yet started
     IN_PROGRESS = "in_progress"
     PASSING = "passing"  # all checks pass; merge candidate
+    DEGRADED = "degraded"  # usable best-effort diff; failed non-structural checks
     BLOCKED = "blocked"  # exceeded retries / budget
     FAILED_SCOPE = "failed_scope"  # scope violation; treated as blocked
 
@@ -310,6 +312,7 @@ class GroupResult:
     failure_narrative: str = ""
     scope_warnings: list[str] = field(default_factory=list)
     contract_deltas: list[ContractDelta] = field(default_factory=list)
+    self_check: dict[str, Any] = field(default_factory=dict)
     cost_usd: float = 0.0
     wall_s: float = 0.0
 
@@ -370,6 +373,18 @@ class BuildResult:
     @property
     def passing_ids(self) -> list[str]:
         return [r.group_id for r in self.group_results if r.status == GroupStatus.PASSING]
+
+    @property
+    def merge_candidate_ids(self) -> list[str]:
+        return [
+            r.group_id
+            for r in self.group_results
+            if r.status in (GroupStatus.PASSING, GroupStatus.DEGRADED)
+        ]
+
+    @property
+    def degraded_ids(self) -> list[str]:
+        return [r.group_id for r in self.group_results if r.status == GroupStatus.DEGRADED]
 
     @property
     def blocked_ids(self) -> list[str]:
@@ -908,6 +923,34 @@ def _hash_worktree_diff(worktree: Path) -> str:
     except (FileNotFoundError, OSError):
         return ""
     return h.hexdigest()
+
+
+def _worktree_has_product_changes(worktree: Path) -> bool:
+    """True if the agent produced any tracked or untracked product diff."""
+    try:
+        diff = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if diff.returncode == 1:
+            return True
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if untracked.returncode == 0:
+            for path in (untracked.stdout or "").splitlines():
+                if path and not _is_hash_noise(path):
+                    return True
+    except (FileNotFoundError, OSError):
+        return False
+    return False
 
 
 def _snapshot_worktree_files(worktree: Path) -> dict[str, tuple[int, int]]:
@@ -1505,12 +1548,13 @@ async def run_build(
 
     def _emit_state(group_id: str, status: GroupStatus, extra: dict[str, Any] | None = None) -> None:
         # Map our GroupStatus to the journal's recognized event kinds.
-        # IN_PROGRESS → slice.started; PASSING → slice.merge.eligible
+        # IN_PROGRESS → slice.started; PASSING/DEGRADED → slice.merge.eligible
         # (slice is now a merge candidate); BLOCKED / FAILED_SCOPE → slice.blocked.
         # PENDING does not emit (no journal event before slice.started).
         kind_map = {
             GroupStatus.IN_PROGRESS: "group.started",
             GroupStatus.PASSING: "group.merge.eligible",
+            GroupStatus.DEGRADED: "group.merge.eligible",
             GroupStatus.BLOCKED: "group.blocked",
             GroupStatus.FAILED_SCOPE: "group.blocked",
         }
@@ -1588,7 +1632,7 @@ async def run_build(
         nonlocal total_cost
         total_cost += slice_result.cost_usd
         results.append(slice_result)
-        if slice_result.status == GroupStatus.PASSING:
+        if slice_result.status in (GroupStatus.PASSING, GroupStatus.DEGRADED):
             completed_ids.add(slice_result.group_id)
         else:
             blocked_ids.add(slice_result.group_id)
@@ -1598,6 +1642,7 @@ async def run_build(
             "cost_usd": slice_result.cost_usd,
             "narrative": slice_result.failure_narrative,
             "group_concurrent": group_concurrent,
+            "degraded": slice_result.status == GroupStatus.DEGRADED,
         }
         payload.update(extra or {})
         _emit_state(
@@ -1919,7 +1964,10 @@ async def run_build(
             # or dirty — downstream slices MUST NOT branch off it. Mark
             # the slice BLOCKED, do NOT add to branch_by_group, and emit
             # a blocked event so resume reconstructs reality.
-            if dispatch.branch_real and slice_result.status == GroupStatus.PASSING:
+            if dispatch.branch_real and slice_result.status in (
+                GroupStatus.PASSING,
+                GroupStatus.DEGRADED,
+            ):
                 committed = _commit_group_work(
                     dispatch.worktree,
                     group_id=dispatch.group.id,
@@ -2072,6 +2120,8 @@ async def _run_slice(
     prior_diff_hash: str = ""
     current_diff_hash: str = ""
     agent_session_id = initial_agent_session_id
+    self_check: dict[str, Any] = {}
+    last_evidence_pairs: list[tuple[CheckKind, Evidence]] = []
 
     while attempt < budget.per_group_retries_hard_cap:
         attempt += 1
@@ -2130,6 +2180,27 @@ async def _run_slice(
             and current_diff_hash
             and current_diff_hash == prior_diff_hash
         ):
+            if _result_can_continue_degraded(
+                evidence_pairs=last_evidence_pairs,
+                worktree=worktree,
+            ):
+                return GroupResult(
+                    group_id=group_obj.id,
+                    status=GroupStatus.DEGRADED,
+                    attempts=attempt - 1,
+                    branch=branch,
+                    worktree=worktree,
+                    last_evidence=last_evidence,
+                    failure_narrative=(
+                        "degraded_continue: no further progress after "
+                        "non-structural check failures"
+                    ),
+                    scope_warnings=list(accumulated_scope_warnings),
+                    contract_deltas=list(accumulated_contract_deltas),
+                    self_check=dict(self_check),
+                    cost_usd=cost_total,
+                    wall_s=time.monotonic() - slice_t0,
+                )
             return GroupResult(
                 group_id=group_obj.id,
                 status=GroupStatus.BLOCKED,
@@ -2160,6 +2231,7 @@ async def _run_slice(
                     f"(${cost_total:.2f} >= ${budget.per_group_cost_usd:.2f})"
                 ),
                 scope_warnings=list(accumulated_scope_warnings),
+                self_check=dict(self_check),
                 cost_usd=cost_total,
                 wall_s=time.monotonic() - slice_t0,
             )
@@ -2178,6 +2250,7 @@ async def _run_slice(
                     f"(${budget._spent_cost_usd:.2f} >= ${budget.total_cost_usd:.2f})"
                 ),
                 scope_warnings=list(accumulated_scope_warnings),
+                self_check=dict(self_check),
                 cost_usd=cost_total,
                 wall_s=time.monotonic() - slice_t0,
             )
@@ -2193,6 +2266,7 @@ async def _run_slice(
                 last_evidence=last_evidence,
                 failure_narrative=f"per-slice wall budget exhausted after {elapsed:.0f}s",
                 scope_warnings=list(accumulated_scope_warnings),
+                self_check=dict(self_check),
                 cost_usd=cost_total,
                 wall_s=elapsed,
             )
@@ -2208,6 +2282,7 @@ async def _run_slice(
                 last_evidence=last_evidence,
                 failure_narrative="total repair budget exhausted (audit + build)",
                 scope_warnings=list(accumulated_scope_warnings),
+                self_check=dict(self_check),
                 cost_usd=cost_total,
                 wall_s=time.monotonic() - slice_t0,
             )
@@ -2281,6 +2356,20 @@ async def _run_slice(
                 detail=last_failure,
             )
             continue
+
+        self_check = _load_self_check_report(worktree)
+        emit(
+            session_dir,
+            "group.self_check.report",
+            group_id=group_obj.id,
+            attempt=attempt,
+            detail=(
+                "self-check report present"
+                if self_check.get("present")
+                else "self-check report missing"
+            ),
+            report=self_check,
+        )
 
         # v2.2 amendment side-channel: did the agent write
         # `.otto/amendment_request.json`? If so, validate via
@@ -2433,6 +2522,7 @@ async def _run_slice(
             base_url=base_url,
             raw_log_dir=raw_log_dir / f"attempt-{attempt:02d}",
         )
+        last_evidence_pairs = list(evidence_pairs)
         last_evidence = [ev for _check, ev in evidence_pairs]
         all_pass = all(ev.passed for ev in last_evidence)
         emit(
@@ -2455,6 +2545,57 @@ async def _run_slice(
                 failure_narrative="",
                 scope_warnings=list(accumulated_scope_warnings),
                 contract_deltas=list(accumulated_contract_deltas),
+                self_check=dict(self_check),
+                cost_usd=cost_total,
+                wall_s=time.monotonic() - slice_t0,
+            )
+
+        # If the only failed evidence is clearly browser/check-harness noise,
+        # preserve the usable product diff and let integration/audit judge the
+        # actual app. Re-running the same build agent here usually burns tokens
+        # on generated runner trivia instead of product quality.
+        if (
+            _failed_checks_are_check_infrastructure_noise(evidence_pairs)
+            and _worktree_has_product_changes(worktree)
+        ):
+            failed_details = [
+                evidence.detail
+                for _check, evidence in evidence_pairs
+                if not evidence.passed
+            ]
+            detail = (
+                "degraded_continue: check infrastructure failed; preserving "
+                "usable work for downstream integration/audit instead of "
+                "treating harness/browser noise as product failure"
+            )
+            emit(
+                session_dir,
+                "group.check.feedback",
+                group_id=group_obj.id,
+                attempt=attempt,
+                detail=detail,
+                failures=[
+                    {
+                        "check": type(check).__name__,
+                        "detail": evidence.detail,
+                        "artifacts": [str(path) for path in evidence.artifacts[:5]],
+                        "classification": "check_infrastructure",
+                    }
+                    for check, evidence in evidence_pairs
+                    if not evidence.passed
+                ],
+            )
+            return GroupResult(
+                group_id=group_obj.id,
+                status=GroupStatus.DEGRADED,
+                attempts=attempt,
+                branch=branch,
+                worktree=worktree,
+                last_evidence=last_evidence,
+                failure_narrative=detail + ": " + "; ".join(failed_details[:5]),
+                scope_warnings=list(accumulated_scope_warnings),
+                contract_deltas=list(accumulated_contract_deltas),
+                self_check=dict(self_check),
                 cost_usd=cost_total,
                 wall_s=time.monotonic() - slice_t0,
             )
@@ -2498,6 +2639,29 @@ async def _run_slice(
         )
 
     # Out of retries.
+    if _result_can_continue_degraded(
+        evidence_pairs=last_evidence_pairs,
+        worktree=worktree,
+    ):
+        return GroupResult(
+            group_id=group_obj.id,
+            status=GroupStatus.DEGRADED,
+            attempts=attempt,
+            branch=branch,
+            worktree=worktree,
+            last_evidence=last_evidence,
+            failure_narrative=(
+                last_failure
+                + "\n\ndegraded_continue: non-structural checks still failed "
+                "after bounded attempts; preserving usable work for downstream "
+                "agents and final audit."
+            ),
+            scope_warnings=list(accumulated_scope_warnings),
+            contract_deltas=list(accumulated_contract_deltas),
+            self_check=dict(self_check),
+            cost_usd=cost_total,
+            wall_s=time.monotonic() - slice_t0,
+        )
     return GroupResult(
         group_id=group_obj.id,
         status=GroupStatus.BLOCKED,
@@ -2508,6 +2672,7 @@ async def _run_slice(
         failure_narrative=last_failure or "exceeded per-slice retry budget",
         scope_warnings=list(accumulated_scope_warnings),
         contract_deltas=list(accumulated_contract_deltas),
+        self_check=dict(self_check),
         cost_usd=cost_total,
         wall_s=time.monotonic() - slice_t0,
     )
@@ -2699,6 +2864,8 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     """
     s = agent_input.group
     spec = agent_input.spec
+    build_config = dict((agent_input.config or {}).get("build") or {})
+    self_check_max_passes = max(1, int(build_config.get("self_check_max_passes", 2) or 2))
     lines: list[str] = []
     lines.append(f"# Build slice `{s.id}` — {s.name}")
     lines.append("")
@@ -2824,6 +2991,29 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
                      "create only files matching `## Scope` below)")
     lines.append("")
 
+    slice_features = [
+        feature for feature in spec.features
+        if feature.group_id == s.id or feature.id in set(s.feature_ids or [])
+    ]
+    if slice_features:
+        lines.append("## Product expectations for this slice")
+        lines.append(
+            "Treat these as the user-facing outcomes you own. Build the "
+            "behavior, UI, data handling, and edge states needed for these "
+            "acceptance details; don't reduce them to file edits."
+        )
+        for feature in slice_features:
+            lines.append(f"- `{feature.id}` — {feature.name}")
+            if feature.description:
+                lines.append(f"  Description: {feature.description}")
+            if feature.acceptance_detail:
+                lines.append(f"  Acceptance: {feature.acceptance_detail}")
+            if feature.evidence_kinds:
+                lines.append(
+                    "  Expected evidence: " + ", ".join(feature.evidence_kinds)
+                )
+        lines.append("")
+
     # === SCOPE (primary, with own/dep/shared labeled separately) ===
     transitive_deps = _transitive_deps(s.id, spec)
     dep_owned: list[tuple[str, str]] = []
@@ -2895,6 +3085,37 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
             lines.append(f"  {i}. {_describe_check(c)}")
     else:
         lines.append("  (no checks declared — slice vacuously passes)")
+    lines.append("")
+
+    lines.append("## Build-agent self-check loop")
+    lines.append(
+        "Before returning, run a bounded self-check loop like a senior developer: "
+        "build or typecheck when available, run focused tests for your slice, "
+        "and for web UI work run one real browser/user journey when the local "
+        "browser environment allows it. Fix failures you can diagnose, then "
+        f"rerun the relevant command. Keep this bounded to {self_check_max_passes} self-check/fix "
+        "passes; do not spin on provider/browser environment blockers."
+    )
+    lines.append(
+        "Write `otto_artifacts/self-check.json` before you finish. Use this schema:"
+    )
+    lines.append("```json")
+    lines.append(
+        "{\n"
+        '  "self_check_passes": 1,\n'
+        '  "commands_run": [\n'
+        '    {"cmd": "npm run build", "status": "pass", "detail": ""}\n'
+        "  ],\n"
+        '  "browser_checked": false,\n'
+        '  "browser_detail": "not a web UI slice, or environment blocker detail",\n'
+        '  "remaining_blocker": null\n'
+        "}"
+    )
+    lines.append("```")
+    lines.append(
+        "This report is evidence, not a substitute for Otto's authoritative "
+        "checks after you return."
+    )
     lines.append("")
 
     # === RETRY CONTEXT (if applicable) ===
@@ -3119,6 +3340,131 @@ _FAILED_CHECKS_IN_PROMPT_LIMIT = 5
 _CHECK_LOG_LINES_IN_PROMPT_LIMIT = 80
 _CHECK_LOG_CHARS_IN_PROMPT_LIMIT = 8000
 _CHECK_LOG_LINE_WIDTH_LIMIT = 320
+_SELF_CHECK_REPORT_RELATIVE_PATHS = (
+    Path("otto_artifacts/self-check.json"),
+    Path(".otto/self-check.json"),
+)
+
+
+def _load_self_check_report(worktree: Path) -> dict[str, Any]:
+    """Load the build agent's lightweight self-check report, if present."""
+    for rel in _SELF_CHECK_REPORT_RELATIVE_PATHS:
+        path = worktree / rel
+        if not path.is_file():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {
+                "present": True,
+                "valid": False,
+                "path": str(path),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        if not isinstance(raw, dict):
+            return {
+                "present": True,
+                "valid": False,
+                "path": str(path),
+                "error": "self-check report must be a JSON object",
+            }
+        raw.setdefault("present", True)
+        raw.setdefault("valid", True)
+        raw.setdefault("path", str(path))
+        return raw
+    return {
+        "present": False,
+        "valid": False,
+        "path": "",
+        "error": "missing self-check report",
+    }
+
+
+def _check_kind_name(check: CheckKind) -> str:
+    return type(check).__name__
+
+
+def _failed_checks_are_non_structural(
+    evidence_pairs: list[tuple[CheckKind, Evidence]],
+) -> bool:
+    """True when failures are behavior-level enough to continue best-effort.
+
+    Phase 1 intentionally keeps this simple. Repo/native test failures can
+    include build, import, typecheck, or install breakage, so they remain
+    blocking. Browser/API/state failures usually indicate product behavior
+    gaps; downstream agents may still build useful work on top of the branch.
+    """
+    failed = [
+        (_check_kind_name(check), evidence)
+        for check, evidence in evidence_pairs
+        if not evidence.passed
+    ]
+    if not failed:
+        return False
+    non_structural = {"BrowserJourney", "ApiProbe", "StateInvariant"}
+    return all(kind in non_structural for kind, _evidence in failed)
+
+
+_CHECK_INFRA_FAILURE_PATTERNS: tuple[str, ...] = (
+    "browser journey preflight failed",
+    "unsupported agent-browser command",
+    "unknown command",
+    "machportrendezvousserver",
+    "permission denied (1100)",
+    "execution context was destroyed",
+    "json object must be str, bytes or bytearray",
+    "typeerror: the json object must be",
+)
+
+
+def _evidence_text(evidence: Evidence) -> str:
+    parts = [evidence.detail or ""]
+    raw = evidence.raw or {}
+    for key in (
+        "preflight_error",
+        "stdout",
+        "stderr",
+        "bootstrap_stdout",
+        "bootstrap_stderr",
+    ):
+        value = raw.get(key)
+        if value:
+            parts.append(str(value))
+    return "\n".join(parts).lower()
+
+
+def _failed_checks_are_check_infrastructure_noise(
+    evidence_pairs: list[tuple[CheckKind, Evidence]],
+) -> bool:
+    """True when failures are clearly in the generated browser/check harness.
+
+    These failures are not user-product evidence. Retrying the build agent for
+    them repeatedly burns tokens and often causes the agent to patch the test
+    runner instead of improving the app. Structural repo/native failures still
+    block, and ordinary behavior failures still get the bounded repair path.
+    """
+    failed = [
+        (_check_kind_name(check), evidence)
+        for check, evidence in evidence_pairs
+        if not evidence.passed
+    ]
+    if not failed:
+        return False
+    for kind, evidence in failed:
+        if kind != "BrowserJourney":
+            return False
+        text = _evidence_text(evidence)
+        if not any(pattern in text for pattern in _CHECK_INFRA_FAILURE_PATTERNS):
+            return False
+    return True
+
+
+def _result_can_continue_degraded(
+    *,
+    evidence_pairs: list[tuple[CheckKind, Evidence]],
+    worktree: Path,
+) -> bool:
+    return _worktree_has_product_changes(worktree) and _failed_checks_are_non_structural(evidence_pairs)
 
 
 def _failed_check_repair_narrative(

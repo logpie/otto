@@ -26,6 +26,7 @@ interface Props {
 
 const TERMINAL_GROUP_STATUSES = new Set([
   "landed",
+  "degraded",
   "redundant",
   "blocked",
   "failed_scope",
@@ -36,6 +37,7 @@ function statusTone(status: GroupStatus): PillTone {
     case "landed":
     case "passing":
       return "ok";
+    case "degraded":
     case "redundant":
       return "warn";
     case "in_progress":

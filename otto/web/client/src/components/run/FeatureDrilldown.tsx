@@ -55,6 +55,9 @@ function featureState(verdict: FeatureVerdict | null, buildStatus: GroupStatus):
   if (buildStatus === "passing" || buildStatus === "landed") {
     return {label: "built", tone: "ok", pillTone: "ok"};
   }
+  if (buildStatus === "degraded") {
+    return {label: "degraded", tone: "warn", pillTone: "warn"};
+  }
   if (buildStatus === "in_progress") {
     return {label: "building", tone: "info", pillTone: "info"};
   }

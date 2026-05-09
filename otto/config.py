@@ -85,6 +85,8 @@ DEFAULTS: dict[str, Any] = {
     # Build settings — used inside one i2p run after the Spec DAG exists.
     "build": {
         "group_concurrent":     3,             # max ready Groups built at once
+        "self_check_max_passes": 2,            # build agent's bounded inner loop
+        "self_check_required_for_web": True,
     },
 
     # Workflow simplification defaults. Autonomous builds execute one approved

@@ -126,6 +126,14 @@ def _no_op_failing_check() -> RepoTestCheck:
     return RepoTestCheck(command=("python", "-c", "import sys; sys.exit(1)"), timeout_s=10)
 
 
+def _failing_browser_check() -> BrowserJourney:
+    return BrowserJourney(
+        command=("python", "-c", "import sys; sys.exit(1)"),
+        evidence_globs=(),
+        timeout_s=10,
+    )
+
+
 # ---------------------------------------------------------------------------
 # ready_groups
 # ---------------------------------------------------------------------------
@@ -1078,6 +1086,158 @@ def test_run_build_propagates_block_to_dependent_slice(tmp_path: Path) -> None:
     assert by_id["s2"].failure_narrative == "dep blocked"
 
 
+def test_run_build_degraded_group_unblocks_downstream_after_behavior_failure(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="x",
+                dependencies=[],
+                owned_paths=["feature.txt"],
+                feature_ids=[],
+                checks=[_failing_browser_check()],
+            ),
+            Group(
+                id="s2",
+                name="y",
+                dependencies=["s1"],
+                owned_paths=["downstream.txt"],
+                feature_ids=[],
+                checks=[_no_op_passing_check()],
+            ),
+        ]
+    )
+
+    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        target = input_.worktree / ("feature.txt" if input_.group.id == "s1" else "downstream.txt")
+        target.write_text(input_.group.id, encoding="utf-8")
+        return BuildAgentOutput(succeeded=True)
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+            budget=BuildBudget(per_slice_retries_hard_cap=1),
+        )
+    )
+
+    by_id = {r.group_id: r for r in result.group_results}
+    assert by_id["s1"].status == GroupStatus.DEGRADED
+    assert by_id["s2"].status == GroupStatus.PASSING
+    assert result.degraded_ids == ["s1"]
+    assert result.merge_candidate_ids == ["s1", "s2"]
+
+
+def test_run_build_does_not_retry_obvious_browser_harness_noise(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="browser harness",
+                dependencies=[],
+                owned_paths=["feature.txt"],
+                feature_ids=[],
+                checks=[
+                    BrowserJourney(
+                        command=(
+                            "python",
+                            "-c",
+                            (
+                                "import sys; "
+                                "print('TypeError: the JSON object must be str, bytes or bytearray, not dict'); "
+                                "sys.exit(1)"
+                            ),
+                        ),
+                        evidence_globs=(),
+                        timeout_s=10,
+                    )
+                ],
+            ),
+        ]
+    )
+    attempts: list[int] = []
+
+    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        attempts.append(input_.attempt)
+        (input_.worktree / "feature.txt").write_text("usable app diff", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True)
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+            budget=BuildBudget(per_slice_retries_hard_cap=3),
+        )
+    )
+
+    assert attempts == [1]
+    assert result.group_results[0].status == GroupStatus.DEGRADED
+    assert "check infrastructure failed" in result.group_results[0].failure_narrative
+
+
+def test_run_build_blocks_structural_repo_check_failure_even_with_diff(
+    tmp_path: Path,
+) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+
+    spec = _spec(
+        [
+            Group(
+                id="s1",
+                name="x",
+                dependencies=[],
+                owned_paths=["feature.txt"],
+                feature_ids=[],
+                checks=[_no_op_failing_check()],
+            ),
+            Group(
+                id="s2",
+                name="y",
+                dependencies=["s1"],
+                owned_paths=[],
+                feature_ids=[],
+                checks=[_no_op_passing_check()],
+            ),
+        ]
+    )
+
+    async def fake_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        (input_.worktree / "feature.txt").write_text("broken", encoding="utf-8")
+        return BuildAgentOutput(succeeded=True)
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=fake_agent,
+            budget=BuildBudget(per_slice_retries_hard_cap=1),
+        )
+    )
+
+    by_id = {r.group_id: r for r in result.group_results}
+    assert by_id["s1"].status == GroupStatus.BLOCKED
+    assert by_id["s2"].status == GroupStatus.BLOCKED
+
+
 # ---------------------------------------------------------------------------
 # run_build — scope violation
 # ---------------------------------------------------------------------------
@@ -1411,6 +1571,16 @@ def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:
     )
     spec = _spec([s])
     spec.intent = "social network MVP"
+    spec.features = [
+        Feature(
+            id="build login form",
+            name="Login form",
+            description="User can sign in from the browser",
+            acceptance_detail="Submitting valid credentials shows the signed-in user",
+            evidence_kinds=["BrowserJourney"],
+            group_id="s1",
+        )
+    ]
     inp = BuildAgentInput(
         spec=spec,
         group=s,
@@ -1424,6 +1594,10 @@ def test_build_agent_prompt_contains_required_context(tmp_path: Path) -> None:
     assert "Auth flow" in prompt
     assert "build login form" in prompt
     assert "wire to API" in prompt
+    assert "Product expectations for this slice" in prompt
+    assert "Submitting valid credentials shows the signed-in user" in prompt
+    assert "Build-agent self-check loop" in prompt
+    assert "otto_artifacts/self-check.json" in prompt
     assert "app/auth/*" in prompt
     assert "social network MVP" in prompt
     assert "Previous attempt failed" not in prompt

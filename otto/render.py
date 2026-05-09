@@ -232,7 +232,11 @@ def compose_proof_packet(
                 mres.failure_narrative
                 or "No product diff landed; dependency was satisfied by already-integrated work."
             )
-        elif bres and bres.status in (GroupStatus.BLOCKED, GroupStatus.FAILED_SCOPE):
+        elif bres and bres.status in (
+            GroupStatus.BLOCKED,
+            GroupStatus.FAILED_SCOPE,
+            GroupStatus.DEGRADED,
+        ):
             failure = bres.failure_narrative
 
         group_packets.append(
