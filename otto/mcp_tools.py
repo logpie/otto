@@ -87,7 +87,16 @@ def create_otto_mcp_server(
     )
     async def submit_subtask(args: dict[str, Any]) -> dict[str, Any]:
         intent = (args.get("intent") or "").strip()
-        depends_on = list(args.get("depends_on") or [])
+        # depends_on may be a list, a comma-joined string, or a single task id.
+        # Don't iterate strings as if they were lists (the LLM frequently
+        # passes the raw id instead of [id]).
+        raw_deps = args.get("depends_on") or []
+        if isinstance(raw_deps, str):
+            depends_on = [s.strip() for s in raw_deps.split(",") if s.strip()]
+        elif isinstance(raw_deps, (list, tuple)):
+            depends_on = [str(s).strip() for s in raw_deps if str(s).strip()]
+        else:
+            depends_on = []
         if not intent:
             return _err("submit_subtask: 'intent' is required and must be non-empty.")
 
@@ -165,7 +174,15 @@ def create_otto_mcp_server(
         },
     )
     async def verify(args: dict[str, Any]) -> dict[str, Any]:
-        scope_ids = list(args.get("feature_scope_ids") or [])
+        # Some Claude calls pass scope ids as a comma-joined string instead of
+        # a list. Normalise both shapes; fall back to empty (= all journeys).
+        raw = args.get("feature_scope_ids") or []
+        if isinstance(raw, str):
+            scope_ids = [s.strip() for s in raw.split(",") if s.strip()]
+        elif isinstance(raw, (list, tuple)):
+            scope_ids = [str(s).strip() for s in raw if str(s).strip()]
+        else:
+            scope_ids = []
         try:
             from otto.lead_verify import run_verify_for_lead
 

@@ -45,6 +45,48 @@ def child_worktree_path(project_dir: Path, child_task_id: str) -> Path:
     return project_dir / ".worktrees" / safe
 
 
+def ensure_initial_commit(project_dir: Path) -> bool:
+    """Make sure the repo has at least one commit so refs/branches can be created.
+
+    Greenfield projects often start with `git init` and no commits — every
+    `git branch <name>` then fails with "fatal: not a valid object name: 'HEAD'".
+    Stage anything tracked plus any existing files, and commit. If the index
+    ends up empty, commit --allow-empty so HEAD exists.
+
+    Returns True if a commit was created, False if HEAD already existed.
+    Best-effort: returns False on any failure.
+    """
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=str(project_dir),
+            capture_output=True,
+        )
+        if head.returncode == 0:
+            return False
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=str(project_dir),
+            capture_output=True,
+        )
+        commit = subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "v5 init"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+        )
+        if commit.returncode != 0:
+            logger.warning(
+                "ensure_initial_commit: git commit failed: %s",
+                (commit.stderr or "").strip(),
+            )
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ensure_initial_commit crashed: %s", exc)
+        return False
+
+
 def ensure_branch_exists(project_dir: Path, branch: str, base_ref: str = "HEAD") -> bool:
     """Idempotently create ``branch`` from ``base_ref`` if it doesn't exist.
 

@@ -166,6 +166,18 @@ async def run_lead(
             except Exception as exc:  # noqa: BLE001 — best-effort; Lead can run inline
                 logger.warning("could not configure build/test AgentDefinitions: %s", exc)
 
+            # Lead is an orchestrator: no direct file edits. The build/test
+            # AgentDefinitions above keep Write/Edit; the Lead itself cannot.
+            # Bash stays so the Lead can run `git status`, `npm test`, etc.
+            try:
+                existing_disallowed = list(getattr(options, "disallowed_tools", None) or [])
+                for forbidden in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+                    if forbidden not in existing_disallowed:
+                        existing_disallowed.append(forbidden)
+                options.disallowed_tools = existing_disallowed
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning("could not enforce Lead-orchestrator tool ACL: %s", exc)
+
         # Render the prompt.
         tier = str(config.get("v5_tier") or "auto")
         prompt_text = _render_prompt(

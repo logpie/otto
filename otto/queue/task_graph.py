@@ -140,15 +140,24 @@ def record_task(
     depends_on: list[str] | None = None,
     decomposition: Decomposition = "unknown",
 ) -> None:
-    """Atomically register a task in the graph (or update if it exists)."""
+    """Atomically register a task in the graph (or update if it exists).
+
+    Updates are non-destructive: missing fields preserve the existing value
+    rather than overwriting with the arg's default. This matters when the
+    same task is registered twice — once by ``submit_subtask`` (which knows
+    the parent) and again by the child's own ``run_lead`` (which does not).
+    """
     with _locked_graph(project_dir) as (_path, graph):
         existing = graph["tasks"].get(task_id, {})
         entry: dict[str, Any] = {
-            "parent_task_id": parent_task_id,
-            "intent": intent,
+            "parent_task_id": parent_task_id if parent_task_id is not None
+                              else existing.get("parent_task_id"),
+            "intent": intent or existing.get("intent", ""),
             "decomposition": existing.get("decomposition", decomposition),
             "verdict": existing.get("verdict"),
-            "integration_branch": integration_branch,
+            "integration_branch": integration_branch
+                                   if integration_branch is not None
+                                   else existing.get("integration_branch"),
             "started_at": existing.get("started_at") or _now_iso(),
             "completed_at": existing.get("completed_at"),
             "cost_usd": existing.get("cost_usd", 0.0),

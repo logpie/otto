@@ -96,6 +96,17 @@ async def run_v5_pipeline(
     result = V5RunResult()
 
     try:
+        # ---- Phase A0: Repo hygiene ----
+        # Greenfield projects often start with `git init` and no commits.
+        # Without an initial commit, every `git branch i2p/...` creation fails
+        # with "not a valid object name: 'HEAD'", which cascades into worktree
+        # failures and serialised execution.
+        try:
+            from otto.v5_branching import ensure_initial_commit
+            ensure_initial_commit(project_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ensure_initial_commit failed: %s", exc)
+
         # ---- Phase A: Root session setup ----
         root_session_id = _new_session_id()
         root_session_dir = _paths.session_dir(project_dir, root_session_id)
