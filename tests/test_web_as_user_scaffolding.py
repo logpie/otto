@@ -103,6 +103,7 @@ def test_browser_bundle_helper_uses_build_not_commit_gate_by_default(
     monkeypatch.delenv("OTTO_BROWSER_REQUIRE_COMMITTED_BUNDLE", raising=False)
     monkeypatch.setattr(build_bundle, "STATIC_ASSETS_DIR", assets)
     monkeypatch.setattr(build_bundle, "_run_npm", lambda script: calls.append(script))
+    monkeypatch.setattr(build_bundle, "_restore_volatile_stamp_if_possible", lambda: None)
     if hasattr(build_bundle.ensure_bundle_built, "_done"):
         delattr(build_bundle.ensure_bundle_built, "_done")
 

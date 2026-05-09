@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Final
 
@@ -53,6 +54,8 @@ def ensure_bundle_built() -> Path:
     )
     _run_npm(script)
     _verify_assets_present(reason="npm run web:build succeeded but produced no assets")
+    if script == "web:build":
+        _restore_volatile_stamp_if_possible()
     setattr(ensure_bundle_built, "_done", True)
     return STATIC_ASSETS_DIR
 
@@ -83,3 +86,14 @@ def _verify_assets_present(*, reason: str) -> None:
             + f"found js={[p.name for p in js_files]} css={[p.name for p in css_files]}."
         )
         raise BundleBuildError(msg)
+
+
+def _restore_volatile_stamp_if_possible() -> None:
+    """Undo build-stamp timestamp/SHA churn when bundle content is unchanged."""
+    subprocess.run(
+        [sys.executable, "scripts/check_bundle_committed.py"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
