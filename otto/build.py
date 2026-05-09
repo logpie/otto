@@ -1502,6 +1502,7 @@ async def run_build(
     component_results: list[ComponentResult] = []
     total_t0 = time.monotonic()
     total_cost = 0.0
+    provider_terminal_failure = ""
 
     # Resume: skip ids the prior attempt already landed. We seed
     # completed_ids so dependent units become ready, and synthesise
@@ -1629,13 +1630,17 @@ async def run_build(
         slice_result: GroupResult,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        nonlocal total_cost
+        nonlocal total_cost, provider_terminal_failure
         total_cost += slice_result.cost_usd
         results.append(slice_result)
         if slice_result.status in (GroupStatus.PASSING, GroupStatus.DEGRADED):
             completed_ids.add(slice_result.group_id)
         else:
             blocked_ids.add(slice_result.group_id)
+            if _is_provider_terminal_failure(slice_result.failure_narrative):
+                provider_terminal_failure = _provider_terminal_failure_narrative(
+                    slice_result.failure_narrative
+                )
         payload = {
             "attempts": slice_result.attempts,
             "wall_s": slice_result.wall_s,
@@ -1752,6 +1757,8 @@ async def run_build(
         )
 
     while True:
+        if provider_terminal_failure:
+            break
         ready = ready_groups(spec, completed_ids, skipped_ids=blocked_ids)
         ready_comps = ready_components(spec, completed_ids, skipped_ids=blocked_ids)
         if not ready and not ready_comps:
@@ -1883,6 +1890,10 @@ async def run_build(
                 completed_ids.add(next_component.id)
             else:
                 blocked_ids.add(next_component.id)
+                if _is_provider_terminal_failure(comp_result.failure_narrative):
+                    provider_terminal_failure = _provider_terminal_failure_narrative(
+                        comp_result.failure_narrative
+                    )
             _emit_component_state(
                 next_component.id,
                 comp_result.status,
@@ -1991,6 +2002,8 @@ async def run_build(
                     )
 
             _record_group_result(slice_result)
+        if provider_terminal_failure:
+            break
 
     # Mark slices that never ran (because a dep was blocked) as PENDING+blocked.
     pending_unreachable = [
@@ -1999,6 +2012,11 @@ async def run_build(
         if s.id not in completed_ids and s.id not in blocked_ids
     ]
     for s in pending_unreachable:
+        narrative = (
+            f"provider unavailable: {provider_terminal_failure}"
+            if provider_terminal_failure
+            else "dep blocked"
+        )
         results.append(
             GroupResult(
                 group_id=s.id,
@@ -2006,10 +2024,10 @@ async def run_build(
                 attempts=0,
                 branch="",
                 worktree=project_dir,
-                failure_narrative="dep blocked",
+                failure_narrative=narrative,
             )
         )
-        _emit_state(s.id, GroupStatus.BLOCKED, {"narrative": "dep blocked"})
+        _emit_state(s.id, GroupStatus.BLOCKED, {"narrative": narrative})
 
     # A1b.3: Components that never ran (because a dep was blocked) are
     # also recorded as BLOCKED, mirroring Group dep-block propagation.
@@ -2020,6 +2038,11 @@ async def run_build(
         and c.id not in {r.component_id for r in component_results}
     ]
     for c in pending_unreachable_components:
+        narrative = (
+            f"provider unavailable: {provider_terminal_failure}"
+            if provider_terminal_failure
+            else "dep blocked"
+        )
         component_results.append(
             ComponentResult(
                 component_id=c.id,
@@ -2027,10 +2050,10 @@ async def run_build(
                 attempts=0,
                 branch="",
                 worktree=project_dir,
-                failure_narrative="dep blocked",
+                failure_narrative=narrative,
             )
         )
-        _emit_component_state(c.id, ComponentStatus.BLOCKED, {"narrative": "dep blocked"})
+        _emit_component_state(c.id, ComponentStatus.BLOCKED, {"narrative": narrative})
 
     return BuildResult(
         spec_session_dir=session_dir,
@@ -2336,6 +2359,21 @@ async def _run_slice(
                 attempt=attempt,
                 detail=last_failure,
             )
+            if _is_provider_terminal_failure(last_failure):
+                return GroupResult(
+                    group_id=group_obj.id,
+                    status=GroupStatus.BLOCKED,
+                    attempts=attempt,
+                    branch=branch,
+                    worktree=worktree,
+                    last_evidence=last_evidence,
+                    failure_narrative=_provider_terminal_failure_narrative(last_failure),
+                    scope_warnings=list(accumulated_scope_warnings),
+                    contract_deltas=list(accumulated_contract_deltas),
+                    self_check=dict(self_check),
+                    cost_usd=cost_total,
+                    wall_s=time.monotonic() - slice_t0,
+                )
             continue
 
         cost_total += agent_output.cost_usd
@@ -2355,6 +2393,21 @@ async def _run_slice(
                 attempt=attempt,
                 detail=last_failure,
             )
+            if _is_provider_terminal_failure(last_failure):
+                return GroupResult(
+                    group_id=group_obj.id,
+                    status=GroupStatus.BLOCKED,
+                    attempts=attempt,
+                    branch=branch,
+                    worktree=worktree,
+                    last_evidence=last_evidence,
+                    failure_narrative=_provider_terminal_failure_narrative(last_failure),
+                    scope_warnings=list(accumulated_scope_warnings),
+                    contract_deltas=list(accumulated_contract_deltas),
+                    self_check=dict(self_check),
+                    cost_usd=cost_total,
+                    wall_s=time.monotonic() - slice_t0,
+                )
             continue
 
         self_check = _load_self_check_report(worktree)
@@ -3417,6 +3470,41 @@ _CHECK_INFRA_FAILURE_PATTERNS: tuple[str, ...] = (
     "json object must be str, bytes or bytearray",
     "typeerror: the json object must be",
 )
+
+
+_PROVIDER_TERMINAL_FAILURE_PATTERNS: tuple[str, ...] = (
+    "you've hit your usage limit",
+    "you have hit your usage limit",
+    "usage limit",
+    "purchase more credits",
+    "try again at",
+    "rate limit",
+    "rate_limit",
+    "quota",
+    "insufficient_quota",
+    "payment required",
+    "not logged in",
+    "unauthorized",
+    "authentication",
+    "permission denied by provider",
+)
+
+
+def _is_provider_terminal_failure(detail: str) -> bool:
+    text = str(detail or "").lower()
+    return any(pattern in text for pattern in _PROVIDER_TERMINAL_FAILURE_PATTERNS)
+
+
+def _provider_terminal_failure_narrative(detail: str) -> str:
+    cleaned = " ".join(str(detail or "").split())
+    if cleaned.startswith("provider_terminal_failure:"):
+        return cleaned
+    if len(cleaned) > 500:
+        cleaned = cleaned[:497] + "..."
+    return (
+        "provider_terminal_failure: provider capacity/auth/quota error is not "
+        f"repairable by retrying this slice now; {cleaned}"
+    )
 
 
 def _evidence_text(evidence: Evidence) -> str:

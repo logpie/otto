@@ -1053,6 +1053,50 @@ def test_run_build_blocks_after_retry_exhaustion(tmp_path: Path) -> None:
     assert "no progress" in r.failure_narrative or "checks failed" in r.failure_narrative
 
 
+def test_run_build_stops_dispatch_on_provider_terminal_failure(tmp_path: Path) -> None:
+    _init_git(tmp_path)
+    session_dir = tmp_path / "_session"
+    session_dir.mkdir()
+    calls: list[str] = []
+
+    spec = _spec(
+        [
+            Group(id="s1", name="first", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
+            Group(id="s2", name="second", dependencies=[], owned_paths=[], feature_ids=[], checks=[]),
+        ]
+    )
+
+    async def failing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+        calls.append(input_.group.id)
+        return BuildAgentOutput(
+            succeeded=False,
+            detail=(
+                "agent error: You've hit your usage limit. Visit "
+                "https://chatgpt.com/codex/settings/usage to purchase more "
+                "credits or try again later."
+            ),
+        )
+
+    result = asyncio.run(
+        run_build(
+            spec,
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            build_agent=failing_agent,
+            budget=BuildBudget(per_group_retries_hard_cap=5),
+        )
+    )
+
+    by_id = {r.group_id: r for r in result.group_results}
+    assert calls == ["s1"]
+    assert by_id["s1"].status == GroupStatus.BLOCKED
+    assert by_id["s1"].attempts == 1
+    assert by_id["s1"].failure_narrative.startswith("provider_terminal_failure:")
+    assert by_id["s2"].status == GroupStatus.BLOCKED
+    assert by_id["s2"].attempts == 0
+    assert by_id["s2"].failure_narrative.startswith("provider unavailable:")
+
+
 def test_run_build_propagates_block_to_dependent_slice(tmp_path: Path) -> None:
     _init_git(tmp_path)
     session_dir = tmp_path / "_session"
