@@ -39,31 +39,42 @@ Is this ONE coherent unit of user-visible work, or MULTIPLE strategic areas?
   emitting, your job is done at this stage; Otto will run the children and
   invoke an integration Lead at this same task later.
 
-  CRITICAL — MINIMIZE dependencies. Default to **flat**: each feature
-  depends ONLY on the architect (or core/foundation if you have one),
-  not on its sibling features. A dependency means "this task literally
-  cannot start until that one merges its branch" — i.e. its build agent
-  needs to import a symbol from the other's branch. Sharing
-  *runtime* state (both pages read the same Zustand store) is NOT a
-  dependency — both can be built in parallel against the same store
-  interface defined in the architect's CHARTER.
+  Choose the DAG honestly. `depends_on` controls execution order, which
+  trades wall-clock speed against merge safety. The cost of getting it
+  wrong runs in both directions:
 
-  WRONG (this finance-dashboard pattern):
-    architect → core → dashboard → filter → budget → csv → ui-polish
-    (linear chain — every feature waits, no parallelism)
+    - **Over-chained** (more `depends_on` than needed): everything runs
+      serially. Wallclock = sum of child times. No parallelism even when
+      `--max-parallel` is high. Tree budget burns waiting.
 
-  RIGHT (independent features fan out):
-    architect → core → {dashboard, filter, budget, csv} → ui-polish
-    (4-way parallel after core; ui-polish waits on all 4)
+    - **Under-chained** (fewer `depends_on` than needed): siblings run
+      in parallel and edit the same shared files (e.g. each feature
+      adds a route to App.tsx, an entry to Nav.tsx, a slice to
+      store/index.ts, deps to package.json). The integration Lead then
+      has to resolve N-way merge conflicts on every shared file, often
+      with no clean answer. Real source conflicts are NOT auto-resolved.
 
-  Wrong DAGs cost wall time and burn tree budget. The integration Lead
-  handles cross-feature conflicts at merge time, so over-declaring
-  dependencies doesn't make integration safer — it just serialises.
+  The judgment call: predict whether your siblings will touch the same
+  source files. If yes, chain them so each one merges cleanly on top of
+  the previous. If no, fan them out for parallelism.
 
-  Pass `depends_on=[A's task_id]` only when:
-    1. B's build agent literally imports a function/type defined by A.
-    2. A produces a config/migration/schema that B consumes at build time.
-    3. A is the architect / core foundation (common case for unified products).
+  Heuristics that usually work:
+    - Different runtimes / packages (web client + REST API + CLI):
+      fan out — no shared files possible.
+    - Features in a single SPA where each owns its own page/component
+      tree and the architect already laid down the routing/nav/store
+      contract: usually safe to fan out.
+    - Features in a single SPA that all need to register against shared
+      files (App.tsx routes, Nav.tsx entries, store/index.ts barrel,
+      shared package.json deps): chain them, OR give the architect a
+      richer scope so it pre-installs everything those siblings would
+      otherwise contend over.
+
+  When in doubt, lean parallel for early features (architect handles the
+  shell; first 1-2 features may chain to validate the contract), then
+  fan out the rest. The integration Lead reports honestly if merge
+  conflicts surface — getting one feature merge_blocked is recoverable;
+  getting all features serialised is wall time you can't get back.
 
   ### Architect-first for unified products
 
