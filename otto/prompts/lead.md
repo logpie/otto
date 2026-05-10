@@ -42,6 +42,41 @@ Is this ONE coherent unit of user-visible work, or MULTIPLE strategic areas?
   CRITICAL — declare dependencies. If subtask B depends on subtask A,
   pass `depends_on=[A's task_id]`.
 
+  ### Architect-first for unified products
+
+  If the children will share a stack (single React SPA, single Python service,
+  single Rust crate — i.e. one runtime, one package manifest, shared state),
+  decomposition without an architect causes accidental coherence: the first
+  child to land picks JSX/JS where TS would be better, plain CSS where Tailwind
+  was implied, no chart library when "usable charts" was in the intent.
+  Downstream features inherit those local choices as global constraints.
+
+  AVOID THIS by emitting an **Architect** subtask FIRST when the children will
+  share a stack. The architect's job is to:
+    1. Read the full intent and behavior_journeys.
+    2. Pick concrete tooling: language (TS vs JS), state pattern, styling
+       (Tailwind / CSS modules / styled-components), key libraries
+       (Recharts / Chart.js / d3 — if the intent mentions charts), HTTP
+       client, test runner config.
+    3. Write `CHARTER.md` at the repo root with sections:
+        - Stack & versions
+        - Style/UX conventions (theme tokens, spacing, typography)
+        - State management pattern + storage layout
+        - Library choices with rationale (esp. for items the intent
+          explicitly named)
+        - Folder/module conventions (where pages, components, hooks live)
+    4. Scaffold the minimum project shell (package.json / pyproject.toml,
+       config files, empty src/ tree consistent with the conventions). NO
+       feature code.
+    5. Commit `CHARTER.md` plus the shell.
+
+  Then emit feature subtasks with `depends_on=[architect_task_id]`. Each feature
+  Lead's build agent must read CHARTER.md first and respect it.
+
+  Skip the Architect for genuinely separable subsystems on different runtimes
+  (e.g., web client + REST API + CLI tool with three different package
+  managers); each subsystem owns its own stack.
+
 ## Step 2 — Execute (only if you called begin_inline).
 
 You are an orchestrator. Do NOT use Read/Write/Edit/Bash to write app code

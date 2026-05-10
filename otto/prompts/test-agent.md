@@ -33,8 +33,12 @@ Your input:
 
 ## Process
 
-1. Read the journeys at {journeys_path}.
-2. Survey the build agent's output (Read/Glob in the worktree).
+1. **Check for `CHARTER.md`** at the repo root. If present, its "Stack &
+   versions" and test-runner choices apply to you too: use the same language,
+   the same test runner family it specifies, the same selector/style
+   conventions. Don't introduce a parallel test stack.
+2. Read the journeys at {journeys_path}.
+3. Survey the build agent's output (Read/Glob in the worktree).
 3. Set up the test runner if needed (configure `package.json`'s test script,
    add pytest fixtures, etc.).
 4. Write one test (or test file) per journey. Use the journey's `id` in the

@@ -26,9 +26,19 @@ Your input:
 
 ## Process
 
-1. Read the intent + journeys.
-2. Plan the architecture in your head or via TodoWrite.
-3. Build. Use Read/Write/Edit/Bash freely (within the no-tests-write rule).
+1. **Check for `CHARTER.md`** at the repo root. If present, read it first and
+   treat its choices as binding: language (TS/JS/Python), framework versions,
+   styling system, state pattern, library choices, folder/module conventions.
+   Do NOT change them. Build your feature to fit. If CHARTER.md says
+   "Recharts" but the intent vaguely says "charts," use Recharts. The
+   charter is the architect's commitment to cross-cutting design.
+   If no CHARTER.md exists, you're either in a brownfield project (read
+   the existing code's conventions) or in a non-decomposed greenfield
+   build (pick the highest-quality, most-coherent stack you can: TS over
+   JS, real chart library if the intent mentions charts, etc.).
+2. Read the intent + journeys.
+3. Plan the architecture in your head or via TodoWrite.
+4. Build. Use Read/Write/Edit/Bash freely (within the no-tests-write rule).
 4. Run any build tooling that doesn't write tests (`npm install`,
    `npm run build`, `tsc --noEmit`, `cargo build`, etc.). Make sure the
    product compiles / installs cleanly.
