@@ -152,6 +152,13 @@ def create_otto_mcp_server(
         # job; we just record the relationship so the watcher can pick it up.
         from otto.queue.subtask import enqueue_subtask
 
+        # Children of THIS Lead merge into THIS Lead's own integration branch
+        # (i2p/<task_id>/integration), NOT the branch this Lead itself merges
+        # back into. Passing None lets enqueue_subtask compute the namespaced
+        # default; passing this Lead's outer integration_branch would put
+        # children on the wrong branch and break worktree isolation when an
+        # integration Lead later tries to check out the same branch the
+        # project_dir is already on.
         try:
             child_task_id = enqueue_subtask(
                 project_dir=project_dir,
@@ -159,7 +166,7 @@ def create_otto_mcp_server(
                 parent_session_dir=session_dir,
                 intent=intent,
                 depends_on=depends_on,
-                parent_integration_branch=integration_branch,
+                parent_integration_branch=None,
             )
         except Exception as exc:  # noqa: BLE001 — best-effort: report to Lead
             logger.warning("submit_subtask failed: %s", exc)
