@@ -801,18 +801,39 @@ def _build_child_summaries(
     parent_task_id: str,
     child_results: dict[str, LeadResult],
 ) -> list[dict[str, Any]]:
-    """Build the child summary list passed to integration Lead's prompt."""
+    """Build the child summary list passed to integration Lead's prompt.
+
+    For merge_blocked children, include the build branch name and a
+    pointer so the integration Lead can choose to hand-merge instead of
+    re-implementing from scratch. The work is preserved on the branch;
+    only the mechanical merge failed.
+    """
+    from otto.v5_branching import child_branch_name
     out: list[dict[str, Any]] = []
     for cid in children_of(project_dir, parent_task_id):
         entry = get_task(project_dir, cid) or {}
         result = child_results.get(cid)
-        out.append({
+        verdict = (result.verdict if result else entry.get("verdict") or "unknown")
+        record: dict[str, Any] = {
             "task_id": cid,
             "intent": entry.get("intent", ""),
-            "verdict": (result.verdict if result else entry.get("verdict") or "unknown"),
+            "verdict": verdict,
             "summary": (result.final_text if result else "")[:200],
             "cost_usd": result.cost_usd if result else float(entry.get("cost_usd", 0.0)),
-        })
+        }
+        # Surface the build branch for merge_blocked children so the
+        # integration Lead can recover their work via git rather than
+        # dispatching the build agent to rewrite it.
+        if verdict == "merge_blocked":
+            record["build_branch"] = child_branch_name(cid)
+            record["recovery_hint"] = (
+                f"Work passed verify but failed to merge. Try "
+                f"`git merge {record['build_branch']}` in this worktree, "
+                f"resolve any remaining conflicts by hand (most are likely "
+                f"trivial), and commit. DO NOT re-implement the feature "
+                f"from scratch — the source files exist on that branch."
+            )
+        out.append(record)
     return out
 
 

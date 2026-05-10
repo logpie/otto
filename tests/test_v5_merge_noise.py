@@ -101,7 +101,7 @@ def test_merge_auto_resolves_when_gitignore_says_so(tmp_path: Path) -> None:
         parent_integration_branch=integration,
     )
     assert ok, f"merge should succeed when gitignore covers the conflict: {detail}"
-    assert "auto-resolved noise" in detail
+    assert "noise" in detail
     assert (repo / "feature.txt").read_text() == "A\n"
 
 

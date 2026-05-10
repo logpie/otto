@@ -13,6 +13,27 @@ Your input:
 Your CWD is the integration worktree where all children's work has been
 merged. Treat it as a normal codebase.
 
+## Step 0 — Recover merge_blocked siblings BEFORE doing anything else.
+
+Read CHILDREN'S VERDICTS. For each child with `verdict=merge_blocked`,
+the `recovery_hint` field tells you which build branch holds the work.
+**That work passed verify. Only the mechanical merge failed.** Trying to
+land it is almost always faster and cheaper than re-implementing.
+
+For each merge_blocked child:
+  1. `git merge <build_branch>` (the branch named in `build_branch`).
+  2. If conflicts, inspect them by hand. They are usually trivial:
+     `package-lock.json` regen drift, `package.json` script additions,
+     duplicate entries in shared config. Resolve them by combining both
+     sides (union deps/scripts, prefer the parent's version on hard
+     disagreements).
+  3. Commit the merge.
+
+Only after attempting to land merge_blocked work should you consider
+re-implementing anything. Re-implementing throws away a passing build,
+costs another build/test/verify cycle, and is rarely necessary — most
+merge conflicts are mechanical, not semantic.
+
 ## Step 1 — Inspect the integrated state.
 
 Use Read/Glob/Grep to survey what your children produced. Look for:

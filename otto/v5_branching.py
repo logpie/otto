@@ -323,49 +323,100 @@ def merge_branch_into(
             text=True,
         )
         files = [f for f in (diag.stdout or "").strip().split("\n") if f]
-        # Ask the project's own gitignore which conflicts are noise.
+        # Layer 2: gitignore-aware noise auto-resolve.
         noise_set = _gitignored_paths(project_dir, files)
         noise_files = [f for f in files if f in noise_set]
-        real_files = [f for f in files if f not in noise_set]
+        non_noise = [f for f in files if f not in noise_set]
 
-        if files and not real_files:
-            # All conflicts are on artifacts. Auto-resolve --ours, then commit.
+        # Layer 3: structured-file merge drivers for non-noise conflicts.
+        from otto.v5_merge_drivers import find_driver, is_discard_signal
+        structured_resolved: list[str] = []
+        truly_blocked: list[str] = []
+        for f in non_noise:
+            driver = find_driver(f)
+            if driver is None:
+                truly_blocked.append(f)
+                continue
+            # Read --ours and --theirs versions and ask the driver to merge.
+            ours_proc = subprocess.run(
+                ["git", "show", f":2:{f}"],
+                cwd=str(project_dir), capture_output=True, text=True,
+            )
+            theirs_proc = subprocess.run(
+                ["git", "show", f":3:{f}"],
+                cwd=str(project_dir), capture_output=True, text=True,
+            )
+            if ours_proc.returncode != 0 or theirs_proc.returncode != 0:
+                truly_blocked.append(f)
+                continue
+            merged = driver(ours_proc.stdout, theirs_proc.stdout, None)
+            if merged is None:
+                truly_blocked.append(f)
+                continue
+            full_path = project_dir / f
+            if is_discard_signal(merged):
+                # Lockfile — delete it. The next build will regenerate.
+                try:
+                    full_path.unlink(missing_ok=True)
+                    subprocess.run(
+                        ["git", "rm", "-f", "--", f],
+                        cwd=str(project_dir), capture_output=True,
+                    )
+                except OSError:
+                    truly_blocked.append(f)
+                    continue
+            else:
+                try:
+                    full_path.parent.mkdir(parents=True, exist_ok=True)
+                    full_path.write_text(merged, encoding="utf-8")
+                    subprocess.run(
+                        ["git", "add", "--", f],
+                        cwd=str(project_dir), capture_output=True,
+                    )
+                except OSError:
+                    truly_blocked.append(f)
+                    continue
+            structured_resolved.append(f)
+
+        # If everything resolvable (noise or structured), complete the merge.
+        if files and not truly_blocked:
+            # Apply noise resolution.
             for f in noise_files:
                 subprocess.run(
                     ["git", "checkout", "--ours", "--", f],
-                    cwd=str(project_dir),
-                    capture_output=True,
+                    cwd=str(project_dir), capture_output=True,
                 )
                 subprocess.run(
                     ["git", "add", "--", f],
-                    cwd=str(project_dir),
-                    capture_output=True,
+                    cwd=str(project_dir), capture_output=True,
                 )
+            parts: list[str] = []
+            if noise_files:
+                parts.append(f"{len(noise_files)} noise")
+            if structured_resolved:
+                parts.append(f"{len(structured_resolved)} structured")
             commit = subprocess.run(
                 [
                     "git", "commit", "--no-edit",
-                    "-m", f"merge {branch} (auto-resolved {len(noise_files)} artifact conflicts)",
+                    "-m", f"merge {branch} (auto-resolved: {'; '.join(parts) or 'clean'})",
                 ],
-                cwd=str(project_dir),
-                capture_output=True,
-                text=True,
+                cwd=str(project_dir), capture_output=True, text=True,
             )
             if commit.returncode == 0:
                 return True, (
                     f"merged {branch} into {parent_integration_branch} "
-                    f"(auto-resolved noise: {', '.join(noise_files[:3])}"
-                    f"{'...' if len(noise_files) > 3 else ''})"
+                    f"(auto-resolved: {'; '.join(parts) or 'clean'})"
                 )
             # Auto-resolve commit failed; fall through to abort.
 
-        # Real source conflict (or auto-resolve failed) — abort cleanly.
+        # Layer 4 fallback would dispatch an LLM resolver here; for now,
+        # surface the unresolvable files honestly.
         subprocess.run(
             ["git", "merge", "--abort"],
-            cwd=str(project_dir),
-            capture_output=True,
+            cwd=str(project_dir), capture_output=True,
         )
-        if real_files:
-            return False, f"conflict on: {', '.join(real_files[:5])}"
+        if truly_blocked:
+            return False, f"conflict on: {', '.join(truly_blocked[:5])}"
         return False, f"conflict on: {', '.join(files[:5]) or '?'}"
     except Exception as exc:  # noqa: BLE001
         return False, f"merge crashed: {exc}"
