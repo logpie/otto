@@ -353,7 +353,7 @@ async def _process_children(
                             on_event=on_event,
                         )
                         # Run this child's integration Lead.
-                        await _run_integration(
+                        integ_result = await _run_integration(
                             project_dir=project_dir,
                             task_id=tid,
                             intent=(get_task(project_dir, tid) or {}).get("intent", ""),
@@ -362,6 +362,48 @@ async def _process_children(
                             integration_results=integration_results,
                             on_event=on_event,
                         )
+                        # Propagate this subtree's integration up to the
+                        # parent's integration branch. WITHOUT THIS, a
+                        # decomposed child's work stays orphaned on
+                        # i2p/integ/<tid> and never lands on main — the
+                        # chat-platform decomp shipped a broken product
+                        # because the web subtree never propagated.
+                        if integ_result.verdict in ("pass", "partial", "unverified"):
+                            try:
+                                from otto.v5_branching import (
+                                    integration_branch_name,
+                                    merge_branch_into,
+                                )
+                                child_entry = get_task(project_dir, tid) or {}
+                                target = child_entry.get("integration_branch") or "main"
+                                source = integration_branch_name(tid)
+                                ok, detail = merge_branch_into(
+                                    project_dir=project_dir,
+                                    source_branch=source,
+                                    target_branch=target,
+                                )
+                                _emit(on_event, {
+                                    "event": "subtree_propagated" if ok else "subtree_propagation_blocked",
+                                    "task_id": tid,
+                                    "source": source,
+                                    "target": target,
+                                    "detail": detail,
+                                })
+                                if not ok:
+                                    logger.warning(
+                                        "subtree integration propagation failed for %s: %s",
+                                        tid, detail,
+                                    )
+                                    # Reflect the failure in the verdict so
+                                    # the aggregate doesn't claim pass
+                                    # while the work isn't on the parent
+                                    # branch.
+                                    set_verdict(project_dir, tid, "merge_blocked")
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "subtree propagation crashed for %s: %s",
+                                    tid, exc,
+                                )
 
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("child task wrapper crashed: %s", tid)

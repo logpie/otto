@@ -278,21 +278,24 @@ def _is_noise_path(path: str, *, repo: Path | None = None) -> bool:
     return path in _gitignored_paths(repo, [path])
 
 
-def merge_child_into_integration(
+def merge_branch_into(
     *,
     project_dir: Path,
-    child_task_id: str,
-    parent_integration_branch: str,
+    source_branch: str,
+    target_branch: str,
 ) -> tuple[bool, str]:
-    """Merge a child's branch into the parent's integration branch.
+    """Merge ``source_branch`` into ``target_branch`` with gitignore-aware
+    noise auto-resolve. Generic version of ``merge_child_into_integration``;
+    used by ``_run_child`` (build branch → parent integration) AND by
+    ``_propagate_integration_up`` (subtree integration → grandparent
+    integration), which is what makes nested decompositions land on main.
 
-    Returns (success, detail). When the only conflicts are on runtime/build
-    artifacts (test-results/, __pycache__/, etc.), auto-resolves with --ours
-    and completes the merge — the child's verify already validated the work,
-    a stale Playwright report shouldn't block it. On real source-code
-    conflicts, aborts and returns (False, "conflict: <files>").
+    Returns (success, detail). On real source conflicts, aborts and returns
+    (False, "conflict on: <files>"). On noise-only conflicts, auto-resolves
+    --ours and completes.
     """
-    branch = child_branch_name(child_task_id)
+    branch = source_branch
+    parent_integration_branch = target_branch
     try:
         # Switch to integration branch.
         cp = subprocess.run(
@@ -366,6 +369,22 @@ def merge_child_into_integration(
         return False, f"conflict on: {', '.join(files[:5]) or '?'}"
     except Exception as exc:  # noqa: BLE001
         return False, f"merge crashed: {exc}"
+
+
+def merge_child_into_integration(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    parent_integration_branch: str,
+) -> tuple[bool, str]:
+    """Merge a child's BUILD branch (i2p/build/<id>) into its parent's
+    integration branch. Thin wrapper over ``merge_branch_into``.
+    """
+    return merge_branch_into(
+        project_dir=project_dir,
+        source_branch=child_branch_name(child_task_id),
+        target_branch=parent_integration_branch,
+    )
 
 
 def commit_worktree(*, worktree_path: Path, message: str) -> tuple[bool, str]:
