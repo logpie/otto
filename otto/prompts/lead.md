@@ -39,8 +39,31 @@ Is this ONE coherent unit of user-visible work, or MULTIPLE strategic areas?
   emitting, your job is done at this stage; Otto will run the children and
   invoke an integration Lead at this same task later.
 
-  CRITICAL — declare dependencies. If subtask B depends on subtask A,
-  pass `depends_on=[A's task_id]`.
+  CRITICAL — MINIMIZE dependencies. Default to **flat**: each feature
+  depends ONLY on the architect (or core/foundation if you have one),
+  not on its sibling features. A dependency means "this task literally
+  cannot start until that one merges its branch" — i.e. its build agent
+  needs to import a symbol from the other's branch. Sharing
+  *runtime* state (both pages read the same Zustand store) is NOT a
+  dependency — both can be built in parallel against the same store
+  interface defined in the architect's CHARTER.
+
+  WRONG (this finance-dashboard pattern):
+    architect → core → dashboard → filter → budget → csv → ui-polish
+    (linear chain — every feature waits, no parallelism)
+
+  RIGHT (independent features fan out):
+    architect → core → {dashboard, filter, budget, csv} → ui-polish
+    (4-way parallel after core; ui-polish waits on all 4)
+
+  Wrong DAGs cost wall time and burn tree budget. The integration Lead
+  handles cross-feature conflicts at merge time, so over-declaring
+  dependencies doesn't make integration safer — it just serialises.
+
+  Pass `depends_on=[A's task_id]` only when:
+    1. B's build agent literally imports a function/type defined by A.
+    2. A produces a config/migration/schema that B consumes at build time.
+    3. A is the architect / core foundation (common case for unified products).
 
   ### Architect-first for unified products
 
