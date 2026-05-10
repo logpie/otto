@@ -350,7 +350,7 @@ def create_otto_mcp_server(
         return _ok({"acknowledged": True, "reason": reason})
 
     server = create_sdk_mcp_server("otto", "1.0.0", tools=[
-        submit_subtask, begin_inline, verify, checkpoint
+        submit_subtask, begin_inline, verify, certify_scaffold, checkpoint
     ])
     # Note: server is a dict (McpSdkServerConfig); we cannot setattr on it.
     # The Lead runner reads cost from the SDK ResultMessage directly, not via
