@@ -637,13 +637,65 @@ async def _run_integration(
     # Provide child summaries to the integration Lead's prompt.
     summaries = _build_child_summaries(project_dir, task_id, child_results)
 
+    # The integration Lead must run in a worktree that holds the merged
+    # children's work — i.e., a worktree checked out to the parent's
+    # integration branch. Without this, lead.py defaults to project_dir
+    # (typically `main`), where the children's commits aren't visible — verify
+    # then sees an empty workspace and returns pending_children even when
+    # every leaf passed.
+    parent_integration_branch = (
+        (get_task(project_dir, task_id) or {}).get("integration_branch")
+        or "main"
+    )
+    integration_worktree: Path | None = None
+    try:
+        from otto.v5_branching import (
+            child_worktree_path,
+            ensure_branch_exists,
+            setup_child_worktree,
+        )
+
+        # Reuse setup_child_worktree but check out the integration branch
+        # itself rather than a child's branch. We do this via a synthetic
+        # "task id" so the worktree lives under .worktrees/integ-<task>/.
+        synthetic_id = f"integ-{task_id}"
+        ensure_branch_exists(project_dir, parent_integration_branch, base_ref="main")
+        # Direct git worktree add to the integration branch; bypass the
+        # child-branch creation path of setup_child_worktree.
+        from otto.worktree import add_worktree
+
+        wt_path = child_worktree_path(project_dir, synthetic_id)
+        if not (wt_path.exists() and (wt_path / ".git").exists()):
+            try:
+                add_worktree(
+                    project_dir=project_dir,
+                    worktree_path=wt_path,
+                    branch=parent_integration_branch,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "integration worktree add failed for %s: %s; will fall back",
+                    task_id, exc,
+                )
+                wt_path = None  # type: ignore[assignment]
+        if wt_path is not None and wt_path.exists():
+            integration_worktree = wt_path
+            link_path = integration_session_dir / "worktree"
+            if not link_path.exists():
+                try:
+                    link_path.symlink_to(wt_path)
+                except OSError as exc:
+                    logger.warning("symlink worktree failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning("integration worktree setup failed: %s", exc)
+
     _emit(on_event, {"event": "integration_start", "task_id": task_id})
     result = await run_lead(
         task_id=task_id,
         intent=intent,
         project_dir=project_dir,
         session_dir=integration_session_dir,
-        integration_branch=(get_task(project_dir, task_id) or {}).get("integration_branch"),
+        integration_branch=parent_integration_branch,
         config=config,
         kind="integration",
         child_summaries=summaries,

@@ -45,13 +45,67 @@ def child_worktree_path(project_dir: Path, child_task_id: str) -> Path:
     return project_dir / ".worktrees" / safe
 
 
+_DEFAULT_GITIGNORE = """\
+# Otto-managed default ignore set. Build/test agents commonly produce these
+# artifacts; without them in .gitignore, agent commits include cache files
+# that block parent integration merges across worktrees.
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+*.log
+npm-debug.log*
+yarn-error.log
+.parcel-cache/
+.next/
+.nuxt/
+.turbo/
+.cache/
+.vite/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Test runtime artifacts
+playwright-report/
+test-results/
+coverage/
+"""
+
+
 def ensure_initial_commit(project_dir: Path) -> bool:
     """Make sure the repo has at least one commit so refs/branches can be created.
 
-    Greenfield projects often start with `git init` and no commits — every
-    `git branch <name>` then fails with "fatal: not a valid object name: 'HEAD'".
-    Stage anything tracked plus any existing files, and commit. If the index
-    ends up empty, commit --allow-empty so HEAD exists.
+    Greenfield projects often start with ``git init`` and no commits — every
+    ``git branch <name>`` then fails with "fatal: not a valid object name: 'HEAD'".
+
+    Also seeds a sensible ``.gitignore`` if absent. Without this, build agents
+    routinely commit ``__pycache__/`` / ``node_modules/`` and parent
+    integration merges fail with conflicts on cache files (the URL-shortener
+    live run hit this on every Python child).
 
     Returns True if a commit was created, False if HEAD already existed.
     Best-effort: returns False on any failure.
@@ -64,6 +118,15 @@ def ensure_initial_commit(project_dir: Path) -> bool:
         )
         if head.returncode == 0:
             return False
+
+        # Seed .gitignore if the project doesn't ship one.
+        gitignore_path = project_dir / ".gitignore"
+        if not gitignore_path.exists():
+            try:
+                gitignore_path.write_text(_DEFAULT_GITIGNORE, encoding="utf-8")
+            except OSError as exc:
+                logger.warning("could not write default .gitignore: %s", exc)
+
         subprocess.run(
             ["git", "add", "-A"],
             cwd=str(project_dir),
