@@ -242,13 +242,17 @@ async def run_lead(
         result.verify_called, result.verify_result = _detect_verify(log_dir)
 
         # Compute verdict per philosophy invariants:
-        #   - Lead emitted children → pending_children (parent waits for them).
-        #   - Lead inline + verify pass → pass.
-        #   - Lead inline + verify partial → partial.
-        #   - Lead inline + no verify → unverified.
-        #   - Lead inline + verify unverified → unverified.
-        #   - Lead crashed (not here, see except) → catastrophic.
-        if result.decomposition == "emit" and result.emitted_subtask_ids:
+        #   - Integration kind: this IS the resolution call for a previously
+        #     decomposed task. Use the verify result if present; only fall
+        #     back to pending_children when verify wasn't called and we have
+        #     no other signal.
+        #   - Plan-or-inline kind:
+        #     - Lead emitted children → pending_children (parent waits).
+        #     - Lead inline + verify pass/partial/unverified → that verdict.
+        #     - Lead inline + no verify → unverified.
+        #   - Lead crashed (caught below) → catastrophic.
+        is_integration = kind == "integration"
+        if not is_integration and result.decomposition == "emit" and result.emitted_subtask_ids:
             result.verdict = "pending_children"
         elif result.verify_called and result.verify_result:
             v = result.verify_result.get("verdict") or "unverified"
@@ -256,9 +260,16 @@ async def run_lead(
                 result.verdict = v
             else:
                 result.verdict = "unverified"
+        elif is_integration:
+            # Integration Lead didn't (or couldn't) verify. Don't force
+            # pending_children — that loops the runner. Surface honestly.
+            result.verdict = "unverified"
+            failure_reason = (
+                "Integration Lead did not produce a verify result; "
+                "marking unverified rather than pending_children."
+            )
         else:
             # No verify was called; we cannot trust any "pass" claim.
-            # If decomposition is unknown and no verify, this Lead did nothing.
             result.verdict = "unverified"
             failure_reason = (
                 "Lead did not call mcp__otto__verify; cannot certify pass. "
