@@ -243,29 +243,39 @@ def setup_child_worktree(
         return None
 
 
-# Path patterns that are runtime/build artifacts agents shouldn't be committing
-# but routinely do. When ALL merge conflicts fall on these paths, auto-resolve
-# (prefer the parent's side; the artifact is transient by definition).
-_NOISE_GLOBS = (
-    "test-results/", "playwright-report/", "coverage/", "htmlcov/",
-    "node_modules/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
-    "__pycache__/", ".cache/", ".vite/", ".next/", ".nuxt/", ".turbo/",
-    "build/", "dist/",
-)
-_NOISE_SUFFIXES = (
-    ".pyc", ".pyo", ".log", ".tsbuildinfo",
-)
+def _gitignored_paths(repo: Path, paths: list[str]) -> set[str]:
+    """Subset of ``paths`` that the repo's gitignore rules would ignore.
 
+    Delegates to ``git check-ignore`` so the project's own .gitignore +
+    .git/info/exclude + core.excludesFile are the source of truth. We
+    don't maintain a hardcoded list of "noise" patterns — whatever the
+    project says is ignorable is ignorable, period.
 
-def _is_noise_path(path: str) -> bool:
-    """True if this path is a runtime/build artifact that's safe to drop on conflict."""
-    p = path.strip()
-    if not p:
-        return False
-    return (
-        any(seg in p for seg in _NOISE_GLOBS)
-        or p.endswith(_NOISE_SUFFIXES)
+    ``--no-index`` lets check-ignore answer for files even when they are
+    tracked (which they are during a merge conflict).
+    """
+    paths = [p for p in paths if p]
+    if not paths:
+        return set()
+    cp = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--", *paths],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
     )
+    # check-ignore: exit 0 = some matched, 1 = none matched, 128 = error.
+    # stdout lists matched paths, one per line.
+    if cp.returncode not in (0, 1):
+        return set()
+    return {p.strip() for p in (cp.stdout or "").splitlines() if p.strip()}
+
+
+# Backwards-compatible single-path predicate (used by tests that exercise
+# the noise-recognition oracle in isolation).
+def _is_noise_path(path: str, *, repo: Path | None = None) -> bool:
+    """True iff ``path`` is gitignored in ``repo`` (or in the current dir)."""
+    repo = repo or Path(".")
+    return path in _gitignored_paths(repo, [path])
 
 
 def merge_child_into_integration(
@@ -310,8 +320,10 @@ def merge_child_into_integration(
             text=True,
         )
         files = [f for f in (diag.stdout or "").strip().split("\n") if f]
-        noise_files = [f for f in files if _is_noise_path(f)]
-        real_files = [f for f in files if not _is_noise_path(f)]
+        # Ask the project's own gitignore which conflicts are noise.
+        noise_set = _gitignored_paths(project_dir, files)
+        noise_files = [f for f in files if f in noise_set]
+        real_files = [f for f in files if f not in noise_set]
 
         if files and not real_files:
             # All conflicts are on artifacts. Auto-resolve --ours, then commit.
@@ -359,10 +371,56 @@ def merge_child_into_integration(
 def commit_worktree(*, worktree_path: Path, message: str) -> tuple[bool, str]:
     """Add+commit any changes in the child's worktree before merge.
 
+    Belt-and-braces against agents committing artifacts:
+      1. Ensure the worktree has a sensible .gitignore (seed defaults if
+         absent, append defaults if present but missing key entries).
+      2. Untrack any already-tracked paths that the (possibly-updated)
+         .gitignore now matches — this catches files committed earlier
+         on a stale ignore set.
+      3. Then ``git add -A`` (which honors gitignore for untracked).
+
     Idempotent: if there's nothing to commit, returns (True, "no-op").
     """
     try:
-        # Stage all changes.
+        # 1. Ensure .gitignore covers the common artifact paths. Append rather
+        # than overwrite so agents can still extend it.
+        gi_path = worktree_path / ".gitignore"
+        try:
+            existing = gi_path.read_text(encoding="utf-8") if gi_path.exists() else ""
+        except OSError:
+            existing = ""
+        # Sentinel marks our managed block; only inserted once.
+        sentinel = "# --- otto v5 default ignores ---"
+        if sentinel not in existing:
+            new_text = existing.rstrip() + ("\n\n" if existing.strip() else "") + \
+                       sentinel + "\n" + _DEFAULT_GITIGNORE
+            try:
+                gi_path.write_text(new_text, encoding="utf-8")
+            except OSError as exc:
+                logger.warning("could not update worktree .gitignore: %s", exc)
+
+        # 2. Untrack already-tracked files that match the (now updated)
+        # gitignore. ``git ls-files`` lists tracked files; ``check-ignore``
+        # tells us which of those would now be ignored. ``rm --cached``
+        # removes them from the index without touching the working tree.
+        tracked_proc = subprocess.run(
+            ["git", "ls-files"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+        )
+        tracked = [
+            p for p in (tracked_proc.stdout or "").splitlines() if p.strip()
+        ]
+        ignored = _gitignored_paths(worktree_path, tracked)
+        if ignored:
+            subprocess.run(
+                ["git", "rm", "--cached", "--", *ignored],
+                cwd=str(worktree_path),
+                capture_output=True,
+            )
+
+        # 3. Stage everything else (gitignore already filters noise).
         cp = subprocess.run(
             ["git", "add", "-A"],
             cwd=str(worktree_path),

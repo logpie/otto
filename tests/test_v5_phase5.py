@@ -261,6 +261,9 @@ class TestCommitWorktree:
             parent_integration_branch="i2p/parent2/integration",
         )
         assert wt is not None
+        # First call may commit a seeded .gitignore if one wasn't there;
+        # the SECOND call against an unchanged worktree must be a no-op.
+        commit_worktree(worktree_path=wt, message="seed")
         ok, detail = commit_worktree(worktree_path=wt, message="empty")
         assert ok is True
         assert "no-op" in detail
