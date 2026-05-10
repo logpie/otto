@@ -243,6 +243,31 @@ def setup_child_worktree(
         return None
 
 
+# Path patterns that are runtime/build artifacts agents shouldn't be committing
+# but routinely do. When ALL merge conflicts fall on these paths, auto-resolve
+# (prefer the parent's side; the artifact is transient by definition).
+_NOISE_GLOBS = (
+    "test-results/", "playwright-report/", "coverage/", "htmlcov/",
+    "node_modules/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
+    "__pycache__/", ".cache/", ".vite/", ".next/", ".nuxt/", ".turbo/",
+    "build/", "dist/",
+)
+_NOISE_SUFFIXES = (
+    ".pyc", ".pyo", ".log", ".tsbuildinfo",
+)
+
+
+def _is_noise_path(path: str) -> bool:
+    """True if this path is a runtime/build artifact that's safe to drop on conflict."""
+    p = path.strip()
+    if not p:
+        return False
+    return (
+        any(seg in p for seg in _NOISE_GLOBS)
+        or p.endswith(_NOISE_SUFFIXES)
+    )
+
+
 def merge_child_into_integration(
     *,
     project_dir: Path,
@@ -251,9 +276,11 @@ def merge_child_into_integration(
 ) -> tuple[bool, str]:
     """Merge a child's branch into the parent's integration branch.
 
-    Returns (success, detail). On conflict, aborts the merge and returns
-    (False, "conflict: <files>") — caller may dispatch a conflict-resolution
-    Lead. Best-effort throughout.
+    Returns (success, detail). When the only conflicts are on runtime/build
+    artifacts (test-results/, __pycache__/, etc.), auto-resolves with --ours
+    and completes the merge — the child's verify already validated the work,
+    a stale Playwright report shouldn't block it. On real source-code
+    conflicts, aborts and returns (False, "conflict: <files>").
     """
     branch = child_branch_name(child_task_id)
     try:
@@ -275,21 +302,55 @@ def merge_child_into_integration(
         )
         if cp.returncode == 0:
             return True, f"merged {branch} into {parent_integration_branch}"
-        # Conflict.
-        # Identify conflicting files.
+        # Conflict — identify conflicting files.
         diag = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=U"],
             cwd=str(project_dir),
             capture_output=True,
             text=True,
         )
-        files = (diag.stdout or "").strip().split("\n")
-        # Abort to leave the integration branch clean.
+        files = [f for f in (diag.stdout or "").strip().split("\n") if f]
+        noise_files = [f for f in files if _is_noise_path(f)]
+        real_files = [f for f in files if not _is_noise_path(f)]
+
+        if files and not real_files:
+            # All conflicts are on artifacts. Auto-resolve --ours, then commit.
+            for f in noise_files:
+                subprocess.run(
+                    ["git", "checkout", "--ours", "--", f],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "add", "--", f],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                )
+            commit = subprocess.run(
+                [
+                    "git", "commit", "--no-edit",
+                    "-m", f"merge {branch} (auto-resolved {len(noise_files)} artifact conflicts)",
+                ],
+                cwd=str(project_dir),
+                capture_output=True,
+                text=True,
+            )
+            if commit.returncode == 0:
+                return True, (
+                    f"merged {branch} into {parent_integration_branch} "
+                    f"(auto-resolved noise: {', '.join(noise_files[:3])}"
+                    f"{'...' if len(noise_files) > 3 else ''})"
+                )
+            # Auto-resolve commit failed; fall through to abort.
+
+        # Real source conflict (or auto-resolve failed) — abort cleanly.
         subprocess.run(
             ["git", "merge", "--abort"],
             cwd=str(project_dir),
             capture_output=True,
         )
+        if real_files:
+            return False, f"conflict on: {', '.join(real_files[:5])}"
         return False, f"conflict on: {', '.join(files[:5]) or '?'}"
     except Exception as exc:  # noqa: BLE001
         return False, f"merge crashed: {exc}"
