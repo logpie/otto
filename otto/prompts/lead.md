@@ -99,6 +99,38 @@ Is this ONE coherent unit of user-visible work, or MULTIPLE strategic areas?
         - Library choices with rationale (esp. for items the intent
           explicitly named)
         - Folder/module conventions (where pages, components, hooks live)
+        - **Inter-subsystem contracts** — REQUIRED when children span
+          subsystems with wire protocols (web ↔ API ↔ WebSocket ↔ CLI ↔ DB).
+          Without this section two Leads implement opposite sides of a
+          protocol independently and drift; this is the most common
+          decomp quality bug (a WS server stored `{"text":"hi"}` JSON
+          envelope instead of unwrapping `.text` because the architect's
+          prose protocol description was ambiguous).
+
+          Specify exact wire shapes, not prose:
+          ```
+          ### REST endpoints
+          POST /register   request:  {"username": str}
+                          response: {"user_id": int}
+          POST /rooms      request:  {"name": str}
+                          response: {"room_id": int}
+          GET  /rooms      response: [{"id": int, "name": str, "created_at": iso8601}]
+
+          ### WebSocket protocol
+          Connect: ws://host:8002/ws/{room_id}?user_id=<int>
+          Client → server frame: {"text": str}    — server MUST extract .text
+          Server → all-clients frame: {"user": str, "text": str, "ts": iso8601}
+          Storage: messages.text = the EXTRACTED text string (NOT the wrapped JSON)
+
+          ### Database schema
+          users(id INT PK, username TEXT, created_at TEXT)
+          rooms(id INT PK, name TEXT, created_at TEXT)
+          messages(id INT PK, room_id INT, user_id INT, text TEXT, ts TEXT)
+          ```
+
+          Skip this section ONLY for single-subsystem decompositions (e.g.,
+          one React SPA split into pages) where no wire protocol exists
+          between children.
     4. Scaffold the minimum project shell (package.json / pyproject.toml,
        config files, empty src/ tree consistent with the conventions). NO
        feature code, NO behavior tests, NO Playwright runs against the empty shell.
@@ -140,9 +172,23 @@ yourself. Dispatch the subagents:
   runner, commits.
 
   **Round 3 — verify.**
-  Call `mcp__otto__verify` with no arguments. The deterministic verifier
-  runs the test suite + browser journeys + maps results to behavior_journey
-  ids.
+  Call `mcp__otto__verify` with `feature_scope_ids` set to the journey IDs
+  YOUR specific task is responsible for. Read the journeys file
+  ({journeys_path}); match your task's intent to journey IDs (intents
+  usually mention the feature names; e.g., a task for "Dashboard
+  overview" maps to journeys like `dashboard_overview`,
+  `monthly_cash_flow`). Pass ONLY those IDs — not all journeys.
+
+  Why: passing empty (= all journeys) makes every child re-run the full
+  Playwright suite even when each child only owns a slice. On a tree
+  with N children each running ~10s × M journeys, that's N×M×10s of
+  needless verify time. Scope-aware verify cuts each child's verify
+  from ~60-90s to ~5-15s.
+
+  EXCEPTION: the integration kind Lead (you'll know — your kind is
+  "integration") MUST pass empty `feature_scope_ids` so it runs the
+  full suite against the merged tree. That's where end-to-end checks
+  live.
 
   **Round 4 — interpret.**
   Read the verifier's structured result. If `verdict=pass`, you're done.
