@@ -205,6 +205,20 @@ async def run_v5_pipeline(
             )
             integration_session_dir = root_session_dir / "integration"
             integration_session_dir.mkdir(parents=True, exist_ok=True)
+            # Copy the flat spec so the integration Lead's verify call can
+            # find it; without this the verifier returns "unverified" even
+            # when leaf children all passed (root integration doesn't get a
+            # fresh sibling session — it lives under root_session_dir/).
+            _root_spec = root_session_dir / "spec" / "spec.json"
+            _integ_spec = integration_session_dir / "spec" / "spec.json"
+            if _root_spec.exists() and not _integ_spec.exists():
+                try:
+                    _integ_spec.parent.mkdir(parents=True, exist_ok=True)
+                    _integ_spec.write_text(
+                        _root_spec.read_text(encoding="utf-8"), encoding="utf-8",
+                    )
+                except OSError as exc:
+                    logger.warning("could not copy spec for root integration: %s", exc)
             _emit(on_event, {"event": "integration_start", "task_id": ROOT_TASK_ID})
             integration_result = await run_lead(
                 task_id=ROOT_TASK_ID,
