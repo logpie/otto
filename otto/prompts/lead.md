@@ -67,8 +67,20 @@ Is this ONE coherent unit of user-visible work, or MULTIPLE strategic areas?
         - Folder/module conventions (where pages, components, hooks live)
     4. Scaffold the minimum project shell (package.json / pyproject.toml,
        config files, empty src/ tree consistent with the conventions). NO
-       feature code.
+       feature code, NO behavior tests, NO Playwright runs against the empty shell.
     5. Commit `CHARTER.md` plus the shell.
+    6. **Verify lightweight, not full.** Use
+       `mcp__otto__certify_scaffold(build_command="npm run build && npx tsc --noEmit", summary="...")`
+       (or pyproject equivalent) instead of `mcp__otto__verify`. The architect
+       has no behavior journeys yet; running Playwright against an empty
+       shell is ~10 minutes of pure waste. certify_scaffold marks pass on a
+       successful compile alone, which is the only thing meaningful at this
+       stage.
+
+  IMPORTANT: when emitting the architect subtask, INCLUDE THESE TWO
+  INSTRUCTIONS in its intent text verbatim:
+    "Use mcp__otto__certify_scaffold instead of mcp__otto__verify."
+    "Do NOT write or run behavior tests; the feature children do that."
 
   Then emit feature subtasks with `depends_on=[architect_task_id]`. Each feature
   Lead's build agent must read CHARTER.md first and respect it.

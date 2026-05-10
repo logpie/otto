@@ -418,6 +418,21 @@ async def _run_child(
                     link_path.symlink_to(child_worktree)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("could not symlink worktree: %s", exc)
+            # Share node_modules / .venv across worktrees. Without this, every
+            # child re-downloads packages from scratch (~30-60s each, ~5-7min
+            # total on a 7-task tree). Worktrees share the same package.json /
+            # pyproject.toml at this branch so the deps are identical.
+            for shared in ("node_modules", ".venv"):
+                src = project_dir / shared
+                dst = child_worktree / shared
+                if src.exists() and not dst.exists():
+                    try:
+                        dst.symlink_to(src.resolve())
+                    except OSError as exc:
+                        logger.warning(
+                            "could not symlink %s into child %s: %s",
+                            shared, tid, exc,
+                        )
             _emit(on_event, {
                 "event": "worktree_created",
                 "task_id": tid,

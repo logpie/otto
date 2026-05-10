@@ -43,6 +43,78 @@ def _intent_hash(parent_task_id: str | None, intent: str) -> str:
     return hashlib.sha256(f"{parent}::{intent}".encode("utf-8")).hexdigest()[:16]
 
 
+async def _run_scaffold_certification(
+    *,
+    project_dir: Path,
+    session_dir: Path,
+    build_command: str,
+    summary: str,
+) -> dict[str, Any]:
+    """Run a build command, write a verify-result.json, return the payload.
+
+    Module-level helper so unit tests can exercise it without reaching into
+    the SDK's tool registry.
+    """
+    import asyncio as _asyncio
+    import os as _os
+    import subprocess as _sp
+
+    cmd = (build_command or "").strip()
+    if not cmd:
+        return {"_err": "certify_scaffold: build_command is required."}
+
+    # Resolve the worktree the same way verify does.
+    verify_dir = project_dir
+    wt_link = session_dir / "worktree"
+    try:
+        if wt_link.is_symlink() or wt_link.is_dir():
+            target = wt_link.resolve()
+            if target.exists():
+                verify_dir = target
+    except OSError:
+        pass
+
+    log_dir = session_dir / "verify"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "scaffold-build.log"
+    result_path = log_dir / "verify-result.json"
+
+    try:
+        proc = await _asyncio.create_subprocess_shell(
+            cmd,
+            cwd=str(verify_dir),
+            stdout=_sp.PIPE,
+            stderr=_sp.STDOUT,
+            env={**_os.environ},
+        )
+        stdout_b, _ = await _asyncio.wait_for(proc.communicate(), timeout=600)
+        text = (stdout_b or b"").decode("utf-8", errors="replace")
+        log_path.write_text(text, encoding="utf-8")
+        exit_code = proc.returncode
+    except Exception as exc:  # noqa: BLE001
+        return {"_err": f"certify_scaffold: command crashed: {exc}"}
+
+    if exit_code != 0:
+        tail = "\n".join((text or "").strip().splitlines()[-5:])
+        payload = {
+            "verdict": "unverified",
+            "journeys": [],
+            "evidence": [str(log_path)],
+            "summary": f"scaffold build failed (exit {exit_code}): {tail[:200]}",
+            "scaffold": True,
+        }
+    else:
+        payload = {
+            "verdict": "pass",
+            "journeys": [],
+            "evidence": [str(log_path)],
+            "summary": (summary or "scaffold compiled").strip(),
+            "scaffold": True,
+        }
+    result_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return payload
+
+
 def _coerce_id_list(raw: Any) -> list[str]:
     """Coerce LLM-supplied id list to clean list[str].
 
@@ -230,6 +302,32 @@ def create_otto_mcp_server(
         except Exception as exc:  # noqa: BLE001 — best-effort
             logger.warning("verify failed: %s", exc)
             return _err(f"verify: {exc}")
+
+    # ------------------------------------------------------------------
+    # certify_scaffold (lightweight verify for Architect phase)
+    # ------------------------------------------------------------------
+    @tool(
+        "certify_scaffold",
+        (
+            "LIGHTWEIGHT verification for scaffold-only tasks. Use this INSTEAD "
+            "of mcp__otto__verify when your task only produces infrastructure "
+            "(CHARTER.md + empty project shell + dependencies wired) and there "
+            "is no testable behavior yet. Runs the given build_command; if it "
+            "succeeds, marks the task as pass without spinning up Playwright "
+            "or running behavior journeys. Saves ~10 minutes per Architect run."
+        ),
+        {"build_command": str, "summary": str},
+    )
+    async def certify_scaffold(args: dict[str, Any]) -> dict[str, Any]:
+        payload = await _run_scaffold_certification(
+            project_dir=project_dir,
+            session_dir=session_dir,
+            build_command=args.get("build_command") or "",
+            summary=args.get("summary") or "scaffold compiled",
+        )
+        if "_err" in payload:
+            return _err(payload["_err"])
+        return _ok(payload)
 
     # ------------------------------------------------------------------
     # checkpoint
