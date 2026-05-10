@@ -647,7 +647,8 @@ async def _run_integration(
     # task itself merges INTO (one level up). For the integration session
     # we instead want THIS task's OWN integration branch (where its children
     # merged), namespaced as `i2p/<task_id>/integration`.
-    own_integration_branch = f"i2p/{task_id}/integration"
+    from otto.v5_branching import integration_branch_name as _integ
+    own_integration_branch = _integ(task_id)
     integration_worktree: Path | None = None
     try:
         from otto.v5_branching import (

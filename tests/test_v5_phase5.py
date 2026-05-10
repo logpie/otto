@@ -180,13 +180,20 @@ class TestBranching:
         assert integration_branch_name("root") == "main"
 
     def test_integration_branch_for_child(self) -> None:
-        assert integration_branch_name("v5-abc123") == "i2p/v5-abc123/integration"
+        assert integration_branch_name("v5-abc123") == "i2p/integ/v5-abc123"
 
     def test_child_branch_name_sanitizes(self) -> None:
-        assert child_branch_name("v5-abc123") == "i2p/v5-abc123"
+        assert child_branch_name("v5-abc123") == "i2p/build/v5-abc123"
         # Special chars sanitized (the function should not crash).
         result = child_branch_name("v5/abc 123")
-        assert "/" not in result.replace("i2p/", "")  # only one '/' from prefix
+        # Sibling-namespace prefix means at most 2 slashes (i2p/build/<id>).
+        assert result.count("/") == 2
+
+    def test_integration_and_build_namespaces_dont_collide(self) -> None:
+        # i2p/<id>/integration vs i2p/<id> would collide as ref paths;
+        # i2p/build/<id> vs i2p/integ/<id> are siblings.
+        tid = "v5-foo"
+        assert child_branch_name(tid).split("/")[1] != integration_branch_name(tid).split("/")[1]
 
 
 @pytest.fixture

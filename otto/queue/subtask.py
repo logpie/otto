@@ -88,7 +88,11 @@ def enqueue_subtask(
         raise ValueError("enqueue_subtask: 'intent' is required and must be non-empty.")
 
     task_id = _generate_task_id(intent)
-    integration_branch = parent_integration_branch or f"i2p/{parent_task_id}/integration"
+    if parent_integration_branch:
+        integration_branch = parent_integration_branch
+    else:
+        from otto.v5_branching import integration_branch_name as _integ_name
+        integration_branch = _integ_name(parent_task_id)
     entry: dict[str, Any] = {
         "schema_version": 1,
         "task_id": task_id,

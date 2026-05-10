@@ -25,18 +25,28 @@ def integration_branch_name(parent_task_id: str | None) -> str:
     """Compute the integration branch name for a parent task.
 
     None (root) → "main" (the project's main branch is the root's integration).
-    Otherwise → "i2p/<parent_task_id>/integration".
+    Otherwise → "i2p/integ/<parent_task_id>".
+
+    Distinct prefix from child build branches (``i2p/build/<id>``) so a task
+    that decomposes can have BOTH its own build branch and an integration
+    branch — git refs are filesystem-style paths, so ``i2p/<id>`` and
+    ``i2p/<id>/integration`` collide (one is a file, the other a directory).
+    Siblings under different prefixes never collide.
     """
     if parent_task_id is None or parent_task_id == "root":
         return "main"
     safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", parent_task_id).strip("-")
-    return f"i2p/{safe}/integration"
+    return f"i2p/integ/{safe}"
 
 
 def child_branch_name(child_task_id: str) -> str:
-    """Branch name for a child task's worktree."""
+    """Branch name for a child task's worktree.
+
+    Uses the ``i2p/build/`` prefix so it never collides with the
+    ``i2p/integ/`` integration namespace (see integration_branch_name).
+    """
     safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", child_task_id).strip("-")
-    return f"i2p/{safe}"
+    return f"i2p/build/{safe}"
 
 
 def child_worktree_path(project_dir: Path, child_task_id: str) -> Path:

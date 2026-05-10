@@ -163,7 +163,9 @@ class TestSubtaskQueue:
         assert pending[0]["parent_task_id"] == "root"
         assert pending[0]["intent"] == "do thing"
         assert pending[0]["depends_on"] == []
-        assert pending[0]["integration_branch"] == "i2p/root/integration"
+        # Root's integration is the project's main branch — sibling tasks
+        # don't get their own ref nesting under root.
+        assert pending[0]["integration_branch"] == "main"
 
     def test_enqueue_records_depends_on(self, project: Path) -> None:
         a = enqueue_subtask(
