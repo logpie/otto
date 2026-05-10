@@ -129,6 +129,33 @@ def read_pending(project_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
+_TERMINAL_VERDICTS = frozenset({
+    "pass", "partial", "unverified", "merge_blocked", "catastrophic",
+})
+
+
+def _globally_completed_task_ids(project_dir: Path) -> set[str]:
+    """Tasks whose verdict in task_graph.json is terminal (not pending).
+
+    The runner's local ``completed`` set in _process_children is per-call,
+    so recursive invocations don't see siblings completed in earlier passes —
+    leading to re-dispatch loops. The task graph is the global source of
+    truth for completion; reading from it stops the thrash.
+    """
+    from otto.queue.task_graph import read_graph
+
+    try:
+        graph = read_graph(project_dir)
+    except Exception:  # noqa: BLE001 — best-effort
+        return set()
+    done: set[str] = set()
+    for tid, t in (graph.get("tasks") or {}).items():
+        verdict = t.get("verdict")
+        if isinstance(verdict, str) and verdict in _TERMINAL_VERDICTS:
+            done.add(tid)
+    return done
+
+
 def take_ready(
     project_dir: Path,
     *,
@@ -137,17 +164,24 @@ def take_ready(
 ) -> list[dict[str, Any]]:
     """Return subtasks whose ``depends_on`` are all done and not yet running.
 
-    Used by Phase 2 watcher's scheduling loop. Pure function (no mutation).
+    Combines the caller's local completed set with the global task_graph view
+    so already-resolved tasks don't get re-dispatched across recursive
+    _process_children invocations.
     """
+    # Union local + global completion. Local catches in-flight transitions
+    # the graph hasn't observed yet; global catches across recursive calls.
+    globally_done = _globally_completed_task_ids(project_dir)
+    completed_all = set(completed_task_ids) | globally_done
+
     pending = read_pending(project_dir)
     ready: list[dict[str, Any]] = []
     for entry in pending:
         tid = entry.get("task_id")
-        if not tid or tid in completed_task_ids or tid in in_flight_task_ids:
+        if not tid or tid in completed_all or tid in in_flight_task_ids:
             continue
         if entry.get("review_state") not in ("approved", None):
             continue
         deps = entry.get("depends_on") or []
-        if all(d in completed_task_ids for d in deps):
+        if all(d in completed_all for d in deps):
             ready.append(entry)
     return ready

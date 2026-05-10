@@ -614,6 +614,26 @@ async def _run_integration(
     integration_session_dir = _paths.session_dir(project_dir, integration_session_id)
     integration_session_dir.mkdir(parents=True, exist_ok=True)
 
+    # The integration Lead's verify call needs spec.json (same shape as build
+    # children get via _run_child). Find any earlier session that has it and
+    # copy. Fall back silently if no spec exists yet — verifier handles that.
+    target_spec = integration_session_dir / "spec" / "spec.json"
+    if not target_spec.exists():
+        try:
+            sessions_root = project_dir / "otto_logs" / "sessions"
+            if sessions_root.exists():
+                for sib in sorted(sessions_root.iterdir()):
+                    candidate = sib / "spec" / "spec.json"
+                    if candidate.exists():
+                        target_spec.parent.mkdir(parents=True, exist_ok=True)
+                        target_spec.write_text(
+                            candidate.read_text(encoding="utf-8"),
+                            encoding="utf-8",
+                        )
+                        break
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning("could not copy spec for integration session: %s", exc)
+
     # Provide child summaries to the integration Lead's prompt.
     summaries = _build_child_summaries(project_dir, task_id, child_results)
 
