@@ -86,8 +86,14 @@ Read the output. Map test results to behavior journey IDs by name
 matching (children should have named tests after journey IDs). For
 each journey in `{journeys_path}`, decide pass/fail.
 
-Iterate small fixes if needed (≤50 LOC of glue). Don't re-implement
-features.
+Iterate small fixes if needed (≤50 LOC of glue, up to 3 iterations).
+After 3, accept partial and report honestly.
+
+If you find a fix that's too big for in-session glue (a feature needs
+re-implementing, test infrastructure is wrong), DON'T attempt it
+yourself. Instead, call `mcp__otto__submit_subtask` with the fix as a
+new sibling task at this level (depends_on=[]). Otto will spawn it
+and a future integration call will pick up the fixed state.
 
 ## Step 3 — Write verdict.json (with the Write tool — to a file).
 

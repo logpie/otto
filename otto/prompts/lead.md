@@ -50,26 +50,96 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
 
   If the children will share a runtime/manifest (single React SPA, single
   Python service, etc.), emit an **Architect** subtask FIRST. The
-  architect picks stack, writes CHARTER.md + decisions.md, scaffolds
-  the project shell. NO feature code, NO behavior tests. Architect uses
-  a lightweight compile-only check (`npm run build && npx tsc --noEmit`
-  via Bash) and writes verdict.json with `verdict: pass` if the
-  scaffold compiles.
+  architect's job is to:
+
+  1. Read the full intent and behavior_journeys.
+  2. Pick concrete tooling: language (TS vs JS), state pattern, styling
+     (Tailwind / CSS modules / styled-components), key libraries
+     (Recharts / Chart.js / d3 — if the intent mentions charts), HTTP
+     client, test runner config.
+  3. Write `CHARTER.md` at the repo root with these REQUIRED sections:
+     - **Stack & versions**
+     - **Style/UX conventions** (theme tokens, spacing, typography)
+     - **State management pattern + storage layout**
+     - **Library choices with rationale** (esp. for items the intent
+       explicitly named)
+     - **Folder/module conventions** (where pages, components, hooks live)
+     - **Inter-subsystem contracts** — REQUIRED when children span
+       subsystems with wire protocols (web ↔ API ↔ WebSocket ↔ CLI ↔ DB).
+       Specify exact wire shapes, not prose. Skip ONLY for
+       single-subsystem decompositions (a single React SPA split into
+       pages) where no wire protocol exists between children.
+
+       Example for a chat product:
+       ```
+       ### REST endpoints
+       POST /register   request:  {"username": str}
+                        response: {"user_id": int}
+       POST /rooms      request:  {"name": str}
+                        response: {"room_id": int}
+
+       ### WebSocket protocol
+       Connect: ws://host:8002/ws/{room_id}?user_id=<int>
+       Client → server frame: {"text": str}  — server MUST extract .text
+       Server → all-clients frame: {"user": str, "text": str, "ts": iso8601}
+       Storage: messages.text = the EXTRACTED text string (NOT the wrapped JSON)
+
+       ### Database schema
+       messages(id INT PK, room_id INT, user_id INT, text TEXT, ts TEXT)
+       ```
+
+       Without this section two Leads implement opposite sides of a
+       protocol independently and drift — this is the most common
+       decomp quality bug.
+  4. Also create `decisions.md` at the repo root as the empty Decisions
+     Log (header + format hint; children will append).
+  5. Scaffold the minimum project shell (package.json / pyproject.toml,
+     config files, empty src/ tree consistent with the conventions). NO
+     feature code, NO behavior tests, NO Playwright runs against the
+     empty shell.
+  6. **Pre-wire shared shell files** so sibling features only modify
+     their own page/module files: declare all routes in `App.tsx`
+     (importing placeholder components), all nav entries in `Nav.tsx`,
+     the full store interface in `store/index.ts`, and any deps any
+     feature might need in `package.json`. This is what makes flat
+     sibling DAGs safe — features then can't conflict because they
+     each own a different file.
+  7. **Verify lightweight, not full.** Run `npm run build && npx tsc
+     --noEmit` (or pyproject equivalent) via Bash. Write verdict.json
+     with `verdict: pass` if the scaffold compiles. Do NOT run
+     Playwright against the empty shell — it's ~10 minutes of pure
+     waste with no journeys yet to test.
 
   Then emit feature subtasks with `depends_on=[architect_task_id]`.
 
   Skip the Architect for genuinely separable subsystems on different
-  runtimes (web client + REST API + CLI tool).
+  runtimes (web client + REST API + CLI tool with three different
+  package managers); each subsystem owns its own stack.
 
   ### DAG shape
 
-  Minimize `depends_on` between siblings. Default: features depend only
-  on the architect/core. Chain children only when one literally imports
-  symbols defined by another. Sharing runtime state (both pages read
-  the same store) is NOT a dependency. Over-chained DAGs waste wall
-  time; under-chained ones may cause merge conflicts on shared files
-  (`package.json`, `App.tsx` routes) which the parent integration agent
-  will arbitrate.
+  Chain `depends_on` only when one child literally imports symbols
+  defined by another. Sharing runtime state (both pages read the same
+  store) is NOT a dependency.
+
+  Concrete patterns:
+  - **Single SPA, each feature owns its own page/component tree,
+    architect has wired routes/nav/store: FAN OUT.** This is the
+    common case for single-stack products. The architect's pre-wired
+    shell makes shared-file conflicts mechanical (and union-merged by
+    Otto's drivers), not semantic. Default to flat here.
+  - **Different runtimes / packages** (web + API + CLI): FAN OUT — no
+    shared files possible.
+  - **One feature genuinely needs another feature's exported API**:
+    chain that one edge.
+  - **First feature in a new contract domain may chain to validate**:
+    if the architect couldn't fully pre-specify a contract, the first
+    feature to land it can chain; subsequent features fan out.
+
+  Over-chained DAGs serialise wall time for no reason. Shared-file
+  conflicts at integration time are usually mechanical and resolved
+  by Otto's merge drivers or arbitrated by the integration agent —
+  they are NOT a reason to default to a linear chain.
 
 ## Step 2 — Execute (only if you called begin_inline).
 
@@ -80,7 +150,7 @@ You write everything yourself. Use Read/Write/Edit/Bash freely.
 journey IDs from {journeys_path} so they're easy to map back. Test
 depth should match your scope:
   - Leaf component / utility / small feature: unit + maybe smoke
-  - User-visible feature that touches your slice end-to-end: targeted
+  - User-visible feature that touches your group end-to-end: targeted
     journey test (Playwright spec for ONLY your journeys, not the full
     suite)
 **Run**: run your tests via Bash (`npm test`, `pytest`,
