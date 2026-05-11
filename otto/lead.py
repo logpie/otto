@@ -332,6 +332,7 @@ def _render_prompt(
             "is_root": str(is_root).lower(),
             "journeys_path": str(journeys_path),
             "integration_branch": str(integration_branch or "main"),
+            "session_dir": str(session_dir),
         }) + tier_hint
     else:
         summary_text = "\n".join(
@@ -345,6 +346,7 @@ def _render_prompt(
             "integration_branch": str(integration_branch or "main"),
             "child_summaries": summary_text,
             "journeys_path": str(journeys_path),
+            "session_dir": str(session_dir),
         })
 
 
