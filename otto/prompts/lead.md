@@ -46,6 +46,14 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
   run the children and invoke an integration session at this same task
   later.
 
+  **Do NOT emit an explicit "integration" or "wire-it-together"
+  subtask as one of the children.** Otto's runner automatically
+  invokes an integration session at this level after children
+  complete — it runs cross-stack E2E tests, creates start.sh if
+  needed, and arbitrates contract mismatches. Emitting a dedicated
+  integration child duplicates that work and burns 20-30 min of wall
+  time. Trust the auto-integration phase.
+
   ### Architect-first — default, not opt-in
 
   **Default to emitting an Architect subtask FIRST** whenever you
@@ -65,6 +73,14 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
   costs ~5 min / ~$0.70 and prevents this.
 
   The architect's job:
+
+  **CRITICAL: the architect MUST call `mcp__otto__begin_inline` and
+  do all its work itself. Do NOT call `mcp__otto__submit_subtask`.**
+  If you sub-decompose into grandchildren, their scaffolding work
+  will conflict with the parent Lead's parallel feature siblings
+  (who are also writing to api/, frontend/, etc.), causing
+  unrecoverable merge_blocked across the whole tree. The architect
+  is a single-agent task by design.
 
   1. Read the full intent and behavior_journeys.
   2. Pick concrete tooling: language (TS vs JS), state pattern, styling
