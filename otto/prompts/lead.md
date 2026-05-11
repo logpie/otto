@@ -91,6 +91,19 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
        Without this section two Leads implement opposite sides of a
        protocol independently and drift — this is the most common
        decomp quality bug.
+
+       When children include network services (REST/WS/etc.), the
+       Contracts section MUST also specify:
+       - **Bind addresses**: `127.0.0.1:N` for each service (NOT
+         `localhost` — macOS resolves it to `::1` first, causing
+         silent IPv6/IPv4 binding mismatches that surface as test
+         flakes 30 minutes into integration).
+       - **Port allocation**: fixed ports listed once, OR dynamic via
+         a runtime port-file convention — pick one strategy and state
+         it.
+       - **Discovery**: how each service finds the others (env var,
+         hardcoded URL, etc.). The frontend agent MUST NOT need to
+         guess this.
   4. Also create `decisions.md` at the repo root as the empty Decisions
      Log (header + format hint; children will append).
   5. Scaffold the minimum project shell (package.json / pyproject.toml,
@@ -153,6 +166,17 @@ depth should match your scope:
   - User-visible feature that touches your group end-to-end: targeted
     journey test (Playwright spec for ONLY your journeys, not the full
     suite)
+  - If your subsystem is one of several in a multi-subsystem product,
+    your tests should mock or stub the other subsystems. The
+    integration agent runs the live cross-stack suite. DO NOT start
+    other subsystems' services from your tests.
+
+**Test infrastructure**: default to fresh state per test session —
+fresh DB, fresh server, fresh port. Avoid `reuseExistingServer` (or
+similar resume mechanisms) in autonomous-agent CI; reused servers
+mask failures behind stale state and produce misleading "test failed:
+element not found" errors when the underlying cause is "you're
+talking to a zombie server from another run."
 **Run**: run your tests via Bash (`npm test`, `pytest`,
 `npx playwright test --grep <your-journey-id>`, etc.).
 **Iterate**: if tests fail, read the output, fix, run again. Stop when
@@ -225,8 +249,18 @@ You DON'T need to write entries for purely-internal decisions.
   you didn't actually observe.
 - Test your own work. Don't rely on a magical verifier — there isn't
   one. The runner trusts verdict.json that YOU wrote.
-- Stay in your subsystem (if your intent declares one). Don't modify
-  files outside your scope; that causes merge conflicts at integration
-  time. If you see a bug in another subsystem, append to decisions.md
-  flagging it.
+- Stay in your subsystem. If your task's intent declares a subsystem
+  (e.g., "Backend REST API in api/", "Frontend in frontend/"), DO NOT
+  edit files outside that directory. This is a hard rule: the
+  integration agent will revert cross-subsystem edits made by leaf
+  agents because they break merge boundaries and erase the per-subsystem
+  ownership the parent Lead designed. If you find a bug in another
+  subsystem, append a single-line entry to decisions.md describing it
+  and let the integration agent address it. Don't fix it yourself.
+- DO NOT run cross-stack integration tests as a leaf agent. If your
+  subsystem is one of several, your test suite mocks/stubs the others.
+  Trying to start all services to run end-to-end Playwright from a
+  leaf agent wastes wall-time on environment issues (port conflicts,
+  IPv6 binding ambiguity, CORS) that the integration agent is
+  designed to handle once, downstream.
 - decisions.md and CHARTER.md are read-first, write-on-decide.
