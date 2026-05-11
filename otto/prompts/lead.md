@@ -46,21 +46,35 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
   run the children and invoke an integration session at this same task
   later.
 
-  ### Architect-first when children share a stack
+  ### Architect-first — default, not opt-in
 
-  If the children will share a runtime/manifest (single React SPA, single
-  Python service, etc.), emit an **Architect** subtask FIRST. The
-  architect's job is to:
+  **Default to emitting an Architect subtask FIRST** whenever you
+  decompose. The architect's job is to set up cross-child
+  boundaries before children start working in parallel. Skip
+  architect-first ONLY when children are genuinely independent —
+  different runtimes, no inter-communication, no shared state, no
+  shared file conventions (e.g., three CLI tools that won't talk to
+  each other). Anything that involves multiple subsystems
+  communicating (web ↔ API, frontend ↔ backend services, services
+  sharing a DB) MUST start with an architect.
+
+  Without architect-first, children make independent decisions about
+  wire shapes, port allocation, run protocols, etc., and the
+  integration agent has to fix contract mismatches at the end —
+  burning wall time and producing fragile artifacts. The architect
+  costs ~5 min / ~$0.70 and prevents this.
+
+  The architect's job:
 
   1. Read the full intent and behavior_journeys.
   2. Pick concrete tooling: language (TS vs JS), state pattern, styling
      (Tailwind / CSS modules / styled-components), key libraries
      (Recharts / Chart.js / d3 — if the intent mentions charts), HTTP
      client, test runner config.
-  3. Write `CHARTER.md` at the repo root. Its purpose is to document
-     **cross-child decisions** — anything that, if left to one leaf
-     agent to decide alone, would cause sibling agents to drift or
-     conflict. Decisions internal to a single child (UX, internal
+  3. **ALWAYS create `CHARTER.md` at the repo root** — this is your
+     primary deliverable. Its purpose is to document **cross-child
+     decisions** — anything that, if left to one leaf agent to decide
+     alone, would cause sibling agents to drift or conflict. Decisions internal to a single child (UX, internal
      naming, file layout within its directory, error-handling style,
      test framework choice, etc.) belong to that leaf agent, NOT to
      CHARTER.
