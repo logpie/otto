@@ -40,6 +40,11 @@ from typing import Any
 
 from otto import paths as _paths
 from otto.lead import LeadResult, run_lead
+from otto.v5_preflight import (
+    PreflightIssue,
+    filter_blocked_descendants,
+    run_preflight,
+)
 from otto.queue.subtask import (
     read_pending,
     take_ready,
@@ -49,6 +54,7 @@ from otto.queue.task_graph import (
     aggregate_verdict,
     children_of,
     get_task,
+    read_graph,
     record_task,
     set_verdict,
     tree_total_cost,
@@ -317,6 +323,7 @@ async def _process_children(
     """
     completed: set[str] = set()
     in_flight: dict[str, asyncio.Task[Any]] = {}
+    preflight_seen: set[str] = set()  # issue kinds already emitted, dedupe
 
     while True:
         # Check tree budget cap.
@@ -332,6 +339,25 @@ async def _process_children(
                 await asyncio.gather(*in_flight.values(), return_exceptions=True)
             break
 
+        # Pre-flight: deterministic checks on the task graph.
+        graph = read_graph(project_dir)
+        pending = read_pending(project_dir)
+        issues = run_preflight(project_dir, graph, pending)
+        for issue in issues:
+            key = f"{issue.kind}:{issue.task_id or '-'}"
+            if key in preflight_seen:
+                continue
+            preflight_seen.add(key)
+            log_fn = logger.error if issue.severity in ("error", "block") else logger.warning
+            log_fn("preflight %s [%s]: %s", issue.kind, issue.severity, issue.message)
+            _emit(on_event, {
+                "event": "preflight_issue",
+                "kind": issue.kind,
+                "severity": issue.severity,
+                "message": issue.message,
+                "task_id": issue.task_id,
+            })
+
         # Find ready tasks not yet running.
         ready = take_ready(
             project_dir,
@@ -340,6 +366,16 @@ async def _process_children(
         )
         # Filter to descendants of parent_task_id.
         ready = [r for r in ready if _is_descendant_of(project_dir, r["task_id"], parent_task_id)]
+
+        # Apply blocking pre-flight issues: drop blocked descendants from ready.
+        if any(i.severity == "block" for i in issues):
+            _filtered, blocked = filter_blocked_descendants(graph, ready, issues)
+            if blocked:
+                logger.warning(
+                    "preflight blocked %d tasks from dispatching: %s",
+                    len(blocked), sorted(blocked),
+                )
+            ready = _filtered
 
         # Spawn ready tasks up to max_parallel.
         for entry in ready:
