@@ -132,51 +132,14 @@ async def run_lead(
         except Exception:  # noqa: BLE001
             logger.warning("could not attach mcp_servers to options; SDK build may not pick up tools")
 
-        # Build/test agent split via AgentDefinitions.
-        # The Lead may use Task to dispatch the "build" or "test" subagent.
-        # Each has its own prompt, tool ACL, and (for test) an MCP that
-        # cannot write app code.
-        if kind == "plan_or_inline":
-            try:
-                from claude_agent_sdk import AgentDefinition
-
-                journeys_path = str(session_dir / "spec" / "spec.json")
-                build_prompt = _interpolate_prompt(
-                    _read_prompt_template("build-agent.md"),
-                    {"intent": intent, "journeys_path": journeys_path},
-                )
-                test_prompt = _interpolate_prompt(
-                    _read_prompt_template("test-agent.md"),
-                    {"intent": intent, "journeys_path": journeys_path},
-                )
-                agents_dict: dict[str, Any] = dict(getattr(options, "agents", None) or {})
-                agents_dict["build"] = AgentDefinition(
-                    description="Write app code only. Forbidden from writing tests.",
-                    prompt=build_prompt,
-                    tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite"],
-                    mcpServers=["otto"],
-                )
-                agents_dict["test"] = AgentDefinition(
-                    description="Write tests + journey runners against running product. Forbidden from app code.",
-                    prompt=test_prompt,
-                    tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite"],
-                    mcpServers=["otto"],
-                )
-                options.agents = agents_dict
-            except Exception as exc:  # noqa: BLE001 — best-effort; Lead can run inline
-                logger.warning("could not configure build/test AgentDefinitions: %s", exc)
-
-            # Lead is an orchestrator: no direct file edits. The build/test
-            # AgentDefinitions above keep Write/Edit; the Lead itself cannot.
-            # Bash stays so the Lead can run `git status`, `npm test`, etc.
-            try:
-                existing_disallowed = list(getattr(options, "disallowed_tools", None) or [])
-                for forbidden in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
-                    if forbidden not in existing_disallowed:
-                        existing_disallowed.append(forbidden)
-                options.disallowed_tools = existing_disallowed
-            except Exception as exc:  # noqa: BLE001 — best-effort
-                logger.warning("could not enforce Lead-orchestrator tool ACL: %s", exc)
+        # Simplified architecture: ONE agent per node. No build/test agent
+        # split, no orchestrator-only ACL. The agent reads intent, writes
+        # code + tests + journey runners, runs them via Bash, iterates until
+        # confident, writes its verdict to <session_dir>/verdict.json.
+        # Verification depth follows scope:
+        #   - leaf scope → component/unit tests via Bash
+        #   - integration scope → end-to-end (Playwright) via Bash
+        # No MCP verifier tool. Each agent runs its own loop.
 
         # Render the prompt.
         tier = str(config.get("v5_tier") or "auto")
@@ -238,42 +201,38 @@ async def run_lead(
         result.decomposition = graph_entry.get("decomposition") or "unknown"
         result.emitted_subtask_ids = list(graph_entry.get("child_task_ids") or [])
 
-        # Inspect messages.jsonl to detect verify call.
-        result.verify_called, result.verify_result = _detect_verify(log_dir)
+        # Verdict comes from the agent's own verdict.json (written via Write).
+        # Agents are responsible for running their own tests and reporting
+        # honest results. The runner trusts the file the agent wrote, with
+        # one exception: if the agent decomposed, it can't claim a leaf
+        # verdict — its terminal state is pending_children until parent
+        # integration runs.
+        result.verify_called, result.verify_result = _read_agent_verdict(session_dir)
 
-        # Compute verdict per philosophy invariants:
-        #   - Integration kind: this IS the resolution call for a previously
-        #     decomposed task. Use the verify result if present; only fall
-        #     back to pending_children when verify wasn't called and we have
-        #     no other signal.
-        #   - Plan-or-inline kind:
-        #     - Lead emitted children → pending_children (parent waits).
-        #     - Lead inline + verify pass/partial/unverified → that verdict.
-        #     - Lead inline + no verify → unverified.
-        #   - Lead crashed (caught below) → catastrophic.
         is_integration = kind == "integration"
         if not is_integration and result.decomposition == "emit" and result.emitted_subtask_ids:
             result.verdict = "pending_children"
         elif result.verify_called and result.verify_result:
             v = result.verify_result.get("verdict") or "unverified"
-            if v in ("pass", "partial", "unverified"):
+            if v in ("pass", "partial", "unverified", "merge_blocked"):
                 result.verdict = v
             else:
                 result.verdict = "unverified"
         elif is_integration:
-            # Integration Lead didn't (or couldn't) verify. Don't force
-            # pending_children — that loops the runner. Surface honestly.
+            # Integration agent ended without writing verdict.json.
+            # Don't force pending_children (would loop). Mark unverified.
             result.verdict = "unverified"
             failure_reason = (
-                "Integration Lead did not produce a verify result; "
-                "marking unverified rather than pending_children."
+                "Integration agent did not write verdict.json; "
+                "marking unverified."
             )
         else:
-            # No verify was called; we cannot trust any "pass" claim.
+            # Leaf agent ended without writing verdict.json.
             result.verdict = "unverified"
             failure_reason = (
-                "Lead did not call mcp__otto__verify; cannot certify pass. "
-                "Per philosophy: audit is the only PASS gate."
+                "Agent did not write verdict.json; cannot certify pass. "
+                "Agents must write their verdict to <session_dir>/verdict.json "
+                "after running tests."
             )
 
     except Exception as exc:  # noqa: BLE001 — best-effort
@@ -387,6 +346,47 @@ def _render_prompt(
             "child_summaries": summary_text,
             "journeys_path": str(journeys_path),
         })
+
+
+def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]:
+    """Read the agent-authored verdict.json from session_dir.
+
+    In the simplified architecture, agents run their own tests via Bash and
+    write their structured verdict to ``<session_dir>/verdict.json``. The
+    runner reads it after the agent's session ends. No MCP verifier; no
+    side-channel; just a file the agent wrote.
+
+    Expected format:
+      {"verdict": "pass" | "partial" | "unverified" | "merge_blocked",
+       "journeys": [{"id": "...", "passed": bool, "detail": "..."}],
+       "summary": "...",
+       "evidence": ["path1", "path2"]}
+
+    Returns (True, payload) when the file exists and parses; (False, None)
+    otherwise. Falls back to legacy ``verify/verify-result.json`` for
+    backwards-compat with sessions still using the old MCP verifier.
+    """
+    # Primary: agent-authored verdict.json
+    candidate = session_dir / "verdict.json"
+    if candidate.exists():
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("verdict"):
+                return True, payload
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    # Legacy fallback: pre-simplification verify-result.json
+    legacy = session_dir / "verify" / "verify-result.json"
+    if legacy.exists():
+        try:
+            payload = json.loads(legacy.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("verdict"):
+                return True, payload
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    return False, None
 
 
 def _detect_verify(log_dir: Path) -> tuple[bool, dict[str, Any] | None]:

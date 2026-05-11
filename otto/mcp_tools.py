@@ -349,8 +349,12 @@ def create_otto_mcp_server(
         logger.info("checkpoint(task=%s, reason=%s)", task_id, reason)
         return _ok({"acknowledged": True, "reason": reason})
 
+    # Simplified architecture: only decomposition + checkpoint tools exposed
+    # to agents. Verification is done by the agent itself running its own
+    # tests via Bash and writing verdict.json. No mcp__otto__verify or
+    # mcp__otto__certify_scaffold — the agent's loop IS the verification.
     server = create_sdk_mcp_server("otto", "1.0.0", tools=[
-        submit_subtask, begin_inline, verify, certify_scaffold, checkpoint
+        submit_subtask, begin_inline, checkpoint
     ])
     # Note: server is a dict (McpSdkServerConfig); we cannot setattr on it.
     # The Lead runner reads cost from the SDK ResultMessage directly, not via

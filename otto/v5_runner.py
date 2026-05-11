@@ -60,6 +60,45 @@ logger = logging.getLogger("otto.v5_runner")
 ROOT_TASK_ID = "root"
 
 
+# ---------------------------------------------------------------------------
+# Auditor (pluggable, opt-in)
+# ---------------------------------------------------------------------------
+#
+# The architecture supports attaching an EXTERNAL AUDITOR agent to any node
+# in the task graph. The auditor is a separate agent session (fresh context,
+# new task_id pattern `audit-<task>`) that re-runs the tests and reviews the
+# original agent's claimed verdict adversarially.
+#
+# Activation: a config flag (`audit_nodes: ["root"]` in otto.yaml or
+# task_graph entry `audit_requested: true`) marks which nodes get audited.
+# After the marked node's session ends with a non-`pending_children`
+# verdict, the runner spawns the auditor.
+#
+# The auditor's verdict either confirms the original agent's claim or
+# contradicts it. On contradiction, the runner can:
+#   - downgrade the verdict to match the audit
+#   - feed the audit findings back to the original agent for re-iteration
+#     (configurable)
+#
+# Current state: scaffold only. `should_audit(task_id, config)` and
+# `_run_auditor(...)` are stubs. Users who want auditing can opt in by
+# flipping the config flag; the implementation will wire to the auditor.md
+# prompt and follow the standard `run_lead`-style session pattern.
+
+
+def should_audit(task_id: str, config: dict[str, Any]) -> bool:
+    """Whether to spawn an auditor for ``task_id`` after its main agent ends.
+
+    Default: no auditing. Opt-in via config:
+      - ``audit_nodes: ["root"]``  — list of task IDs to audit
+      - ``audit_all: true``        — audit every node (expensive)
+    """
+    if config.get("audit_all"):
+        return True
+    nodes = config.get("audit_nodes") or []
+    return task_id in nodes
+
+
 @dataclass
 class V5RunResult:
     """Top-level result of a v5 run."""
