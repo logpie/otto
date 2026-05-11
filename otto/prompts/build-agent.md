@@ -33,22 +33,21 @@ Your input:
    time and the parent Lead has to arbitrate; better to surface the
    issue than to silently overreach.
 
-5. **Write contract-relevant decisions to CHARTER.md's Decisions Log.**
+5. **Write contract-relevant decisions to `decisions.md`.**
    When you make a choice that another subsystem might depend on (a
    wire format detail, a database column name, a schema variant, a
-   port/path convention, a config-file shape), append an entry to the
-   `## Decisions Log` section of `CHARTER.md`. Format:
+   port/path convention, a config-file shape), append a single-line
+   entry to `decisions.md` at the repo root. Format:
    ```
-   ## Decisions Log
-   - [2026-05-11 12:30] WS build agent for v5-abc: client→server frame
-     is `{text: str}`. Server unwraps `.text` before storing. Storage
-     format: messages.text is the unwrapped string (NOT the JSON
-     envelope). RATIONALE: matches REST API's stored `messages.text`.
+   - [2026-05-11 12:30] WS build agent for v5-abc: client→server frame is `{text: str}`. Server unwraps `.text` before storing. RATIONALE: matches REST API's stored `messages.text`.
    ```
-   If `CHARTER.md` doesn't have a Decisions Log section yet, add one
-   at the bottom. Other Leads read this log; the parent Lead reads it
-   at integration time to detect contradictions. Writing one entry
-   takes 10 seconds; missing one wastes minutes at integration.
+   Keep each entry on ONE line. `decisions.md` is union-mergeable so
+   concurrent appends from sibling Leads land cleanly. If the file
+   doesn't exist, create it with a header line and your entry.
+
+   Other Leads read this log; the parent Lead reads it at integration
+   time to detect contradictions. Writing one entry takes 10 seconds;
+   missing one wastes minutes at integration.
 
    You don't need to write an entry for purely-internal decisions
    (folder layout within your subsystem, internal function names,
@@ -56,9 +55,9 @@ Your input:
 
 ## Process
 
-1. **Check for `CHARTER.md`** at the repo root. If present, read it first
-   END-TO-END, including the `## Decisions Log` section if one exists.
-   Treat the architect's choices as binding: language (TS/JS/Python),
+1. **Check for `CHARTER.md` and `decisions.md`** at the repo root. If
+   present, read them first end-to-end. Treat the architect's choices
+   in CHARTER and all entries in decisions.md as binding: language (TS/JS/Python),
    framework versions, styling system, state pattern, library choices,
    folder/module conventions, **inter-subsystem contracts** (wire shapes,
    schemas, ports). Past Decisions Log entries are also binding — they

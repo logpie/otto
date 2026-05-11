@@ -197,6 +197,24 @@ def discard_lockfile(ours: str, theirs: str, base: Optional[str]) -> Optional[st
 # ---------------------------------------------------------------------------
 
 # Order matters: more specific patterns first.
+def merge_decisions_log(ours: str, theirs: str, base: Optional[str]) -> Optional[str]:
+    """Union-merge for the Decisions Log (decisions.md / decisions.jsonl).
+
+    Each line is an independent entry; concurrent appends from sibling
+    Leads should both land. We dedupe identical lines, preserve order:
+    everything from ours, then theirs-only lines in their original order.
+    """
+    ours_lines = ours.splitlines()
+    theirs_lines = theirs.splitlines()
+    seen = set(ours_lines)
+    out = list(ours_lines)
+    for ln in theirs_lines:
+        if ln not in seen:
+            out.append(ln)
+            seen.add(ln)
+    return "\n".join(out) + ("\n" if not out or out[-1] != "" else "")
+
+
 _DRIVERS: tuple[tuple[str, MergeDriver], ...] = (
     ("package.json", merge_package_json),
     ("pyproject.toml", lambda o, t, b: None),  # let LLM handle; toml stdlib varies
@@ -206,6 +224,8 @@ _DRIVERS: tuple[tuple[str, MergeDriver], ...] = (
     ("tsconfig.node.json", merge_tsconfig_json),
     ("requirements.txt", merge_requirements_txt),
     (".gitignore", merge_gitignore),
+    ("decisions.md", merge_decisions_log),
+    ("decisions.jsonl", merge_decisions_log),
     ("package-lock.json", discard_lockfile),
     ("yarn.lock", discard_lockfile),
     ("pnpm-lock.yaml", discard_lockfile),

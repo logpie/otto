@@ -29,8 +29,10 @@ merged. Treat it as a normal codebase.
 
 ## Step 0a — Read the Decisions Log and reconcile contradictions.
 
-Read `CHARTER.md` end-to-end, especially the `## Decisions Log` section.
-Each child wrote entries there when they made boundary-relevant choices.
+Read `CHARTER.md` for stack/conventions and `decisions.md` (union-merged
+append-only log) for the running record of child decisions.
+Each child wrote entries to `decisions.md` when they made boundary-relevant
+choices.
 Scan for contradictions:
 
   - Two entries that decide opposite things for the same scope (e.g.,
@@ -52,13 +54,10 @@ For each contradiction:
      integration session IS allowed (you're the arbiter); the discipline
      against cross-subsystem edits applies to child build agents, not
      to you.
-  3. **Record** your tie-break by appending to the Decisions Log:
+  3. **Record** your tie-break by appending a single-line entry to
+     `decisions.md`:
      ```
-     - [2026-05-11 14:00] integration Lead for v5-root (arbitration):
-       Tie-break between WS Lead and Web Lead on the WebSocket frame
-       shape. PREVAILING: client sends `{text: str}`, server unwraps
-       `.text`. Patched ws/main.py to extract text before storing.
-       RATIONALE: matches Storage.text format in CHARTER's Contracts.
+     - [2026-05-11 14:00] integration Lead for v5-root (arbitration): tie-break between WS Lead and Web Lead on the WebSocket frame shape. PREVAILING: client sends `{text: str}`, server unwraps `.text`. Patched ws/main.py to extract text before storing. RATIONALE: matches Storage.text format in CHARTER's Contracts.
      ```
 
 This is how decisions become durable. Future re-runs (resume from

@@ -109,6 +109,33 @@ def test_find_driver_lookup() -> None:
     assert find_driver("src/App.tsx") is None
 
 
+def test_decisions_log_union_merge() -> None:
+    """Decisions Log appends from concurrent siblings should union, not conflict."""
+    from otto.v5_merge_drivers import merge_decisions_log
+
+    ours = (
+        "# Decisions Log\n\n"
+        "- [2026-05-11 12:00] API Lead: DB path is ./chat.db. RATIONALE: shared root.\n"
+    )
+    theirs = (
+        "# Decisions Log\n\n"
+        "- [2026-05-11 12:05] WS Lead: client→server is {text:str}. RATIONALE: matches REST.\n"
+    )
+    merged = merge_decisions_log(ours, theirs, None)
+    assert "API Lead: DB path" in merged
+    assert "WS Lead: client→server" in merged
+    # Header appears once, not twice.
+    assert merged.count("# Decisions Log") == 1
+
+
+def test_decisions_log_dedupe_identical_lines() -> None:
+    """If two sides both wrote the same entry, it lands once."""
+    from otto.v5_merge_drivers import merge_decisions_log
+    line = "- [2026-05-11 12:00] Web Lead: localStorage key is `user_id`.\n"
+    merged = merge_decisions_log("# Log\n" + line, "# Log\n" + line, None)
+    assert merged.count(line.strip()) == 1
+
+
 def test_lockfile_discard_signal() -> None:
     driver = find_driver("package-lock.json")
     assert driver is not None
