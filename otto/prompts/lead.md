@@ -57,29 +57,31 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
      (Tailwind / CSS modules / styled-components), key libraries
      (Recharts / Chart.js / d3 — if the intent mentions charts), HTTP
      client, test runner config.
-  3. Write `CHARTER.md` at the repo root with these REQUIRED sections:
-     - **Stack & versions**
-     - **Style/UX conventions** (theme tokens, spacing, typography)
-     - **State management pattern + storage layout**
-     - **Library choices with rationale** (esp. for items the intent
-       explicitly named)
-     - **Folder/module conventions** (where pages, components, hooks live)
-     - **Inter-subsystem contracts** — REQUIRED when children span
-       subsystems with wire protocols (web ↔ API ↔ WebSocket ↔ CLI ↔ DB).
-       Specify exact wire shapes, not prose. Skip ONLY for
-       single-subsystem decompositions (a single React SPA split into
-       pages) where no wire protocol exists between children.
+  3. Write `CHARTER.md` at the repo root. Its purpose is to document
+     **cross-child decisions** — anything that, if left to one leaf
+     agent to decide alone, would cause sibling agents to drift or
+     conflict. Decisions internal to a single child (UX, internal
+     naming, file layout within its directory, error-handling style,
+     test framework choice, etc.) belong to that leaf agent, NOT to
+     CHARTER.
+
+     Cross-child concerns vary by product. Cover whatever applies
+     here; skip what doesn't. Common ones:
+
+     - **Stack choice** (when children share a runtime): language
+       version, framework, package manager, test runner config.
+     - **Wire shapes** (when children communicate over a protocol):
+       exact request/response/frame/message shapes, not prose. This
+       is the most common decomp quality bug — two Leads implement
+       opposite sides of a protocol independently and drift.
 
        Example for a chat product:
        ```
        ### REST endpoints
        POST /register   request:  {"username": str}
                         response: {"user_id": int}
-       POST /rooms      request:  {"name": str}
-                        response: {"room_id": int}
 
        ### WebSocket protocol
-       Connect: ws://host:8002/ws/{room_id}?user_id=<int>
        Client → server frame: {"text": str}  — server MUST extract .text
        Server → all-clients frame: {"user": str, "text": str, "ts": iso8601}
        Storage: messages.text = the EXTRACTED text string (NOT the wrapped JSON)
@@ -88,22 +90,20 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
        messages(id INT PK, room_id INT, user_id INT, text TEXT, ts TEXT)
        ```
 
-       Without this section two Leads implement opposite sides of a
-       protocol independently and drift — this is the most common
-       decomp quality bug.
+     - **Shared schemas** (when multiple children persist data): DB
+       tables, file formats, on-disk layouts.
+     - **Infrastructure conventions** (when services coexist): bind
+       addresses, port allocation, service discovery, env vars, auth
+       boundaries. For network services on macOS, default bind to
+       `127.0.0.1` (not `localhost` — macOS resolves it to `::1`
+       first, causing silent IPv6/IPv4 mismatches).
+     - **Shared library or type choices** (when children import the
+       same dep): pin the version and document where it's used.
 
-       When children include network services (REST/WS/etc.), the
-       Contracts section MUST also specify:
-       - **Bind addresses**: `127.0.0.1:N` for each service (NOT
-         `localhost` — macOS resolves it to `::1` first, causing
-         silent IPv6/IPv4 binding mismatches that surface as test
-         flakes 30 minutes into integration).
-       - **Port allocation**: fixed ports listed once, OR dynamic via
-         a runtime port-file convention — pick one strategy and state
-         it.
-       - **Discovery**: how each service finds the others (env var,
-         hardcoded URL, etc.). The frontend agent MUST NOT need to
-         guess this.
+     What NOT to put in CHARTER (these belong to leaf agents):
+     UX/visual design, internal component structure, naming inside a
+     child's directory, test-framework choice within a child,
+     error-message wording, accessibility specifics, etc.
   4. Also create `decisions.md` at the repo root as the empty Decisions
      Log (header + format hint; children will append).
   5. Scaffold the minimum project shell (package.json / pyproject.toml,
