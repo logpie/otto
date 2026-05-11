@@ -99,6 +99,18 @@ Is this ONE coherent unit of user-visible work, or MULTIPLE strategic areas?
         - Library choices with rationale (esp. for items the intent
           explicitly named)
         - Folder/module conventions (where pages, components, hooks live)
+        - **Decisions Log** — start with an empty section:
+          ```
+          ## Decisions Log
+          (Children append boundary-relevant decisions here; integration
+          Leads arbitrate contradictions and record their tie-breaks.)
+          ```
+          This is the lightweight async-communication channel between
+          parallel children. Build agents append when they make
+          contract-relevant choices; integration Leads read for
+          contradictions and arbitrate; future sessions inherit the
+          accumulated decisions. Real teams ship by this pattern, not
+          by frozen upfront contracts.
         - **Inter-subsystem contracts** — REQUIRED when children span
           subsystems with wire protocols (web ↔ API ↔ WebSocket ↔ CLI ↔ DB).
           Without this section two Leads implement opposite sides of a
