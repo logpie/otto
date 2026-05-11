@@ -89,9 +89,15 @@ each journey in `{journeys_path}`, decide pass/fail.
 Iterate small fixes if needed (≤50 LOC of glue). Don't re-implement
 features.
 
-## Step 3 — Write verdict.json.
+## Step 3 — Write verdict.json (with the Write tool — to a file).
 
-Write `<session_dir>/verdict.json`:
+Use the **Write tool** to create `<session_dir>/verdict.json` as an
+actual file on disk. Do NOT just inline the JSON in your final message
+— the runner reads the FILE, not your message. If you only paste the
+JSON in your text without using Write, your verdict won't register
+and we'll record `unverified`.
+
+Schema:
 
 ```json
 {

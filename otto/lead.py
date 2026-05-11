@@ -386,7 +386,115 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
         except (OSError, json.JSONDecodeError):
             pass
 
+    # Rescue: agent inlined the verdict JSON in its final text message but
+    # forgot to write the file. Walk lead/messages.jsonl looking for a JSON
+    # object with the expected shape in the last assistant turn.
+    rescued = _rescue_verdict_from_messages(session_dir)
+    if rescued is not None:
+        try:
+            (session_dir / "verdict.json").write_text(
+                json.dumps(rescued, indent=2) + "\n", encoding="utf-8",
+            )
+        except OSError:
+            pass
+        return True, rescued
+
     return False, None
+
+
+def _rescue_verdict_from_messages(session_dir: Path) -> dict[str, Any] | None:
+    """Search the last assistant turn(s) for an inline JSON verdict object.
+
+    The agent's prompt asks it to write verdict.json via the Write tool, but
+    agents sometimes inline the JSON in their final message instead. Parse
+    the message stream as a fallback so we don't lose work to a missing file.
+    """
+    import re
+
+    messages_paths = [
+        session_dir / "lead" / "messages.jsonl",
+        session_dir / "integration" / "lead" / "messages.jsonl",
+    ]
+    for path in messages_paths:
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # Walk lines newest-first, looking for assistant blocks with text.
+        lines = list(reversed(text.splitlines()))
+        for raw in lines:
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(msg, dict) or msg.get("type") != "assistant":
+                continue
+            for block in msg.get("blocks") or []:
+                if block.get("type") != "text":
+                    continue
+                content = block.get("text") or ""
+                payload = _extract_verdict_json(content)
+                if payload is not None:
+                    return payload
+    return None
+
+
+def _extract_verdict_json(text: str) -> dict[str, Any] | None:
+    """Find the first JSON object containing a `verdict` field in ``text``.
+
+    Looks for fenced ```json blocks first, then for any balanced-brace JSON
+    object. Returns the parsed dict if it has the verdict schema we expect.
+    """
+    import re
+
+    # Try fenced ```json blocks first.
+    for m in re.finditer(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL):
+        try:
+            obj = json.loads(m.group(1))
+            if isinstance(obj, dict) and obj.get("verdict") in (
+                "pass", "partial", "unverified", "merge_blocked",
+            ):
+                return obj
+        except json.JSONDecodeError:
+            continue
+
+    # Fall back to balanced-brace scan.
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                candidate = text[start:i+1]
+                try:
+                    obj = json.loads(candidate)
+                    if isinstance(obj, dict) and obj.get("verdict") in (
+                        "pass", "partial", "unverified", "merge_blocked",
+                    ):
+                        return obj
+                except json.JSONDecodeError:
+                    pass
+                start = -1
+    return None
 
 
 def _detect_verify(log_dir: Path) -> tuple[bool, dict[str, Any] | None]:

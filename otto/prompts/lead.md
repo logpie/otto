@@ -92,10 +92,15 @@ your own context).
 There is NO retry cap. There is a wall-time + turn budget. You decide
 how to spend it.
 
-## Step 3 — Write verdict.json.
+## Step 3 — Write verdict.json (with the Write tool — to a file).
 
-When done (whether pass, partial, or you ran out of budget), write
-`<session_dir>/verdict.json` with this shape:
+When done (whether pass, partial, or you ran out of budget), use the
+**Write tool** to create `<session_dir>/verdict.json` as an actual file
+on disk. Do NOT just include the JSON in your final message — the
+runner reads the FILE, not your message. If you only inline the JSON
+in text, your verdict won't register and we'll record `unverified`.
+
+Schema:
 
 ```json
 {
