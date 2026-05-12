@@ -45,7 +45,7 @@ from otto.v5_preflight import (
     check_scaffold_compiles,
     filter_blocked_descendants,
     run_preflight,
-    smoke_start_services,
+    smoke_clean_deploy,
 )
 from otto.queue.subtask import (
     read_pending,
@@ -804,9 +804,12 @@ async def _run_integration(
     # issue early so the integration agent gets a clear signal instead of
     # spending 20-30 min iterating on start failures.
     try:
-        logger.info("preflight: running pre-integration smoke check")
-        smoke_issues = smoke_start_services(
-            project_dir, timeout_s=8, logger_fn=lambda m: logger.info("preflight: %s", m)
+        logger.info("preflight: running pre-integration clean-deploy check")
+        smoke_issues = smoke_clean_deploy(
+            project_dir,
+            timeout_s=90,
+            port_wait_s=12,
+            logger_fn=lambda m: logger.info("preflight: %s", m),
         )
         for issue in smoke_issues:
             log_fn = logger.error if issue.severity in ("error", "block") else logger.warning

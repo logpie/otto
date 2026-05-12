@@ -320,6 +320,245 @@ def check_scaffold_compiles(
     return issues
 
 
+def smoke_clean_deploy(
+    project_dir: Path,
+    timeout_s: int = 90,
+    port_wait_s: int = 12,
+    logger_fn: Any = None,
+) -> list[PreflightIssue]:
+    """Verify the project deploys cleanly from a fresh state.
+
+    Copies the project to a temp directory (excluding stateful dirs:
+    .venv, node_modules, dist, .git, .worktrees, otto_logs), then runs
+    start.sh from that temp dir. Waits up to ``port_wait_s`` after
+    install for declared ports to bind. Cleans up regardless of outcome.
+
+    This is the deployment-readiness layer of the validation pyramid:
+    catches packaging bugs (wrong pyproject layout, missing deps in
+    manifests, hardcoded paths assuming working state) that block a
+    fresh clone from running. The weaker in-place ``smoke_start_services``
+    runs against already-populated state and misses these.
+
+    Skips if no start.sh exists (caller's choice whether that's a
+    separate failure mode).
+    """
+    import re
+    import shutil
+    import socket
+    import subprocess
+    import tempfile
+    import time
+
+    issues: list[PreflightIssue] = []
+
+    def log(msg: str) -> None:
+        if logger_fn:
+            logger_fn(msg)
+
+    start_sh = project_dir / "start.sh"
+    if not start_sh.exists():
+        log("clean-deploy: no start.sh; skipping")
+        return issues
+
+    # Parse declared ports from CHARTER (best-effort).
+    declared_ports: list[int] = []
+    charter = project_dir / "CHARTER.md"
+    if charter.exists():
+        try:
+            text = charter.read_text(encoding="utf-8")
+            for m in re.finditer(r"(?:127\.0\.0\.1|localhost):(\d{4,5})", text):
+                declared_ports.append(int(m.group(1)))
+            for m in re.finditer(r"\b(?:port|Port|PORT)\s*[:=]?\s*(\d{4,5})\b", text):
+                declared_ports.append(int(m.group(1)))
+        except OSError:
+            pass
+    declared_ports = sorted(set(declared_ports))
+    log(f"clean-deploy: declared ports {declared_ports or '(none)'}")
+
+    # Pre-check: don't run if these ports are already busy (zombies),
+    # otherwise we can't tell if our fresh deploy worked.
+    busy: list[int] = []
+    for port in declared_ports:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            busy.append(port)
+        finally:
+            s.close()
+    if busy:
+        issues.append(
+            PreflightIssue(
+                kind="clean_deploy_port_busy",
+                severity="warn",
+                message=(
+                    f"Cannot run clean-deploy smoke: ports {busy} already "
+                    f"bound (likely zombies from prior runs). Skipping check."
+                ),
+            )
+        )
+        return issues
+
+    # Copy project to temp dir, excluding stateful state.
+    temp_root = Path(tempfile.mkdtemp(prefix="otto-deploy-"))
+    log(f"clean-deploy: copying project to {temp_root}")
+    rsync = shutil.which("rsync")
+    if rsync:
+        excludes = [
+            ".venv", "node_modules", "dist", ".git", ".worktrees",
+            "otto_logs", "__pycache__", ".pytest_cache", "*.egg-info",
+            ".mypy_cache", "target",  # rust
+        ]
+        cmd = [rsync, "-a"] + [f"--exclude={p}" for p in excludes] + [
+            f"{project_dir}/", f"{temp_root}/"
+        ]
+        try:
+            subprocess.run(cmd, check=True, timeout=30, capture_output=True)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            issues.append(
+                PreflightIssue(
+                    kind="clean_deploy_copy_failed",
+                    severity="warn",
+                    message=f"rsync to temp dir failed: {exc}",
+                )
+            )
+            shutil.rmtree(temp_root, ignore_errors=True)
+            return issues
+    else:
+        # Fallback: shutil.copytree with ignore patterns.
+        def _ignore(_d: str, names: list[str]) -> list[str]:
+            return [n for n in names if n in {
+                ".venv", "node_modules", "dist", ".git", ".worktrees",
+                "otto_logs", "__pycache__", ".pytest_cache",
+                ".mypy_cache", "target",
+            } or n.endswith(".egg-info")]
+        try:
+            shutil.copytree(project_dir, temp_root, dirs_exist_ok=True, ignore=_ignore)
+        except OSError as exc:
+            issues.append(
+                PreflightIssue(
+                    kind="clean_deploy_copy_failed",
+                    severity="warn",
+                    message=f"copytree to temp dir failed: {exc}",
+                )
+            )
+            shutil.rmtree(temp_root, ignore_errors=True)
+            return issues
+
+    # Run start.sh in the temp dir.
+    log(f"clean-deploy: running start.sh in {temp_root}")
+    bash = shutil.which("bash")
+    if not bash:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        return issues
+    proc = None
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — our own script
+            [bash, "start.sh"],
+            cwd=temp_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        # Poll for ports to come up. Allow up to timeout_s for install
+        # + port_wait_s for startup.
+        deadline = time.time() + timeout_s
+        listening: set[int] = set()
+        start_exited_early = False
+        last_output_check = 0.0
+        while time.time() < deadline:
+            # Check if start.sh exited (install failure surfaces here).
+            ret = proc.poll()
+            if ret is not None and ret != 0 and not start_exited_early:
+                start_exited_early = True
+                # Capture some output for the error message.
+                try:
+                    out = proc.stdout.read(2000).decode("utf-8", errors="replace") if proc.stdout else ""
+                except Exception:  # noqa: BLE001
+                    out = ""
+                issues.append(
+                    PreflightIssue(
+                        kind="clean_deploy_start_failed",
+                        severity="block",
+                        message=(
+                            f"start.sh exited {ret} during clean-state "
+                            f"deploy. Last output (truncated): {out[-800:]!r}"
+                        ),
+                    )
+                )
+                break
+            # Poll all declared ports.
+            for port in declared_ports:
+                if port in listening:
+                    continue
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.3)
+                try:
+                    s.connect(("127.0.0.1", port))
+                    listening.add(port)
+                    log(f"clean-deploy: port {port} listening")
+                except OSError:
+                    pass
+                finally:
+                    s.close()
+            if declared_ports and listening == set(declared_ports):
+                log("clean-deploy: all declared ports listening")
+                break
+            time.sleep(1.5)
+
+        if not start_exited_early and declared_ports:
+            missing = [p for p in declared_ports if p not in listening]
+            if missing:
+                issues.append(
+                    PreflightIssue(
+                        kind="clean_deploy_ports_not_listening",
+                        severity="warn",
+                        message=(
+                            f"After clean-state deploy, ports {missing} did "
+                            f"not bind within {timeout_s}s. Listening: "
+                            f"{sorted(listening) or 'none'}. start.sh may "
+                            f"have install issues or service errors."
+                        ),
+                    )
+                )
+        elif not declared_ports and not start_exited_early:
+            log("clean-deploy: no ports to verify; start.sh did not exit")
+    except Exception as exc:  # noqa: BLE001
+        issues.append(
+            PreflightIssue(
+                kind="clean_deploy_smoke_error",
+                severity="warn",
+                message=f"clean-deploy smoke raised: {exc}",
+            )
+        )
+    finally:
+        # Kill the start.sh process tree.
+        if proc and proc.poll() is None:
+            try:
+                import os
+                import signal
+
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+        # Kill anything bound to declared ports in temp env.
+        for port in declared_ports:
+            try:
+                out = subprocess.check_output(
+                    ["lsof", "-ti", f":{port}"], text=True, timeout=2
+                )
+                for pid in out.strip().split("\n"):
+                    if pid.strip().isdigit():
+                        subprocess.run(["kill", "-9", pid.strip()], timeout=2, check=False)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+        # Clean up temp dir.
+        shutil.rmtree(temp_root, ignore_errors=True)
+        log("clean-deploy: temp dir cleaned up")
+
+    return issues
+
+
 def smoke_start_services(
     project_dir: Path, timeout_s: int = 8, logger_fn: Any = None
 ) -> list[PreflightIssue]:
