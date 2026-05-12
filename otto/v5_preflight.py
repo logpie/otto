@@ -191,7 +191,9 @@ def run_preflight(
 
 
 def check_scaffold_compiles(
-    project_dir: Path, timeout_s: int = 90
+    project_dir: Path,
+    timeout_s: int = 90,
+    architect_task_id: str | None = None,
 ) -> list[PreflightIssue]:
     """Run compile/typecheck against the project's scaffold.
 
@@ -246,6 +248,7 @@ def check_scaffold_compiles(
                                 f"npm run build failed in {pkg.parent}: "
                                 f"exit {proc.returncode}. Tail: {tail!r}"
                             ),
+                            task_id=architect_task_id,
                         )
                     )
             except subprocess.TimeoutExpired:
@@ -302,6 +305,7 @@ def check_scaffold_compiles(
                                 f"py_compile failed in {pyp.parent}: "
                                 f"exit {proc.returncode}. Tail: {tail!r}"
                             ),
+                            task_id=architect_task_id,
                         )
                     )
             except subprocess.TimeoutExpired:
@@ -317,7 +321,7 @@ def check_scaffold_compiles(
 
 
 def smoke_start_services(
-    project_dir: Path, timeout_s: int = 8
+    project_dir: Path, timeout_s: int = 8, logger_fn: Any = None
 ) -> list[PreflightIssue]:
     """Try to start the project's services briefly to verify they bind.
 
@@ -341,8 +345,13 @@ def smoke_start_services(
 
     issues: list[PreflightIssue] = []
 
+    def log(msg: str) -> None:
+        if logger_fn:
+            logger_fn(msg)
+
     start_sh = project_dir / "start.sh"
     if not start_sh.exists():
+        log("smoke: no start.sh; skipping")
         return issues  # no start.sh — caller may want to skip this check entirely
 
     # Parse CHARTER for declared ports.
@@ -361,7 +370,9 @@ def smoke_start_services(
     declared_ports = sorted(set(declared_ports))
     if not declared_ports:
         # nothing to verify; skip
+        log("smoke: no declared ports in CHARTER; skipping")
         return issues
+    log(f"smoke: probing {len(declared_ports)} declared ports {declared_ports}")
 
     # Check ports aren't ALREADY bound (zombie) before we start.
     busy_before: list[int] = []
@@ -414,6 +425,7 @@ def smoke_start_services(
                 pass
             finally:
                 s.close()
+        log(f"smoke: after {timeout_s}s, listening={listening}/declared={declared_ports}")
         missing = [p for p in declared_ports if p not in listening]
         if missing:
             issues.append(

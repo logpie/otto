@@ -386,16 +386,21 @@ async def _process_children(
         # otherwise discovered 20+ min later when features try to build on it.
         if not scaffold_compile_done:
             tasks = (graph.get("tasks") or {})
-            architect_done = any(
-                (t.get("intent") or "").lstrip().lower().startswith("architect")
-                and t.get("verdict") == "pass"
-                and not (t.get("depends_on") or [])
-                for t in tasks.values()
-            )
-            if architect_done:
+            architect_tid: str | None = None
+            for tid, t in tasks.items():
+                if (
+                    (t.get("intent") or "").lstrip().lower().startswith("architect")
+                    and t.get("verdict") == "pass"
+                    and not (t.get("depends_on") or [])
+                ):
+                    architect_tid = tid
+                    break
+            if architect_tid is not None:
                 scaffold_compile_done = True
-                logger.info("preflight: running scaffold compile check after architect-pass")
-                compile_issues = check_scaffold_compiles(project_dir)
+                logger.info("preflight: running scaffold compile check after architect-pass (task=%s)", architect_tid)
+                compile_issues = check_scaffold_compiles(
+                    project_dir, architect_task_id=architect_tid
+                )
                 for issue in compile_issues:
                     key = f"{issue.kind}:scaffold"
                     if key in preflight_seen:
@@ -799,7 +804,10 @@ async def _run_integration(
     # issue early so the integration agent gets a clear signal instead of
     # spending 20-30 min iterating on start failures.
     try:
-        smoke_issues = smoke_start_services(project_dir, timeout_s=8)
+        logger.info("preflight: running pre-integration smoke check")
+        smoke_issues = smoke_start_services(
+            project_dir, timeout_s=8, logger_fn=lambda m: logger.info("preflight: %s", m)
+        )
         for issue in smoke_issues:
             log_fn = logger.error if issue.severity in ("error", "block") else logger.warning
             log_fn("preflight %s [%s]: %s", issue.kind, issue.severity, issue.message)
