@@ -42,8 +42,10 @@ from otto import paths as _paths
 from otto.lead import LeadResult, run_lead
 from otto.v5_preflight import (
     PreflightIssue,
+    check_scaffold_compiles,
     filter_blocked_descendants,
     run_preflight,
+    smoke_start_services,
 )
 from otto.queue.subtask import (
     read_pending,
@@ -324,6 +326,7 @@ async def _process_children(
     completed: set[str] = set()
     in_flight: dict[str, asyncio.Task[Any]] = {}
     preflight_seen: set[str] = set()  # issue kinds already emitted, dedupe
+    scaffold_compile_done: bool = False  # one-shot check after architect
 
     while True:
         # Check tree budget cap.
@@ -376,6 +379,36 @@ async def _process_children(
                     len(blocked), sorted(blocked),
                 )
             ready = _filtered
+
+        # Post-architect scaffold compile check: run once when architect
+        # transitions to verdict=pass, before feature children dispatch.
+        # Catches "architect said pass but scaffold doesn't compile" —
+        # otherwise discovered 20+ min later when features try to build on it.
+        if not scaffold_compile_done:
+            tasks = (graph.get("tasks") or {})
+            architect_done = any(
+                (t.get("intent") or "").lstrip().lower().startswith("architect")
+                and t.get("verdict") == "pass"
+                and not (t.get("depends_on") or [])
+                for t in tasks.values()
+            )
+            if architect_done:
+                scaffold_compile_done = True
+                logger.info("preflight: running scaffold compile check after architect-pass")
+                compile_issues = check_scaffold_compiles(project_dir)
+                for issue in compile_issues:
+                    key = f"{issue.kind}:scaffold"
+                    if key in preflight_seen:
+                        continue
+                    preflight_seen.add(key)
+                    log_fn = logger.error if issue.severity in ("error", "block") else logger.warning
+                    log_fn("preflight %s [%s]: %s", issue.kind, issue.severity, issue.message)
+                    _emit(on_event, {
+                        "event": "preflight_issue",
+                        "kind": issue.kind,
+                        "severity": issue.severity,
+                        "message": issue.message,
+                    })
 
         # Spawn ready tasks up to max_parallel.
         for entry in ready:
@@ -760,6 +793,24 @@ async def _run_integration(
     integration_session_id = _new_session_id()
     integration_session_dir = _paths.session_dir(project_dir, integration_session_id)
     integration_session_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-integration smoke check: try to start declared services for a
+    # few seconds. If ports are busy or services can't bind, surface the
+    # issue early so the integration agent gets a clear signal instead of
+    # spending 20-30 min iterating on start failures.
+    try:
+        smoke_issues = smoke_start_services(project_dir, timeout_s=8)
+        for issue in smoke_issues:
+            log_fn = logger.error if issue.severity in ("error", "block") else logger.warning
+            log_fn("preflight %s [%s]: %s", issue.kind, issue.severity, issue.message)
+            _emit(on_event, {
+                "event": "preflight_issue",
+                "kind": issue.kind,
+                "severity": issue.severity,
+                "message": issue.message,
+            })
+    except Exception as exc:  # noqa: BLE001 — best-effort, never block integration
+        logger.warning("pre-integration smoke check raised: %s", exc)
 
     # The integration Lead's verify call needs spec.json (same shape as build
     # children get via _run_child). Find any earlier session that has it and
