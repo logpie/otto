@@ -54,6 +54,40 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
   integration child duplicates that work and burns 20-30 min of wall
   time. Trust the auto-integration phase.
 
+  ### Self-review BEFORE finishing
+
+  After you've called `mcp__otto__submit_subtask` for all the
+  children you plan to emit, STOP and review the graph you just
+  produced. Ask yourself, honestly:
+
+  1. **Sibling path overlap**: do any two children's intents declare
+     ownership of the same directory or file (e.g., two children
+     both claim `api/`, or both claim `db/schema.sql`)? If yes,
+     they'll merge_blocked. Re-emit with one owner per path.
+  2. **Contract gaps**: does any child's intent reference an
+     endpoint, frame shape, or shared file that no other child
+     (and no CHARTER) defines? If yes, either add the
+     definition to CHARTER (re-emit architect with richer intent)
+     or assign the missing piece to a specific child.
+  3. **Schema/state ownership**: when multiple children read/write
+     the same data (SQLite tables, shared JSON files, env vars),
+     is ONE child the schema-owner and the others consumers? If
+     ownership is ambiguous, both will define overlapping schemas
+     and conflict. Make it explicit.
+  4. **Dependency sanity**: does every `depends_on` reference a
+     real emitted task? Does the dependency direction make sense
+     (e.g., FE depends on architect, not the other way around)?
+
+  If you spot a problem, you can call `mcp__otto__submit_subtask`
+  AGAIN to replace a problematic child (use the same intent
+  language pattern but with the issue fixed). Don't ship a graph
+  you wouldn't approve as a tech lead reviewing a PR.
+
+  This self-review costs you nothing — you have the full intent
+  context fresh. It catches the bugs that cause the worst kind of
+  failure (merge_blocked, contract drift) before children waste
+  20+ min building on a broken foundation.
+
   ### Architect-first — default, not opt-in
 
   **Default to emitting an Architect subtask FIRST** whenever you
