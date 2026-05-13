@@ -206,16 +206,38 @@ def ensure_initial_commit(project_dir: Path) -> bool:
     Best-effort: returns False on any failure.
     """
     try:
+        # Refresh the managed .gitignore block on every call, even for
+        # existing repos. New patterns added to _DEFAULT_GITIGNORE
+        # (e.g., the WAL sidecars or symlink no-slash forms) only land
+        # on existing projects if we re-apply at pipeline start.
+        _apply_managed_gitignore(project_dir / ".gitignore")
+
         head = subprocess.run(
             ["git", "rev-parse", "--verify", "HEAD"],
             cwd=str(project_dir),
             capture_output=True,
         )
         if head.returncode == 0:
+            # If the refresh modified .gitignore, commit it so the
+            # update propagates to subsequently-created child worktrees.
+            status = subprocess.run(
+                ["git", "status", "--porcelain", ".gitignore"],
+                cwd=str(project_dir),
+                capture_output=True,
+                text=True,
+            )
+            if status.stdout.strip():
+                subprocess.run(
+                    ["git", "add", ".gitignore"],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "commit", "-m", "otto: refresh managed gitignore block"],
+                    cwd=str(project_dir),
+                    capture_output=True,
+                )
             return False
-
-        # Seed (or refresh) the managed .gitignore block.
-        _apply_managed_gitignore(project_dir / ".gitignore")
 
         subprocess.run(
             ["git", "add", "-A"],
@@ -304,7 +326,10 @@ def setup_child_worktree(
     wt_path = child_worktree_path(project_dir, child_task_id)
 
     if wt_path.exists() and (wt_path / ".git").exists():
-        # Already exists; reuse.
+        # Already exists; reuse — but refresh the managed gitignore
+        # block so existing worktrees pick up new patterns added since
+        # the worktree was created.
+        _apply_managed_gitignore(wt_path / ".gitignore")
         return wt_path
 
     try:
@@ -314,6 +339,10 @@ def setup_child_worktree(
             branch=branch,
             base_ref=parent_integration_branch,
         )
+        # New worktree: ensure managed gitignore block is present from
+        # day one (commit_worktree's apply happens at commit time, but
+        # we want the patterns active throughout the agent's session).
+        _apply_managed_gitignore(wt_path / ".gitignore")
         return wt_path
     except Exception as exc:  # noqa: BLE001
         logger.warning(
