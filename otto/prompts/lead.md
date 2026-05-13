@@ -163,6 +163,13 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
        test structure inside a child's own tests dir — those are
        leaf decisions.
 
+       **Phrase these notes from siblings' POV — you are exempt.**
+       You ARE the agent that initially sets up `node_modules`,
+       `.venv`, and Playwright browsers via your scaffold + verify
+       step. The "do not re-run install" directive is for downstream
+       feature children, not for you. Don't get tripped up by your
+       own notes.
+
      - **Stack choice** (when children share a runtime): language
        version, framework, package manager, test runner config.
      - **Wire shapes** (when children communicate over a protocol):

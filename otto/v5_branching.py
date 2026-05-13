@@ -424,7 +424,18 @@ def merge_branch_into(
         )
         if truly_blocked:
             return False, f"conflict on: {', '.join(truly_blocked[:5])}"
-        return False, f"conflict on: {', '.join(files[:5]) or '?'}"
+        # All files were auto-resolvable individually, but commit failed
+        # (something downstream like hooks / index in bad state). Report
+        # the *original* conflict set so the log isn't a bare "?". Without
+        # this, the auto-resolution path emptied truly_blocked + the
+        # working file list before we abort, and we'd lose track of what
+        # the merge actually tripped on.
+        if files:
+            return False, (
+                f"auto-resolve commit failed for {branch}; "
+                f"originally conflicted on: {', '.join(files[:5])}"
+            )
+        return False, f"merge of {branch} aborted with no conflict files reported"
     except Exception as exc:  # noqa: BLE001
         return False, f"merge crashed: {exc}"
 
