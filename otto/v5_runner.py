@@ -543,6 +543,60 @@ async def _process_children(
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("playwright preinstall failed: %s", exc)
 
+                    # Source-of-truth fix (Part A): build the capability
+                    # inventory from the actual scaffold + inject it into
+                    # CHARTER as a managed "Detected Infrastructure" block.
+                    # This gives feature children a deterministic source
+                    # for operational facts (scripts, deps, configs) that
+                    # the architect can't unintentionally contradict in
+                    # prose.
+                    inv = None
+                    try:
+                        from otto.v5_capability_inventory import (
+                            build_inventory, render_inventory, inject_into_charter,
+                            check_coherence,
+                        )
+                        inv = build_inventory(project_dir)
+                        rendered = render_inventory(inv)
+                        if inject_into_charter(project_dir, rendered):
+                            logger.info(
+                                "Detected Infrastructure section injected into CHARTER.md "
+                                "(%d package.jsons, %d pyprojects, %d configs)",
+                                len(inv.package_jsons),
+                                len(inv.pyprojects),
+                                len(inv.known_configs),
+                            )
+                            _emit(on_event, {
+                                "event": "capability_inventory_injected",
+                                "package_json_count": len(inv.package_jsons),
+                                "pyproject_count": len(inv.pyprojects),
+                                "known_config_count": len(inv.known_configs),
+                            })
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("capability inventory injection failed: %s", exc)
+
+                    # Source-of-truth fix (Part B): coherence gate
+                    # (warning-only). For each backticked reference in the
+                    # architect's "Agent operating notes" section, verify
+                    # the path/script/command actually resolves against the
+                    # scaffold. Emit warnings; don't block dispatch.
+                    try:
+                        if inv is not None:
+                            findings = check_coherence(project_dir, inv)
+                            for f in findings:
+                                logger.warning(
+                                    "coherence: %s — %s (in CHARTER operating notes)",
+                                    f.kind, f.detail,
+                                )
+                                _emit(on_event, {
+                                    "event": "coherence_finding",
+                                    "kind": f.kind,
+                                    "reference": f.reference,
+                                    "detail": f.detail,
+                                })
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("coherence check raised: %s", exc)
+
         # Spawn ready tasks up to max_parallel.
         for entry in ready:
             if len(in_flight) >= max_parallel:

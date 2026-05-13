@@ -304,19 +304,31 @@ test-debugging spirals in prior runs). Don't write `*.spec.ts`
 Playwright specs. Don't write `page.route()` mocks. The integration
 agent handles browser-driven verification.
 
-Test types by stack:
-  - **Frontend (React/Vue/Svelte/etc.)**: Vitest + React Testing
-    Library (or framework equivalent). Test components in isolation
-    — render, fire events, assert DOM. Fast, no browser, no mocks
-    of your own API. If you need to test a hook or a state-store
-    operation, that's also Vitest.
-  - **Backend (FastAPI/Express/etc.)**: pytest + `httpx.AsyncClient`
-    against your in-process app, OR `supertest` for Node. Test the
-    API contract: status codes, response shapes, side effects.
+Test types by stack — use what the architect actually scaffolded.
+Check the **Detected Infrastructure** section at the bottom of
+CHARTER.md (Otto-generated; truthful inventory of scripts, deps,
+configs). Use those scripts and frameworks; don't introduce a new
+test framework the scaffold doesn't have configured.
+
+General shape (pick based on what's available in Detected
+Infrastructure):
+  - **Frontend (React/Vue/Svelte/etc.)**: component-level tests in
+    isolation — render, fire events, assert DOM. Fast, no browser,
+    no mocks of your own API. The specific framework (Vitest, Jest,
+    @testing-library, etc.) depends on what the architect scaffolded.
+  - **Backend (FastAPI/Express/etc.)**: API-contract tests against
+    your in-process app. The specific framework (pytest+httpx,
+    supertest, etc.) depends on what the architect scaffolded.
   - **CLI / library**: subprocess invocation, assertion on stdout /
     return code / side-effect files.
-  - **Shared utility / pure logic**: unit tests in the natural
-    framework (vitest / pytest / etc.).
+  - **Shared utility / pure logic**: unit tests in whatever
+    framework the scaffold provides.
+
+If no unit/component test framework is scaffolded for your stack,
+DO NOT introduce one yourself. Report the gap in
+`intent_coverage.partial`: "unit tests not run — scaffold provides
+no unit test framework" and move on to the product code. The
+architect's scaffold defines the available toolchain.
 
 **Test infrastructure**: default to fresh state per test session —
 fresh DB, fresh in-process app, fresh fixtures. Mock siblings'
