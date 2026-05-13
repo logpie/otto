@@ -288,33 +288,49 @@ the most common false-pass pattern.
 Cover the full intent surface that falls in your scope, not only
 the parts a journey would touch.
 
-**Test**: write tests for what you built. Name them with the behavior
-journey IDs from `{journeys_path}` where applicable, so the
-integration agent can map results back. For intent features outside
-the journey list, write tests if testable (unit-level is fine);
-otherwise note them in `intent_coverage` (see verdict schema below).
+**Test**: write tests that exercise YOUR scope in isolation. Name
+journey-mapped tests with behavior journey IDs from
+`{journeys_path}` where applicable, so the integration agent can map
+results back. For intent features outside the journey list, write
+tests if testable (unit-level is fine); otherwise note them in
+`intent_coverage` (see verdict schema below).
 
-Test depth should match your scope:
-  - Leaf component / utility / small feature: unit + maybe smoke
-  - User-visible feature that touches your group end-to-end: targeted
-    journey test (Playwright spec for ONLY your journeys, not the full
-    suite)
-  - If your subsystem is one of several in a multi-subsystem product,
-    your tests should mock or stub the other subsystems. The
-    integration agent runs the live cross-stack suite. DO NOT start
-    other subsystems' services from your tests.
+**Browser-driven cross-stack tests are NOT your job.** The
+integration agent owns Playwright against the live merged stack
+with no mocks. At leaf scope you cannot start sibling subsystems'
+services, and mocked Playwright produces brittle low-fidelity tests
+that drift from real component behavior (this caused 40+ min
+test-debugging spirals in prior runs). Don't write `*.spec.ts`
+Playwright specs. Don't write `page.route()` mocks. The integration
+agent handles browser-driven verification.
+
+Test types by stack:
+  - **Frontend (React/Vue/Svelte/etc.)**: Vitest + React Testing
+    Library (or framework equivalent). Test components in isolation
+    — render, fire events, assert DOM. Fast, no browser, no mocks
+    of your own API. If you need to test a hook or a state-store
+    operation, that's also Vitest.
+  - **Backend (FastAPI/Express/etc.)**: pytest + `httpx.AsyncClient`
+    against your in-process app, OR `supertest` for Node. Test the
+    API contract: status codes, response shapes, side effects.
+  - **CLI / library**: subprocess invocation, assertion on stdout /
+    return code / side-effect files.
+  - **Shared utility / pure logic**: unit tests in the natural
+    framework (vitest / pytest / etc.).
 
 **Test infrastructure**: default to fresh state per test session —
-fresh DB, fresh server, fresh port. Avoid `reuseExistingServer` (or
-similar resume mechanisms) in autonomous-agent CI; reused servers
-mask failures behind stale state and produce misleading "test failed:
-element not found" errors when the underlying cause is "you're
-talking to a zombie server from another run."
+fresh DB, fresh in-process app, fresh fixtures. Mock siblings'
+*APIs* at the contract level (return the expected shape) — don't
+try to spin up a real backend from a FE leaf. The integration agent
+does the live cross-stack verification.
+
 **Run**: run your tests via Bash (`npm test`, `pytest`,
-`npx playwright test --grep <your-journey-id>`, etc.).
-**Iterate**: if tests fail, read the output, fix, run again. Stop when
-confident OR when budget is running low (you can see elapsed time in
-your own context).
+`vitest run`, etc.).
+**Iterate**: if tests fail, read the output, fix, run again. Stop
+when confident OR when you've iterated on the same test 3+ times
+without progress — at that point ship `partial` with the gap noted
+in `intent_coverage`. The integration agent's live test will catch
+real bugs; don't burn budget on brittle leaf-level test setup.
 
 There is NO retry cap. There is a wall-time + turn budget. You decide
 how to spend it.
