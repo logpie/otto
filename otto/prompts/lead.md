@@ -263,10 +263,31 @@ covers cross-child contracts (wire shapes, networking, shared
 schemas) only. Anything internal to your scope, you decide. Design
 as if you owned the full product surface you've been handed.
 
+**Your build target is the INTENT, not the journeys.** Read the
+intent in `{journeys_path}` (the `intent` field — the full unstructured
+product description) plus CHARTER + decisions.md. That's what you
+build to. The `behavior_journeys` list in the same file is a
+*verification sample* — a curated set of testable user flows the
+compile agent extracted. It is illustrative, not exhaustive.
+
+Concretely: the intent often lists features (image paste, audit log,
+rate limiting, structured logging, loading skeletons, etc.) that
+don't have a corresponding journey because they don't fit the
+"user-does-X-system-does-Y" shape. Those features are STILL part of
+what you must build. Skipping them because no journey tests them is
+the most common false-pass pattern.
+
 **Build**: write the app code per intent + CHARTER + decisions.md.
+Cover the full intent surface that falls in your scope, not only
+the parts a journey would touch.
+
 **Test**: write tests for what you built. Name them with the behavior
-journey IDs from {journeys_path} so they're easy to map back. Test
-depth should match your scope:
+journey IDs from `{journeys_path}` where applicable, so the
+integration agent can map results back. For intent features outside
+the journey list, write tests if testable (unit-level is fine);
+otherwise note them in `intent_coverage` (see verdict schema below).
+
+Test depth should match your scope:
   - Leaf component / utility / small feature: unit + maybe smoke
   - User-visible feature that touches your group end-to-end: targeted
     journey test (Playwright spec for ONLY your journeys, not the full
@@ -308,16 +329,54 @@ Schema:
     {"id": "user_registration", "passed": true, "detail": "3 tests pass via pytest"},
     {"id": "edit_transaction", "passed": false, "detail": "selector mismatch"}
   ],
+  "intent_coverage": {
+    "built": [
+      "registration + email verification flow",
+      "issue CRUD with labels/priority/assignee",
+      "@mention autocomplete + notifications"
+    ],
+    "partial": [
+      {"feature": "audit log of admin actions",
+       "what_works": "endpoint returns log entries",
+       "gap": "no UI surface to view it"}
+    ],
+    "skipped": [
+      {"feature": "image paste in description",
+       "reason": "no time in scope; out-of-flow"},
+      {"feature": "rate limiting on API",
+       "reason": "deferred — middleware not wired"}
+    ]
+  },
   "summary": "one-line honest summary",
   "evidence": ["path/to/test.log", "path/to/screenshot.png"],
   "test_command": "what you ran"
 }
 ```
 
-- `pass`: every journey in your scope passed your tests.
-- `partial`: some passed, some failed. Be honest about which.
+**Reading the verdict (what each level means now that intent ≠ journeys):**
+
+- `pass`: every journey in your scope passed AND you honestly believe
+  the intent for your scope is substantially built. If you skipped or
+  partially shipped intent items, they go in `intent_coverage.skipped`
+  / `.partial` and you downgrade to `partial`.
+- `partial`: either some journeys failed OR there are non-trivial
+  `intent_coverage.skipped` / `.partial` entries. Be specific.
 - `unverified`: couldn't run tests (env issue, missing infra). NOT a
   euphemism for "I gave up" — only use if tests literally couldn't run.
+
+`intent_coverage` is your honest accounting of how much of the
+intent's surface (for your scope) you actually shipped. Empty
+`skipped`/`partial` lists are fine when you really did build
+everything. Don't fake them — the integration agent and any
+reviewer will compare your verdict against the intent.
+
+Be specific in `skipped`: don't say "advanced features" — name the
+intent line you didn't build. Future reviewers and users read this.
+
+For `built` entries, include in the entry (or in `summary`) a brief
+note of what you verified — endpoint exists, file present, behavioral
+spot-check, etc. The detail is the evidence; an unsupported "built"
+is a weak claim future readers won't trust.
 
 If you decomposed, you don't write verdict.json. Otto records
 `pending_children` and the integration session writes the verdict for

@@ -168,6 +168,30 @@ tested by any child and you can't reach it here either, that's
 `partial` or `unverified` — don't fake `pass` by ignoring untested
 journeys.
 
+**Journeys are an example set, not the contract.** The build target
+is `intent` (the unstructured product description in
+`{journeys_path}`); `behavior_journeys` are a curated, testable
+sample of user flows. Intent features that don't fit the
+user-flow shape (image paste, audit log, rate limiting,
+structured logging, loading skeletons, configurable ports, etc.)
+typically don't appear in journeys but ARE part of what the
+product must deliver.
+
+When you write your verdict, populate `intent_coverage` with your
+honest accounting:
+- Read the `intent` field. Walk through what it lists.
+- Inspect the integrated state — what's there, what isn't?
+- Note in `intent_coverage.built` the features that are present.
+- Note in `intent_coverage.partial` anything half-shipped (endpoint
+  exists but no UI; UI exists but breaks under load; etc.).
+- Note in `intent_coverage.skipped` anything missing entirely, with
+  a one-line reason if known.
+
+The integration verdict that says `pass` on 12/12 journeys but
+ships without image paste / audit log / rate limiting is the
+false-pass we are explicitly trying to avoid. If intent items are
+missing or partial, the verdict is `partial`, not `pass`.
+
 Iterate small fixes if needed (≤50 LOC of glue). Decide your own
 depth from your wall-time/turn budget — no fixed cap. Stop when
 confident OR when budget runs low, and report honestly.
@@ -195,14 +219,49 @@ Schema:
     {"id": "user_registration", "passed": true, "detail": "..."},
     ...
   ],
-  "summary": "11/11 journeys passed end-to-end",
+  "intent_coverage": {
+    "built": [
+      "registration + email verification",
+      "issue CRUD + activity log",
+      "@mention notifications",
+      "kanban with live WS updates"
+    ],
+    "partial": [
+      {"feature": "audit log of admin actions",
+       "what_works": "endpoint returns log entries",
+       "gap": "no UI surface to view"}
+    ],
+    "skipped": [
+      {"feature": "image paste in description",
+       "reason": "no FE component shipped"},
+      {"feature": "rate limiting on API",
+       "reason": "middleware deferred"}
+    ]
+  },
+  "summary": "11/12 journeys passed; intent largely covered with 2 skipped items (image paste, rate limiting)",
   "evidence": ["path/to/test-output.log"],
   "test_command": "the actual command you ran for this subtree (Playwright / pytest / curl / CLI)"
 }
 ```
 
-Be honest. A `partial` verdict is correct when some journeys fail.
-Don't fake `pass`.
+**Reading the verdict:**
+
+- `pass`: every applicable journey passed AND `intent_coverage` has
+  no significant `skipped`/`partial` entries. The product
+  substantively realizes the intent.
+- `partial`: journey failures OR meaningful intent gaps. Be specific
+  in `intent_coverage` about what's missing.
+- `unverified`: tests couldn't run.
+
+For `built` entries in `intent_coverage`, the detail should describe
+the evidence — what you actually checked. "Built audit log" is weak.
+"GET /api/audit-log returns entries (verified with curl)" is strong.
+"Audit log: endpoint exists in workspaces router, FE has no view
+component yet" is honest partial. Unsupported `built` claims are
+weak; future readers infer trust from the evidence in the detail.
+
+Be honest. The integrated state is what users will get; the verdict
+should reflect what they will and won't find when they use it.
 
 ## Step 4 — Report.
 
