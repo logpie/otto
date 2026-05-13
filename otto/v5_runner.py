@@ -465,6 +465,11 @@ async def _process_children(
                             "max_retries": MAX_ARCHITECT_RETRIES,
                             "reason_tail": blocking_messages[-1][:200],
                         })
+                        # The architect is now eligible for re-dispatch, but
+                        # the `ready` list computed at the top of this loop
+                        # iteration is stale (the architect wasn't in it).
+                        # Re-enter the loop so take_ready picks it up.
+                        continue
                     else:
                         logger.error(
                             "architect %s scaffold preflight failed after %d retries; "
