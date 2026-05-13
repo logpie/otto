@@ -164,6 +164,25 @@ async def run_v5_pipeline(
         except Exception as exc:  # noqa: BLE001
             logger.warning("ensure_initial_commit failed: %s", exc)
 
+        # Clean up stale dev-server processes bound to this project's
+        # declared ports. Each "port already in use" error inside an agent
+        # session burns ~30-60s of agent time + tokens diagnosing it; one
+        # cleanup pass up-front saves that across the whole run.
+        try:
+            from otto.v5_clean_verify import cleanup_stale_declared_ports
+
+            killed = cleanup_stale_declared_ports(
+                project_dir,
+                logger_fn=lambda m: logger.info("preflight: %s", m),
+            )
+            if killed:
+                _emit(on_event, {
+                    "event": "stale_ports_cleaned",
+                    "ports": sorted(killed),
+                })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("port cleanup failed: %s", exc)
+
         # ---- Phase A: Root session setup ----
         root_session_id = _new_session_id()
         root_session_dir = _paths.session_dir(project_dir, root_session_id)

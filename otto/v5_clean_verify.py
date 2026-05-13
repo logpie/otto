@@ -306,6 +306,65 @@ def _check_ports_free(declared_ports: list[int]) -> list[int]:
     return busy
 
 
+def cleanup_stale_declared_ports(
+    project_dir: Path, logger_fn: Any = None
+) -> list[int]:
+    """Kill processes bound to project's declared ports.
+
+    Called once at the start of a pipeline run to clean up zombies from
+    prior otto sessions (dev servers, test runners that didn't shut down
+    cleanly). Each "port already in use" error inside an agent's session
+    burns 30-60 seconds of agent time + tokens diagnosing it; doing one
+    cleanup pass up-front saves that across the whole run.
+
+    Reads ports from CHARTER.md (best-effort). Skips silently if CHARTER
+    is absent or has no port declarations — the architect hasn't pinned
+    ports yet, so there's nothing zombie-able.
+
+    Returns the list of ports we killed something on (may be empty).
+    """
+    ports = _parse_declared_ports(project_dir)
+    if not ports:
+        return []
+
+    def log(msg: str) -> None:
+        if logger_fn:
+            logger_fn(msg)
+
+    killed_on: list[int] = []
+    for port in ports:
+        try:
+            out = subprocess.check_output(
+                ["lsof", "-ti", f":{port}"],
+                text=True,
+                timeout=2,
+                stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+        pids: list[int] = []
+        for pid_str in out.strip().split():
+            try:
+                pids.append(int(pid_str.strip()))
+            except ValueError:
+                continue
+        if not pids:
+            continue
+        log(f"port-cleanup: port {port} bound by PIDs {pids}; killing")
+        for pid in pids:
+            try:
+                subprocess.run(
+                    ["kill", "-9", str(pid)],
+                    timeout=2,
+                    check=False,
+                    stderr=subprocess.DEVNULL,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        killed_on.append(port)
+    return killed_on
+
+
 def _subtree_verify_start_sh(
     temp_root: Path,
     declared_ports: list[int],

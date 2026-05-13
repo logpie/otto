@@ -378,6 +378,29 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
         except (OSError, json.JSONDecodeError):
             pass
 
+    # Fallback: agent may have misplaced verdict.json inside the worktree
+    # (typically worktree/<subsystem>/verdict.json) instead of session_dir.
+    # This has shown up enough times that we recover from it explicitly,
+    # then write a warning so we can see how often agents are doing this.
+    misplaced = _find_misplaced_verdict(session_dir)
+    if misplaced is not None:
+        try:
+            payload = json.loads(misplaced.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("verdict"):
+                logger.warning(
+                    "agent wrote verdict.json to %s instead of %s — recovering",
+                    misplaced, candidate,
+                )
+                try:
+                    candidate.write_text(
+                        misplaced.read_text(encoding="utf-8"), encoding="utf-8"
+                    )
+                except OSError:
+                    pass
+                return True, payload
+        except (OSError, json.JSONDecodeError):
+            pass
+
     # Legacy fallback: pre-simplification verify-result.json
     legacy = session_dir / "verify" / "verify-result.json"
     if legacy.exists():
@@ -402,6 +425,42 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
         return True, rescued
 
     return False, None
+
+
+def _find_misplaced_verdict(session_dir: Path) -> Path | None:
+    """Search the agent's worktree for a misplaced verdict.json.
+
+    Agents are told to write to ``<session_dir>/verdict.json`` but some
+    sessions instead drop it under the worktree (e.g.
+    ``worktree/frontend/verdict.json``). When the canonical path is
+    missing, check the obvious worktree locations first, then fall back
+    to a bounded glob excluding noise dirs.
+    """
+    worktree = session_dir / "worktree"
+    try:
+        if worktree.is_symlink():
+            real = worktree.resolve()
+        elif worktree.exists():
+            real = worktree
+        else:
+            return None
+    except OSError:
+        return None
+    # Check the obvious spots (cheap, common-case).
+    for sub in ("", "frontend", "backend", "api", "src", "web", "client", "server"):
+        candidate = (real / sub / "verdict.json") if sub else (real / "verdict.json")
+        if candidate.exists():
+            return candidate
+    # Bounded scan — first hit wins. Skip noise dirs.
+    noise = {"node_modules", ".venv", "dist", "build", "__pycache__", ".git"}
+    try:
+        for p in real.rglob("verdict.json"):
+            if any(part in noise for part in p.parts):
+                continue
+            return p
+    except OSError:
+        return None
+    return None
 
 
 def _rescue_verdict_from_messages(session_dir: Path) -> dict[str, Any] | None:
