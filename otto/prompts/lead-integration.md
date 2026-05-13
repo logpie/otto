@@ -82,11 +82,7 @@ scope actually exposes:
 - **Full running product (FE + BE both mounted)**: browser E2E
   (Playwright). The only case where a browser buys you something —
   you can drive real user journeys against the live product. Start
-  services, drive them as a user would. Don't just register a new
-  user; also exercise the *seeded* state if intent or fixtures imply
-  returning-user flows. Probe each primary landing page for
-  dead-ends (empty sidebar, no actionable elements) — those are
-  real bugs even when no single test asserts them.
+  services, drive them as a user would.
 - **Backend / API only** (FE lives in a sibling not yet integrated):
   HTTP contract tests against the API. Verify the wire shapes the
   CHARTER's cross-child contracts define. Don't run Playwright
@@ -113,6 +109,57 @@ curl / httpx                              # HTTP contract checks
 Read the output. Map results to behavior journey IDs by name matching
 (children should have named tests after journey IDs). For each journey
 in `{journeys_path}`, decide pass / fail / not-applicable-at-this-node.
+
+**Live-stack discipline: don't only run the leaves' tests.** The
+leaves' Playwright tests typically mock the backend (MSW, `vi.mock`,
+fetch interception). Mocks reflect the FE's assumptions about the
+BE, not the real BE — they hide contract divergences, crash classes
+(`assignee.name` on a real null), and dead-end UIs. Running the
+mocked leaf suite proves the FE matches its own assumptions; it does
+not prove the merged product works.
+
+If your medium is "Full running product", you MUST write & run AT
+LEAST ONE end-to-end check that:
+
+1. Starts the actual services via `start.sh` (or its analog) — not
+   a test-fixture FastAPI app, not a mock server.
+2. Drives a real browser against the real frontend.
+3. Lets the frontend make its real HTTP calls — no MSW, no
+   `vi.mock`, no fetch interception.
+4. Includes at least one seeded-state path (login as a seeded user,
+   not only register-then-act).
+5. Asserts *operability* of the landing pages — primary nav has the
+   expected items, at least one primary action is reachable. Don't
+   only assert "page rendered" or "testid exists".
+
+Keep this set small (1–3 cases) — coverage breadth is the leaves'
+job; you're verifying the seam the leaves' mocks cannot see.
+
+If this live test can't run (port conflict, service won't start,
+browser unavailable), that's `unverified` for the live-stack
+assertion. Do not paper over it with "leaf tests all passed".
+
+**Cover realistic starting states, not only fresh init.** Most bugs
+that escape the build live in the *other* starting states the spec
+didn't enumerate. For each medium, also exercise one realistic
+non-fresh state if the product's intent or fixtures imply it exists:
+
+- Full running product: log in as a seeded user (from intent or
+  seed scripts) and verify the landing page is operable, not just
+  the register flow for a brand-new user. Probe for dead-ends —
+  empty sidebar, no actionable elements — those are real bugs
+  even when no test asserts them.
+- CLI: run the command in an already-initialized project, not only
+  after a fresh init.
+- Library: import in a venv that already has other deps, not only
+  in isolation.
+- API: hit endpoints with seeded rows present, not only against an
+  empty DB.
+- Pipeline / batch job: run on already-processed inputs
+  (idempotency), not only on fresh data.
+
+If realistic non-fresh state exists for this product and you only
+covered the fresh path, that's `partial`, not `pass`.
 
 **Coverage discipline.** Don't only verify journeys you wrote tests
 for. For each journey listed in `{journeys_path}` that IS applicable
