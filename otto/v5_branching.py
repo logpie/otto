@@ -103,6 +103,13 @@ Thumbs.db
 playwright-report/
 test-results/
 coverage/
+
+# TypeScript incremental build cache — frequent cause of cross-worktree
+# merge conflicts (different siblings produce different .tsbuildinfo for
+# the same project). Tooling regenerates these on demand; don't commit.
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+tsconfig.*.tsbuildinfo
 """
 
 

@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import subprocess
 import time
 import uuid
@@ -526,6 +527,21 @@ async def _process_children(
                         logger.warning(
                             "propagate install dirs from architect failed: %s", exc
                         )
+
+                    # Ensure Playwright browsers are cached once. 22% of
+                    # recent agent logs ran `npx playwright install` and
+                    # waited 30-60s for chromium download. Doing it here
+                    # (only when project actually uses Playwright AND the
+                    # browser isn't cached) turns subsequent agent installs
+                    # into 1-2s no-ops.
+                    try:
+                        if _ensure_playwright_browsers(project_dir):
+                            _emit(on_event, {
+                                "event": "playwright_browsers_ready",
+                                "architect_task_id": architect_tid,
+                            })
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("playwright preinstall failed: %s", exc)
 
         # Spawn ready tasks up to max_parallel.
         for entry in ready:
@@ -1181,6 +1197,74 @@ def _link_shared_install_dirs(
                 "could not symlink %s into child %s: %s", rel, task_id, exc,
             )
     return created
+
+
+def _project_uses_playwright(project_dir: Path) -> bool:
+    """Best-effort: does any package.json declare @playwright/test?"""
+    for pkg in project_dir.rglob("package.json"):
+        # Skip noise paths (don't read inside node_modules).
+        if any(part in _NOISE_PARENTS for part in pkg.parts):
+            continue
+        try:
+            text = pkg.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "@playwright/test" in text:
+            return True
+    return False
+
+
+def _ensure_playwright_browsers(project_dir: Path) -> bool:
+    """Run ``npx playwright install chromium`` once if needed.
+
+    Agents reflexively run this command (22% of recent logs) and pay
+    the ~30-60s download per run when chromium isn't cached. Playwright
+    caches browsers at ``~/.cache/ms-playwright/`` by default; once
+    chromium-* exists there, subsequent install calls become ~1-2s
+    no-ops. Doing one install up-front (when chromium is genuinely
+    missing) saves the agents that 30-60s.
+
+    Skips entirely if the project doesn't use Playwright. Best-effort:
+    failures are logged but don't block the pipeline.
+
+    Returns True if browsers are now present (either pre-existing or
+    freshly installed), False otherwise.
+    """
+    if not _project_uses_playwright(project_dir):
+        return False
+
+    import os
+    cache_root = Path(os.path.expanduser("~/.cache/ms-playwright"))
+    # Chromium dirs are named like `chromium-1140`. If any exists, we're set.
+    if cache_root.exists():
+        for entry in cache_root.iterdir():
+            if entry.name.startswith("chromium-") and entry.is_dir():
+                return True
+
+    npx = shutil.which("npx")
+    if not npx:
+        logger.info("playwright preinstall skipped: npx not on PATH")
+        return False
+    logger.info("playwright preinstall: chromium not cached, installing once")
+    try:
+        proc = subprocess.run(
+            [npx, "playwright", "install", "chromium"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "")[-300:]
+            logger.warning(
+                "playwright preinstall failed (exit %d): %s",
+                proc.returncode, tail,
+            )
+            return False
+        return True
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning("playwright preinstall raised: %s", exc)
+        return False
 
 
 def _propagate_install_dirs_from_architect(
