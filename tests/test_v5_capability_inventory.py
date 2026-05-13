@@ -310,3 +310,88 @@ def test_coherence_unknown_command_no_false_positive(tmp_path: Path) -> None:
     # These look neither like paths (no /, no extension) nor shell commands
     # → conservative: no findings.
     assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# Improvements from live-run audit (requirements.txt, pytest.ini, templates)
+# ---------------------------------------------------------------------------
+
+
+def test_python_tool_via_requirements_txt(tmp_path: Path) -> None:
+    """Python tools declared in requirements.txt count as available
+    (not only pyproject.toml)."""
+    _write(tmp_path / "api" / "requirements.txt",
+           "fastapi>=0.110\npytest>=7.0\nuvicorn[standard]>=0.24\n")
+    _make_charter_with_notes(tmp_path,
+        "- Backend tests: `cd api && uv run pytest`\n"
+        "- Backend dev: `cd api && uv run uvicorn main:app --reload`")
+    inv = build_inventory(tmp_path)
+    assert inv.python_tool_available("pytest")
+    assert inv.python_tool_available("uvicorn")
+    assert inv.python_tool_available("fastapi")
+    findings = check_coherence(tmp_path, inv)
+    assert findings == []
+
+
+def test_python_tool_via_pytest_ini(tmp_path: Path) -> None:
+    """A pytest.ini file implies pytest is configured even without a deps
+    declaration anywhere (common in older projects)."""
+    _write(tmp_path / "api" / "pytest.ini", "[pytest]\ntestpaths = tests\n")
+    inv = build_inventory(tmp_path)
+    assert inv.python_tool_available("pytest")
+
+
+def test_python_tool_not_available_when_missing(tmp_path: Path) -> None:
+    """Sanity: tools genuinely missing return False."""
+    _write(tmp_path / "api" / "requirements.txt", "fastapi>=0.110\n")
+    inv = build_inventory(tmp_path)
+    assert inv.python_tool_available("fastapi") is True
+    assert inv.python_tool_available("pytest") is False
+
+
+def test_coherence_skips_path_templates_angle(tmp_path: Path) -> None:
+    """Path templates with ``<placeholder>`` are NOT literal paths."""
+    _make_charter_with_notes(tmp_path,
+        "- Avatar files: `api/uploads/avatars/<user_id>.<ext>`\n"
+        "- Served at: `/uploads/avatars/<user_id>.<ext>`")
+    inv = build_inventory(tmp_path)
+    findings = check_coherence(tmp_path, inv)
+    assert findings == []
+
+
+def test_coherence_skips_path_templates_brace(tmp_path: Path) -> None:
+    """``{id}``-style placeholders also skipped."""
+    _make_charter_with_notes(tmp_path,
+        "- User profile: `/users/{user_id}/avatar.png`")
+    inv = build_inventory(tmp_path)
+    findings = check_coherence(tmp_path, inv)
+    assert findings == []
+
+
+def test_coherence_skips_url_route_patterns(tmp_path: Path) -> None:
+    """Express/FastAPI-style ``/path/:param`` URL patterns skipped."""
+    _make_charter_with_notes(tmp_path,
+        "- Token verify endpoint: `/auth/verify/:token`\n"
+        "- Issue detail: `/issues/:id`")
+    inv = build_inventory(tmp_path)
+    findings = check_coherence(tmp_path, inv)
+    assert findings == []
+
+
+def test_inventory_parses_requirements_strips_pins(tmp_path: Path) -> None:
+    _write(tmp_path / "requirements.txt",
+           "# header comment\n"
+           "\n"
+           "fastapi>=0.110\n"
+           "pytest~=7.0  # inline comment\n"
+           "-r dev-requirements.txt\n"
+           "-e .\n"
+           "uvicorn[standard]==0.24\n")
+    inv = build_inventory(tmp_path)
+    assert len(inv.requirements_files) == 1
+    deps = inv.requirements_files[0].dependencies
+    # Comments / -r / -e lines stripped; package specs preserved with pins.
+    assert "fastapi>=0.110" in deps
+    assert any(d.startswith("pytest~=") for d in deps)
+    assert any(d.startswith("uvicorn[standard]") for d in deps)
+    assert not any(d.startswith("-") for d in deps)

@@ -105,12 +105,59 @@ class PyprojectEntry:
 
 
 @dataclass
+class RequirementsTxtEntry:
+    """A discovered requirements.txt (or similar)."""
+    path: Path
+    rel_dir: str
+    dependencies: list[str] = field(default_factory=list)
+
+
+@dataclass
+class IniConfigEntry:
+    """A discovered .ini config file (pytest.ini, setup.cfg, etc.)
+    that implies a tool is configured."""
+    path: Path
+    rel_dir: str
+    tool: str  # e.g., "pytest"
+
+
+@dataclass
 class CapabilityInventory:
     """All discovered capabilities, grouped."""
     package_jsons: list[PackageJsonEntry] = field(default_factory=list)
     pyprojects: list[PyprojectEntry] = field(default_factory=list)
+    requirements_files: list[RequirementsTxtEntry] = field(default_factory=list)
+    ini_configs: list[IniConfigEntry] = field(default_factory=list)
     known_configs: list[tuple[str, str]] = field(default_factory=list)  # (rel_path, role)
     entrypoints: list[tuple[str, str]] = field(default_factory=list)   # (rel_path, role)
+
+    def python_tool_available(self, tool: str) -> bool:
+        """True iff a Python tool (e.g., 'pytest', 'uvicorn') is reachable
+        — declared in any pyproject's deps/optional-deps, listed in any
+        requirements.txt, or implied by an ini config (e.g., pytest.ini)."""
+        for e in self.pyprojects:
+            all_deps = e.dependencies + [
+                d for group in e.optional_deps.values() for d in group
+            ]
+            if any(self._pkg_name(d) == tool for d in all_deps):
+                return True
+        for r in self.requirements_files:
+            if any(self._pkg_name(d) == tool for d in r.dependencies):
+                return True
+        for ini in self.ini_configs:
+            if ini.tool == tool:
+                return True
+        return False
+
+    @staticmethod
+    def _pkg_name(spec: str) -> str:
+        """Strip version pin / extras: 'pytest>=7.0' → 'pytest'."""
+        s = spec.strip()
+        for sep in ("[", ">=", "==", "~=", "<=", "<", ">", ";", " "):
+            i = s.find(sep)
+            if i != -1:
+                s = s[:i]
+        return s.strip()
 
 
 def _detect_pkg_manager(pkg_dir: Path) -> str:
@@ -182,6 +229,70 @@ def _find_pyprojects(project_dir: Path) -> list[Path]:
     return sorted(out)
 
 
+def _find_requirements_txt(project_dir: Path) -> list[Path]:
+    """Find requirements.txt / requirements-dev.txt / etc."""
+    out: list[Path] = []
+    for name in ("requirements.txt", "requirements-dev.txt",
+                 "requirements-test.txt", "dev-requirements.txt"):
+        for p in project_dir.rglob(name):
+            if _is_noise(p, project_dir):
+                continue
+            try:
+                rel = p.relative_to(project_dir)
+            except ValueError:
+                continue
+            if len(rel.parts) > _MAX_SUBSYSTEM_DEPTH:
+                continue
+            out.append(p)
+    return sorted(out)
+
+
+# Ini-style config files that imply a Python tool is configured.
+_INI_TOOL_HINTS: dict[str, str] = {
+    "pytest.ini": "pytest",
+    "tox.ini": "tox",
+}
+
+
+def _find_ini_configs(project_dir: Path) -> list[tuple[Path, str]]:
+    """Find pytest.ini / tox.ini / etc. that imply a tool is configured."""
+    out: list[tuple[Path, str]] = []
+    for ini_name, tool in _INI_TOOL_HINTS.items():
+        for p in project_dir.rglob(ini_name):
+            if _is_noise(p, project_dir):
+                continue
+            try:
+                rel = p.relative_to(project_dir)
+            except ValueError:
+                continue
+            if len(rel.parts) > _MAX_SUBSYSTEM_DEPTH:
+                continue
+            out.append((p, tool))
+    return sorted(out)
+
+
+def _parse_requirements_lines(text: str) -> list[str]:
+    """Parse a requirements.txt-style file into dep specs.
+
+    Strips comments, blank lines, -r references, -e installs.
+    Returns the package specs (still with version pins).
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Skip flags: -r, -e, -c, --extra-index-url, etc.
+        if line.startswith("-"):
+            continue
+        # Strip inline comment.
+        if "#" in line:
+            line = line[:line.index("#")].strip()
+        if line:
+            out.append(line)
+    return out
+
+
 def build_inventory(project_dir: Path) -> CapabilityInventory:
     """Walk project_dir, return a structured CapabilityInventory.
 
@@ -232,6 +343,26 @@ def build_inventory(project_dir: Path) -> CapabilityInventory:
             tool_tables=tool_tables,
         )
         inv.pyprojects.append(entry_py)
+
+    for req_path in _find_requirements_txt(project_dir):
+        try:
+            text = req_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        rel_dir = str(req_path.parent.relative_to(project_dir))
+        inv.requirements_files.append(RequirementsTxtEntry(
+            path=req_path,
+            rel_dir=rel_dir if rel_dir != "." else "",
+            dependencies=_parse_requirements_lines(text),
+        ))
+
+    for ini_path, tool in _find_ini_configs(project_dir):
+        rel_dir = str(ini_path.parent.relative_to(project_dir))
+        inv.ini_configs.append(IniConfigEntry(
+            path=ini_path,
+            rel_dir=rel_dir if rel_dir != "." else "",
+            tool=tool,
+        ))
 
     # Walk for known configs and entrypoints, bounded depth.
     for p in project_dir.rglob("*"):
@@ -424,7 +555,21 @@ def _extract_operating_notes_block(charter_text: str) -> str | None:
 
 
 def _looks_like_path(ref: str, inv: CapabilityInventory) -> bool:
-    """Heuristic: is this code span referring to a filesystem path?"""
+    """Heuristic: is this code span referring to a filesystem path?
+
+    Skips path templates with placeholders (``<user_id>``, ``:id``, ``{id}``)
+    — those describe naming schemes, not literal paths.
+    """
+    # Path templates with placeholders aren't checkable literals.
+    if "<" in ref and ">" in ref:
+        return False
+    if "{" in ref and "}" in ref:
+        return False
+    # Express-style route params (``:slug``) inside what looks like a URL/path:
+    # only skip when paired with a leading ``/`` (URL pattern, not a colon in a label).
+    if ref.startswith("/") and ":" in ref:
+        # e.g., "/users/:id/profile"
+        return False
     if "/" in ref and not ref.startswith("--") and not ref.startswith("@"):
         return True
     # Things like `vite.config.ts`, `start.sh`, `Makefile`
@@ -498,15 +643,13 @@ def _command_resolves(
     m = re.match(r"^uv\s+run\s+([a-zA-Z0-9_\-]+)", work)
     if m:
         tool = m.group(1)
-        # Check pyprojects' deps and optional-deps for it.
-        for e in inv.pyprojects:
-            all_deps = e.dependencies + [
-                d for group in e.optional_deps.values() for d in group
-            ]
-            if any(tool == d.split("[")[0].split(">=")[0].split("==")[0].split("~=")[0].strip()
-                   for d in all_deps):
-                return True, None
-        return False, f"uv tool `{tool}` not declared in any pyproject"
+        # Check pyproject deps + requirements.txt + ini-implied tools.
+        if inv.python_tool_available(tool):
+            return True, None
+        return False, (
+            f"Python tool `{tool}` not declared in any pyproject, "
+            f"requirements.txt, or implied by an ini config"
+        )
 
     # `bash start.sh` — just check the script exists.
     m = re.match(r"^bash\s+([a-zA-Z0-9_/.\-]+)", work)
