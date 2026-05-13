@@ -36,6 +36,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Iterator
 from typing import Any
 
 from otto import paths as _paths
@@ -501,6 +502,30 @@ async def _process_children(
                             "task_id": architect_tid,
                             "retry_count": current_retries,
                         })
+                else:
+                    # Architect passed AND scaffold preflight is clean.
+                    # Propagate its node_modules/.venv into project_dir so
+                    # feature children's worktrees can symlink instead of
+                    # re-running `npm install` / `uv sync`.
+                    try:
+                        arch_worktree = project_dir / ".worktrees" / architect_tid
+                        n = _propagate_install_dirs_from_architect(
+                            project_dir, arch_worktree
+                        )
+                        if n > 0:
+                            logger.info(
+                                "propagated %d install dir(s) from architect %s",
+                                n, architect_tid,
+                            )
+                            _emit(on_event, {
+                                "event": "install_dirs_propagated",
+                                "architect_task_id": architect_tid,
+                                "count": n,
+                            })
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "propagate install dirs from architect failed: %s", exc
+                        )
 
         # Spawn ready tasks up to max_parallel.
         for entry in ready:
@@ -660,21 +685,15 @@ async def _run_child(
                     link_path.symlink_to(child_worktree)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("could not symlink worktree: %s", exc)
-            # Share node_modules / .venv across worktrees. Without this, every
-            # child re-downloads packages from scratch (~30-60s each, ~5-7min
-            # total on a 7-task tree). Worktrees share the same package.json /
-            # pyproject.toml at this branch so the deps are identical.
-            for shared in ("node_modules", ".venv"):
-                src = project_dir / shared
-                dst = child_worktree / shared
-                if src.exists() and not dst.exists():
-                    try:
-                        dst.symlink_to(src.resolve())
-                    except OSError as exc:
-                        logger.warning(
-                            "could not symlink %s into child %s: %s",
-                            shared, tid, exc,
-                        )
+            # Share node_modules / .venv across worktrees. Without this,
+            # every child re-downloads packages from scratch (~30-60s each,
+            # ~5-7min total on a 7-task tree). Worktrees share the same
+            # package.json / pyproject.toml at this branch so the deps are
+            # identical. The earlier implementation only looked at
+            # project_dir/{node_modules,.venv} — but real projects put them
+            # in subdirs (frontend/node_modules, api/.venv), so the symlink
+            # never fired. Glob for them now.
+            _link_shared_install_dirs(project_dir, child_worktree, tid)
             _emit(on_event, {
                 "event": "worktree_created",
                 "task_id": tid,
@@ -1105,6 +1124,99 @@ def _emit(on_event: Any, payload: dict[str, Any]) -> None:
         on_event(payload)
     except Exception:  # noqa: BLE001 — observability is best-effort
         pass
+
+
+# Names that mark a dir as install state we want to share across worktrees.
+_INSTALL_DIR_NAMES = ("node_modules", ".venv")
+# Dir names that should never have an install dir nested inside considered.
+_NOISE_PARENTS = frozenset({
+    ".git", ".worktrees", "node_modules", ".venv", "dist", "build",
+    "__pycache__", ".pytest_cache", ".mypy_cache",
+})
+
+
+def _iter_install_dirs(root: Path) -> Iterator[tuple[Path, Path]]:
+    """Walk ``root`` for node_modules/.venv dirs, skipping nested noise.
+
+    Yields ``(found_path, rel_to_root)`` pairs. A nested install dir
+    (e.g., ``frontend/node_modules/foo/node_modules``) is skipped — only
+    the top-level shared install dir per subsystem matters.
+    """
+    if not root.exists():
+        return
+    for name in _INSTALL_DIR_NAMES:
+        for found in root.rglob(name):
+            if not (found.is_dir() or found.is_symlink()):
+                continue
+            try:
+                rel = found.relative_to(root)
+            except ValueError:
+                continue
+            # If any parent part is itself an install/noise dir, this is
+            # nested. Skip.
+            if any(part in _NOISE_PARENTS for part in rel.parts[:-1]):
+                continue
+            yield found, rel
+
+
+def _link_shared_install_dirs(
+    project_dir: Path, child_worktree: Path, task_id: str
+) -> int:
+    """Symlink project_dir's install dirs (node_modules/.venv) into
+    child_worktree at the same relative paths.
+
+    Returns the count of symlinks created (for logging/tests).
+    """
+    created = 0
+    for found, rel in _iter_install_dirs(project_dir):
+        dst = child_worktree / rel
+        if dst.exists() or dst.is_symlink():
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.symlink_to(found.resolve())
+            created += 1
+        except OSError as exc:
+            logger.warning(
+                "could not symlink %s into child %s: %s", rel, task_id, exc,
+            )
+    return created
+
+
+def _propagate_install_dirs_from_architect(
+    project_dir: Path, architect_worktree: Path
+) -> int:
+    """Symlink the architect's install dirs into project_dir.
+
+    After the architect's session, its worktree typically holds
+    ``frontend/node_modules`` and/or ``api/.venv`` (it ran them while
+    verifying the scaffold). These don't merge into the integration
+    branch — git ignores them. Without this propagation, every feature
+    child re-runs ``npm install``/``uv sync`` from scratch (~30-60s
+    each, ~5min on a 5-child tree).
+
+    Returns the count of symlinks created.
+    """
+    if not architect_worktree.exists():
+        return 0
+    created = 0
+    for found, rel in _iter_install_dirs(architect_worktree):
+        target = project_dir / rel
+        if target.exists() or target.is_symlink():
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(found.resolve())
+            created += 1
+            logger.info(
+                "propagated install dir from architect: %s → %s",
+                target, found.resolve(),
+            )
+        except OSError as exc:
+            logger.warning(
+                "could not propagate %s from architect: %s", target, exc,
+            )
+    return created
 
 
 async def _wait_for_review(
