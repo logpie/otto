@@ -844,6 +844,9 @@ async def _merge_child_branch(
             "detail": detail,
         })
         set_verdict(project_dir, child_task_id, "merge_blocked", cost_usd=result.cost_usd)
+        # Sync the in-memory LeadResult so downstream consumers (event
+        # emitters, child_summaries) see the same verdict as the graph.
+        result.verdict = "merge_blocked"
         return
 
     ok, detail = merge_child_into_integration(
@@ -861,6 +864,7 @@ async def _merge_child_branch(
         })
         # Per philosophy: best-effort. Mark blocked, sibling continues.
         set_verdict(project_dir, child_task_id, "merge_blocked", cost_usd=result.cost_usd)
+        result.verdict = "merge_blocked"  # in-memory sync (see above)
         return
 
     _emit(on_event, {
@@ -1144,7 +1148,20 @@ def _build_child_summaries(
     for cid in children_of(project_dir, parent_task_id):
         entry = get_task(project_dir, cid) or {}
         result = child_results.get(cid)
-        verdict = (result.verdict if result else entry.get("verdict") or "unknown")
+        # Task graph verdict is authoritative for merge outcomes — the
+        # in-memory `result.verdict` stays at the agent's self-declared
+        # value (e.g., "pass") even after `_merge_child_branch()` writes
+        # "merge_blocked" to the graph. If we trust the stale result,
+        # the integration agent never sees the merge failure and skips
+        # Step 0b recovery. Prefer the graph verdict when it's terminal-
+        # for-the-merge-path; fall back to result.verdict otherwise.
+        graph_verdict = entry.get("verdict")
+        if graph_verdict == "merge_blocked":
+            verdict = "merge_blocked"
+        elif result is not None:
+            verdict = result.verdict
+        else:
+            verdict = graph_verdict or "unknown"
         record: dict[str, Any] = {
             "task_id": cid,
             "intent": entry.get("intent", ""),

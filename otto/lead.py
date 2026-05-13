@@ -335,11 +335,28 @@ def _render_prompt(
             "session_dir": str(session_dir),
         }) + tier_hint
     else:
-        summary_text = "\n".join(
-            f"  - {s.get('task_id', '?')}: verdict={s.get('verdict', '?')}, "
-            f"intent={(s.get('intent') or '')[:80]!r}"
-            for s in child_summaries
-        ) or "  (no children)"
+        def _fmt_child(s: dict[str, Any]) -> str:
+            verdict = s.get("verdict", "?")
+            tid = s.get("task_id", "?")
+            line = (
+                f"  - {tid}: verdict={verdict}, "
+                f"intent={(s.get('intent') or '')[:80]!r}"
+            )
+            # For merge_blocked children, surface the build branch so the
+            # integration Lead can re-attempt `git merge <branch>` per
+            # Step 0b instead of treating the missing work as missing
+            # feature.
+            if verdict == "merge_blocked":
+                branch = s.get("build_branch")
+                if branch:
+                    line += f"\n      build_branch=`{branch}`"
+                hint = s.get("recovery_hint")
+                if hint:
+                    line += f"\n      recovery_hint: {hint}"
+            return line
+
+        summary_text = "\n".join(_fmt_child(s) for s in child_summaries) \
+            or "  (no children)"
         return _interpolate_prompt(template, {
             "task_id": task_id,
             "intent": intent,

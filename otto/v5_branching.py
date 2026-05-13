@@ -118,6 +118,17 @@ coverage/
 *.tsbuildinfo
 tsconfig.tsbuildinfo
 tsconfig.*.tsbuildinfo
+
+# Runtime artifacts — SQLite DBs, logs, pids. Same shape as tsbuildinfo:
+# agents run their code, the runtime creates these files, `git add -A`
+# tracks them, then merges conflict because each sibling has a divergent
+# binary. Live run on 2026-05-13 had `api/itracker.db` block a merge.
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.pid
+*.log
 """
 
 
