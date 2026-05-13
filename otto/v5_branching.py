@@ -127,9 +127,68 @@ tsconfig.*.tsbuildinfo
 *.sqlite
 *.sqlite3
 *.sqlite3-journal
+*.db-journal
+*.db-wal
+*.db-shm
+*-wal
+*-shm
 *.pid
 *.log
 """
+
+# BEGIN/END markers wrap the managed block so re-runs can replace the
+# block in place (adding new patterns to existing repos) without
+# clobbering anything users put outside the markers.
+_OTTO_GITIGNORE_BEGIN = "# --- otto v5 default ignores (BEGIN) ---"
+_OTTO_GITIGNORE_END = "# --- otto v5 default ignores (END) ---"
+# Legacy single-line sentinel from an earlier format. Migrated on first
+# encounter (replaced with BEGIN/END block).
+_OTTO_GITIGNORE_LEGACY_SENTINEL = "# --- otto v5 default ignores ---"
+
+
+def _apply_managed_gitignore(gi_path: Path) -> bool:
+    """Idempotently install / refresh the Otto-managed .gitignore block.
+
+    Reads existing (if any), preserves anything outside the BEGIN/END
+    markers, rewrites the managed block in place. Returns True if the
+    file was modified, False if no change was needed.
+    """
+    try:
+        existing = gi_path.read_text(encoding="utf-8") if gi_path.exists() else ""
+    except OSError:
+        existing = ""
+    managed = (
+        _OTTO_GITIGNORE_BEGIN + "\n"
+        + _DEFAULT_GITIGNORE.rstrip() + "\n"
+        + _OTTO_GITIGNORE_END
+    )
+    if _OTTO_GITIGNORE_BEGIN in existing and _OTTO_GITIGNORE_END in existing:
+        import re as _re
+        new_text = _re.sub(
+            _re.escape(_OTTO_GITIGNORE_BEGIN) + r".*?" + _re.escape(_OTTO_GITIGNORE_END),
+            managed,
+            existing,
+            flags=_re.DOTALL,
+        )
+    elif _OTTO_GITIGNORE_LEGACY_SENTINEL in existing:
+        # Old format: legacy sentinel header but no end marker. Strip
+        # everything from the legacy sentinel onward (it was Otto-managed)
+        # and replace with the new bounded block.
+        idx = existing.find(_OTTO_GITIGNORE_LEGACY_SENTINEL)
+        preamble = existing[:idx].rstrip()
+        sep = "\n\n" if preamble else ""
+        new_text = preamble + sep + managed + "\n"
+    else:
+        sep = "\n\n" if existing.strip() else ""
+        new_text = existing.rstrip() + sep + managed + "\n"
+    if new_text == existing:
+        return False
+    try:
+        gi_path.write_text(new_text, encoding="utf-8")
+        return True
+    except OSError as exc:
+        logger.warning("could not write managed .gitignore: %s", exc)
+        return False
 
 
 def ensure_initial_commit(project_dir: Path) -> bool:
@@ -155,13 +214,8 @@ def ensure_initial_commit(project_dir: Path) -> bool:
         if head.returncode == 0:
             return False
 
-        # Seed .gitignore if the project doesn't ship one.
-        gitignore_path = project_dir / ".gitignore"
-        if not gitignore_path.exists():
-            try:
-                gitignore_path.write_text(_DEFAULT_GITIGNORE, encoding="utf-8")
-            except OSError as exc:
-                logger.warning("could not write default .gitignore: %s", exc)
+        # Seed (or refresh) the managed .gitignore block.
+        _apply_managed_gitignore(project_dir / ".gitignore")
 
         subprocess.run(
             ["git", "add", "-A"],
@@ -491,20 +545,7 @@ def commit_worktree(*, worktree_path: Path, message: str) -> tuple[bool, str]:
     try:
         # 1. Ensure .gitignore covers the common artifact paths. Append rather
         # than overwrite so agents can still extend it.
-        gi_path = worktree_path / ".gitignore"
-        try:
-            existing = gi_path.read_text(encoding="utf-8") if gi_path.exists() else ""
-        except OSError:
-            existing = ""
-        # Sentinel marks our managed block; only inserted once.
-        sentinel = "# --- otto v5 default ignores ---"
-        if sentinel not in existing:
-            new_text = existing.rstrip() + ("\n\n" if existing.strip() else "") + \
-                       sentinel + "\n" + _DEFAULT_GITIGNORE
-            try:
-                gi_path.write_text(new_text, encoding="utf-8")
-            except OSError as exc:
-                logger.warning("could not update worktree .gitignore: %s", exc)
+        _apply_managed_gitignore(worktree_path / ".gitignore")
 
         # 2. Untrack already-tracked files that match the (now updated)
         # gitignore. ``git ls-files`` lists tracked files; ``check-ignore``

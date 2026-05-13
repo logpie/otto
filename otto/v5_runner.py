@@ -319,6 +319,23 @@ async def run_v5_pipeline(
                 cost_usd=root_result.cost_usd + integration_result.cost_usd,
             )
 
+            # ---- Phase F-pre: Reconcile recovered merge_blocked children ----
+            # The integration agent's Step 0b can manually `git merge` the
+            # build branches of merge_blocked children. When that succeeds,
+            # the children's persisted verdict is still "merge_blocked"
+            # (the runner has no way to know what the agent did). Without
+            # reconciliation, aggregate_verdict() rolls up that stale
+            # merge_blocked even when Step 0b restored everything.
+            #
+            # Check git: for each merge_blocked direct child of root, is
+            # its build_branch an ancestor of the integration branch?
+            # If yes, the integration agent merged it — update verdict to
+            # "pass" so aggregate reflects the real product state.
+            try:
+                _reconcile_recovered_children(project_dir, ROOT_TASK_ID, on_event)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning("post-integration reconciliation failed: %s", exc)
+
         # ---- Phase F: Aggregate final verdict ----
         result.verdict = aggregate_verdict(project_dir, ROOT_TASK_ID)
         result.total_cost_usd = tree_total_cost(project_dir, ROOT_TASK_ID)
@@ -1201,6 +1218,72 @@ def _is_descendant_of(project_dir: Path, candidate_id: str, ancestor_id: str) ->
             return ancestor_id == ROOT_TASK_ID and cur == ROOT_TASK_ID
         cur = parent
     return False
+
+
+def _reconcile_recovered_children(
+    project_dir: Path,
+    parent_task_id: str,
+    on_event: Any = None,
+) -> int:
+    """Update verdicts of merge_blocked children whose work the
+    integration agent successfully recovered via Step 0b.
+
+    Algorithm: for each direct child of ``parent_task_id`` currently
+    marked ``merge_blocked``, check whether its build branch is an
+    ancestor of the parent's integration branch. If yes, the
+    integration session's ``git merge`` brought the work in — the
+    child has effectively passed (via recovery). Update its verdict
+    from ``merge_blocked`` to ``pass``.
+
+    Without this, ``aggregate_verdict()`` keeps reporting the stale
+    ``merge_blocked`` even though Step 0b succeeded.
+
+    Returns the number of children whose verdict was updated.
+    """
+    from otto.v5_branching import child_branch_name
+
+    parent = get_task(project_dir, parent_task_id) or {}
+    integration_branch = parent.get("integration_branch") or "main"
+
+    reconciled = 0
+    for cid in children_of(project_dir, parent_task_id):
+        child = get_task(project_dir, cid) or {}
+        if child.get("verdict") != "merge_blocked":
+            continue
+        build_branch = child_branch_name(cid)
+        # is-ancestor: build branch is reachable from integration branch
+        try:
+            proc = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", build_branch, integration_branch],
+                cwd=str(project_dir),
+                capture_output=True,
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.warning(
+                "reconcile: could not check is-ancestor for %s: %s", cid, exc,
+            )
+            continue
+        if proc.returncode != 0:
+            # Either not an ancestor (real failure that wasn't recovered)
+            # or git couldn't resolve the branch (deleted, etc.). Don't
+            # update the verdict — preserve the honest merge_blocked.
+            continue
+        # Ancestor confirmed: integration agent merged it.
+        set_verdict(project_dir, cid, "pass", cost_usd=float(child.get("cost_usd", 0.0)))
+        reconciled += 1
+        logger.info(
+            "reconcile: child %s recovered by integration (build=%s); "
+            "verdict merge_blocked → pass",
+            cid, build_branch,
+        )
+        _emit(on_event, {
+            "event": "child_recovery_reconciled",
+            "task_id": cid,
+            "build_branch": build_branch,
+            "integration_branch": integration_branch,
+        })
+    return reconciled
 
 
 def _emit(on_event: Any, payload: dict[str, Any]) -> None:

@@ -150,3 +150,153 @@ def test_default_gitignore_covers_runtime_artifacts() -> None:
     assert "*.db" in _DEFAULT_GITIGNORE
     assert "*.sqlite" in _DEFAULT_GITIGNORE
     assert "*.log" in _DEFAULT_GITIGNORE
+    # SQLite WAL-mode sidecars (Codex review found these missing)
+    assert "*-wal" in _DEFAULT_GITIGNORE
+    assert "*-shm" in _DEFAULT_GITIGNORE
+    assert "*.db-journal" in _DEFAULT_GITIGNORE
+
+
+def test_managed_gitignore_idempotent(tmp_path: Path) -> None:
+    """Running the helper twice produces an identical file (no
+    accumulating duplicate blocks)."""
+    from otto.v5_branching import _apply_managed_gitignore
+    gi = tmp_path / ".gitignore"
+    assert _apply_managed_gitignore(gi) is True
+    snapshot = gi.read_text()
+    # Second call: should detect block exists + content current; no-op.
+    assert _apply_managed_gitignore(gi) is False
+    assert gi.read_text() == snapshot
+
+
+def test_managed_gitignore_preserves_user_content(tmp_path: Path) -> None:
+    """Patterns outside the managed BEGIN/END markers stay untouched
+    across reapplications."""
+    from otto.v5_branching import (
+        _apply_managed_gitignore,
+        _OTTO_GITIGNORE_BEGIN,
+        _OTTO_GITIGNORE_END,
+    )
+    gi = tmp_path / ".gitignore"
+    gi.write_text(
+        f"my-user-pattern.txt\nsome-dir/\n\n"
+        f"{_OTTO_GITIGNORE_BEGIN}\nold-otto-patterns\n{_OTTO_GITIGNORE_END}\n\n"
+        f"more-user-patterns\n"
+    )
+    assert _apply_managed_gitignore(gi) is True
+    new = gi.read_text()
+    # User content preserved.
+    assert "my-user-pattern.txt" in new
+    assert "some-dir/" in new
+    assert "more-user-patterns" in new
+    # Old managed content replaced.
+    assert "old-otto-patterns" not in new
+    # New managed patterns present.
+    assert "*.db" in new
+
+
+def _init_git(repo: Path) -> None:
+    import subprocess
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+
+
+def _commit(repo: Path, content: str, branch: str | None = None) -> str:
+    import subprocess
+    if branch:
+        subprocess.run(["git", "checkout", "-q", "-b", branch], cwd=repo, check=True)
+    f = repo / "f.txt"
+    f.write_text(content)
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", f"{content[:20]}"], cwd=repo, check=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def test_reconcile_recovered_children_flips_merged_to_pass(tmp_path: Path) -> None:
+    """Integration recovers a merge_blocked child by `git merge`-ing its
+    build branch. The reconciler detects ``build_branch`` is an ancestor
+    of the integration branch and updates the verdict pass."""
+    from otto.v5_runner import _reconcile_recovered_children
+    from otto.v5_branching import child_branch_name
+    import subprocess
+
+    _init_git(tmp_path)
+    _commit(tmp_path, "initial")
+    # Build branch for child v5-foo: has its own commit
+    child_tid = "v5-foo"
+    child_branch = child_branch_name(child_tid)
+    _commit(tmp_path, "child work", branch=child_branch)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=tmp_path, check=True)
+    # Simulate Step 0b: integration agent merges child_branch into main.
+    subprocess.run(
+        ["git", "merge", "-q", "--no-ff", "--no-edit", child_branch],
+        cwd=tmp_path, check=True,
+    )
+
+    # Seed task graph: root + child marked merge_blocked.
+    record_task(tmp_path, task_id="root", intent="r", parent_task_id=None)
+    record_task(tmp_path, task_id=child_tid, intent="c", parent_task_id="root")
+    set_verdict(tmp_path, child_tid, "merge_blocked")
+
+    n = _reconcile_recovered_children(tmp_path, "root")
+    assert n == 1
+
+    from otto.queue.task_graph import get_task
+    final = get_task(tmp_path, child_tid)
+    assert final is not None
+    assert final.get("verdict") == "pass"
+
+
+def test_reconcile_leaves_unrecovered_children_alone(tmp_path: Path) -> None:
+    """If the integration agent didn't merge the child's branch, the
+    child stays merge_blocked (don't fake success)."""
+    from otto.v5_runner import _reconcile_recovered_children
+    from otto.v5_branching import child_branch_name
+
+    _init_git(tmp_path)
+    _commit(tmp_path, "initial")
+    child_tid = "v5-orphan"
+    child_branch = child_branch_name(child_tid)
+    _commit(tmp_path, "child work", branch=child_branch)
+    # Important: do NOT merge child_branch into main.
+    import subprocess
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=tmp_path, check=True)
+
+    record_task(tmp_path, task_id="root", intent="r", parent_task_id=None)
+    record_task(tmp_path, task_id=child_tid, intent="c", parent_task_id="root")
+    set_verdict(tmp_path, child_tid, "merge_blocked")
+
+    n = _reconcile_recovered_children(tmp_path, "root")
+    assert n == 0
+
+    from otto.queue.task_graph import get_task
+    final = get_task(tmp_path, child_tid)
+    assert final is not None
+    assert final.get("verdict") == "merge_blocked"  # preserved honest verdict
+
+
+def test_managed_gitignore_migrates_legacy_sentinel(tmp_path: Path) -> None:
+    """Files written with the old single-line sentinel format get
+    upgraded to the BEGIN/END block on next apply, without losing
+    pre-sentinel user content."""
+    from otto.v5_branching import (
+        _apply_managed_gitignore,
+        _OTTO_GITIGNORE_LEGACY_SENTINEL,
+        _OTTO_GITIGNORE_BEGIN,
+        _OTTO_GITIGNORE_END,
+    )
+    gi = tmp_path / ".gitignore"
+    gi.write_text(
+        f"my-user-pattern\n\n{_OTTO_GITIGNORE_LEGACY_SENTINEL}\n"
+        f"old-legacy-stuff\n"
+    )
+    assert _apply_managed_gitignore(gi) is True
+    new = gi.read_text()
+    assert "my-user-pattern" in new
+    assert "old-legacy-stuff" not in new
+    assert _OTTO_GITIGNORE_BEGIN in new
+    assert _OTTO_GITIGNORE_END in new
+    assert "*.db" in new  # new patterns now present
