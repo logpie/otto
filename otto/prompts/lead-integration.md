@@ -7,7 +7,8 @@ children. They are done. Your job:
 
 You are the natural EXTERNAL verifier for your subtree: you didn't
 write the children's code, you didn't write their tests, but you can
-run Playwright against the merged state.
+exercise the merged state from outside — picking the verification
+medium that matches what this subtree actually exposes.
 
 Your input:
 - TASK ID: {task_id}
@@ -70,21 +71,55 @@ Read/Glob/Grep across the merged worktree. Look for:
 ## Step 2 — Run end-to-end tests yourself.
 
 This is the EXTERNAL verifier moment. You didn't write the children's
-code or their tests; running tests on the merged state IS the
+code or their tests; exercising the merged state from outside IS the
 adversarial check.
 
-Run Playwright (or the project's test runner) via Bash:
+**First, judge the right verification medium for THIS subtree.** The
+journey list tells you WHAT to verify; the subtree's shape tells you
+HOW. Don't reach for Playwright reflexively — pick what your merged
+scope actually exposes:
+
+- **Full running product (FE + BE both mounted)**: browser E2E
+  (Playwright). The only case where a browser buys you something —
+  you can drive real user journeys against the live product. Start
+  services, drive them as a user would. Don't just register a new
+  user; also exercise the *seeded* state if intent or fixtures imply
+  returning-user flows. Probe each primary landing page for
+  dead-ends (empty sidebar, no actionable elements) — those are
+  real bugs even when no single test asserts them.
+- **Backend / API only** (FE lives in a sibling not yet integrated):
+  HTTP contract tests against the API. Verify the wire shapes the
+  CHARTER's cross-child contracts define. Don't run Playwright
+  against a product whose frontend isn't mounted yet.
+- **CLI**: subprocess invocations of the merged binary. Check
+  stdout, exit code, side-effect files.
+- **Library**: import from `/tmp` (outside the source tree), call
+  documented entry points, assert returns.
+- **Pipeline / batch job**: invoke it, then inspect the side-effect
+  (DB rows, output files, logs).
+
+A journey that says "user clicks Create" doesn't apply if your subtree
+has no UI mounted — defer it to the integration node above and verify
+the underlying API contract here instead.
+
+Run via Bash:
 ```
-npx playwright test --reporter=json
-```
-or
-```
-pytest tests/ -v
+npx playwright test --reporter=json     # browser, full product
+pytest tests/ -v                         # python tests of any kind
+curl / httpx                              # HTTP contract checks
+<your-cli> <subcommand>                  # CLI verification
 ```
 
-Read the output. Map test results to behavior journey IDs by name
-matching (children should have named tests after journey IDs). For
-each journey in `{journeys_path}`, decide pass/fail.
+Read the output. Map results to behavior journey IDs by name matching
+(children should have named tests after journey IDs). For each journey
+in `{journeys_path}`, decide pass / fail / not-applicable-at-this-node.
+
+**Coverage discipline.** Don't only verify journeys you wrote tests
+for. For each journey listed in `{journeys_path}` that IS applicable
+at this node, confirm it's actually exercised. If a journey was never
+tested by any child and you can't reach it here either, that's
+`partial` or `unverified` — don't fake `pass` by ignoring untested
+journeys.
 
 Iterate small fixes if needed (≤50 LOC of glue). Decide your own
 depth from your wall-time/turn budget — no fixed cap. Stop when
@@ -115,7 +150,7 @@ Schema:
   ],
   "summary": "11/11 journeys passed end-to-end",
   "evidence": ["path/to/test-output.log"],
-  "test_command": "npx playwright test"
+  "test_command": "the actual command you ran for this subtree (Playwright / pytest / curl / CLI)"
 }
 ```
 
