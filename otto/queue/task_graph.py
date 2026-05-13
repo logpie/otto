@@ -216,6 +216,50 @@ def add_cost(project_dir: Path, task_id: str, cost_usd: float) -> None:
             graph["tasks"][task_id]["cost_usd"] = cur + float(cost_usd)
 
 
+def clear_verdict_for_retry(
+    project_dir: Path,
+    task_id: str,
+    retry_reason: str,
+) -> int:
+    """Reset a task's terminal verdict so it can be re-dispatched.
+
+    Used when a deterministic runner check (e.g., scaffold preflight)
+    invalidates the agent's self-declared verdict. Clearing the verdict
+    + completed_at lets ``take_ready`` pick the task back up. The
+    ``retry_reason`` is stored on the task so the next dispatch can
+    surface it to the agent.
+
+    Returns the new ``retry_count`` (1 after the first retry, 2 after
+    the second, ...). Callers use this to enforce a retry cap.
+    """
+    with _locked_graph(project_dir) as (_path, graph):
+        t = graph["tasks"].get(task_id)
+        if t is None:
+            return 0
+        t["verdict"] = None
+        t["completed_at"] = None
+        t["retry_reason"] = retry_reason
+        t["retry_count"] = int(t.get("retry_count", 0)) + 1
+        return int(t["retry_count"])
+
+
+def get_retry_reason(project_dir: Path, task_id: str) -> str | None:
+    """Return the stored retry_reason for ``task_id``, or None."""
+    graph = read_graph(project_dir)
+    t = graph.get("tasks", {}).get(task_id) or {}
+    reason = t.get("retry_reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason
+    return None
+
+
+def get_retry_count(project_dir: Path, task_id: str) -> int:
+    """Return how many times ``task_id`` has been retried so far."""
+    graph = read_graph(project_dir)
+    t = graph.get("tasks", {}).get(task_id) or {}
+    return int(t.get("retry_count", 0))
+
+
 def children_of(project_dir: Path, task_id: str) -> list[str]:
     """Return the ordered list of child task_ids for ``task_id``."""
     graph = read_graph(project_dir)

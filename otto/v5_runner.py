@@ -55,6 +55,9 @@ from otto.queue.subtask import (
 from otto.queue.task_graph import (
     aggregate_verdict,
     children_of,
+    clear_verdict_for_retry,
+    get_retry_count,
+    get_retry_reason,
     get_task,
     read_graph,
     record_task,
@@ -66,6 +69,12 @@ from otto.spec_compile_flat import compile_flat_spec, FlatSpec
 logger = logging.getLogger("otto.v5_runner")
 
 ROOT_TASK_ID = "root"
+
+# When scaffold preflight invalidates an architect's self-declared pass,
+# the runner re-dispatches the architect with the failure summary
+# prepended to its intent. This is the cap on those retries (architect
+# is allowed 1 original attempt + ``MAX_ARCHITECT_RETRIES`` re-runs).
+MAX_ARCHITECT_RETRIES = 2
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +335,8 @@ async def _process_children(
     completed: set[str] = set()
     in_flight: dict[str, asyncio.Task[Any]] = {}
     preflight_seen: set[str] = set()  # issue kinds already emitted, dedupe
-    scaffold_compile_done: bool = False  # one-shot check after architect
+    scaffold_compile_done: bool = False  # gate; reset on retry so check
+    # fires again after an architect re-attempt
 
     while True:
         # Check tree budget cap.
@@ -401,8 +411,9 @@ async def _process_children(
                 compile_issues = check_scaffold_compiles(
                     project_dir, architect_task_id=architect_tid
                 )
+                blocking_messages: list[str] = []
                 for issue in compile_issues:
-                    key = f"{issue.kind}:scaffold"
+                    key = f"{issue.kind}:scaffold:{get_retry_count(project_dir, architect_tid)}"
                     if key in preflight_seen:
                         continue
                     preflight_seen.add(key)
@@ -414,6 +425,58 @@ async def _process_children(
                         "severity": issue.severity,
                         "message": issue.message,
                     })
+                    if issue.severity == "block":
+                        blocking_messages.append(f"[{issue.kind}] {issue.message}")
+
+                # Architect retry on blocking compile failure: scaffold
+                # doesn't actually compile from a clean state. The
+                # architect declared pass based on its in-session state
+                # (where node_modules was populated). Invalidate the
+                # verdict, surface the failure, and re-dispatch.
+                if blocking_messages:
+                    current_retries = get_retry_count(project_dir, architect_tid)
+                    if current_retries < MAX_ARCHITECT_RETRIES:
+                        reason = (
+                            "Clean-state preflight failed for your scaffold. "
+                            "The runner copied your output to a temp dir, ran "
+                            "`npm ci` + `npm run build` + `py_compile`, and got "
+                            "these errors:\n\n"
+                            + "\n".join(f"  - {m}" for m in blocking_messages)
+                            + "\n\nFix the underlying bug — don't lean on in-session "
+                            "state (your existing node_modules, venv) that won't "
+                            "survive handoff. Re-emit your scaffold."
+                        )
+                        new_count = clear_verdict_for_retry(
+                            project_dir, architect_tid, reason
+                        )
+                        completed.discard(architect_tid)
+                        child_results.pop(architect_tid, None)
+                        scaffold_compile_done = False
+                        logger.warning(
+                            "architect %s scaffold preflight failed (attempt %d/%d): re-dispatching",
+                            architect_tid,
+                            new_count,
+                            MAX_ARCHITECT_RETRIES,
+                        )
+                        _emit(on_event, {
+                            "event": "architect_retry",
+                            "task_id": architect_tid,
+                            "retry_count": new_count,
+                            "max_retries": MAX_ARCHITECT_RETRIES,
+                            "reason_tail": blocking_messages[-1][:200],
+                        })
+                    else:
+                        logger.error(
+                            "architect %s scaffold preflight failed after %d retries; "
+                            "descendants will remain blocked",
+                            architect_tid,
+                            MAX_ARCHITECT_RETRIES,
+                        )
+                        _emit(on_event, {
+                            "event": "architect_retry_exhausted",
+                            "task_id": architect_tid,
+                            "retry_count": current_retries,
+                        })
 
         # Spawn ready tasks up to max_parallel.
         for entry in ready:
@@ -596,10 +659,28 @@ async def _run_child(
     except Exception as exc:  # noqa: BLE001
         logger.warning("worktree setup for child %s failed: %s", tid, exc)
 
+    # Augment intent with retry context if this is a re-dispatch after a
+    # runner-side check (e.g., scaffold preflight) invalidated the agent's
+    # prior verdict. The reason explains what failed; the agent is
+    # responsible for fixing it before declaring pass again.
+    intent = entry["intent"]
+    retry_reason = get_retry_reason(project_dir, tid)
+    if retry_reason:
+        intent = (
+            "## RETRY — previous attempt failed runner-side verification\n\n"
+            f"{retry_reason}\n\n"
+            "Your previous code is on the same branch; iterate on it, "
+            "fix the underlying issue, and re-declare pass only after the "
+            "build genuinely works.\n\n"
+            "---\n\n"
+            "## Original intent (your scope hasn't changed)\n\n"
+            f"{intent}"
+        )
+
     # Run the Lead. If we created a worktree, lead.py's _resolve_worktree picks it up.
     result = await _run_lead_with_fallback(
         task_id=tid,
-        intent=entry["intent"],
+        intent=intent,
         project_dir=project_dir,
         session_dir=child_session_dir,
         integration_branch=parent_integration_branch,
