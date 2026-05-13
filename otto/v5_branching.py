@@ -78,8 +78,16 @@ dist/
 venv/
 env/
 
+# Also match SYMLINKS named the same way (no trailing slash matches
+# symlinks where the trailing-slash pattern only matches real dirs).
+# Otto's install-dir-sharing propagates these as symlinks; without the
+# no-slash patterns git tracks them and breaks subsequent merges.
+.venv
+venv
+
 # Node
 node_modules/
+node_modules
 .npm/
 .pnpm-store/
 .yarn/
