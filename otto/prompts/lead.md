@@ -19,7 +19,13 @@ Your input:
 
 Read `CHARTER.md` and `decisions.md` at the repo root if they exist.
 - CHARTER.md = the architect's slow-changing design doc (stack, conventions,
-  inter-subsystem contracts). Binding.
+  inter-subsystem contracts). Binding. If it has an **"Agent operating
+  notes"** section, that's your project-local README — read it before
+  doing any orienting (`ls`/`find`/`cat`) of your own. It typically
+  tells you where shared types/clients/store live, the exact test
+  commands with cwd, what's pre-installed (so you don't re-run
+  `npm install` / `uv venv` / `playwright install`), and which
+  cross-cutting libraries siblings use. Trust it; don't rediscover.
 - decisions.md = append-only union-merged log of boundary decisions made by
   sibling agents and arbitrations made by parent agents. Read it for
   context, write to it when you make a boundary-relevant choice.
@@ -131,6 +137,31 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
 
      Cross-child concerns vary by product. Cover whatever applies
      here; skip what doesn't. Common ones:
+
+     - **Agent operating notes** (the operational equivalent of a
+       project README — what every sibling agent will need to know
+       to work in THIS project, written ONCE so siblings don't
+       independently rediscover). Bullet points, no prose. Pick
+       what's actually decided here. Common items:
+         - Where shared things live (paths to `types.ts`, the HTTP
+           client, the store interface, etc. — anything multiple
+           siblings will import/reference)
+         - How to run things (exact test commands with cwd, server
+           start commands, e.g., `cd api && uv run pytest` from
+           project root)
+         - Pre-installed state: the runner symlinks `node_modules` /
+           `.venv` into every child worktree and pre-caches
+           Playwright browsers. Children should NOT re-run
+           `npm install`, `uv venv`, `pip install`, or
+           `playwright install`. If something seems missing, that
+           is a tooling bug — report, don't reinstall.
+         - Cross-cutting library / convention choices that all
+           siblings will use (HTTP client lib for in-script tests,
+           time format, ID format, etc.)
+
+       Excludes: visual/UX design, internal-to-a-child file layout,
+       test structure inside a child's own tests dir — those are
+       leaf decisions.
 
      - **Stack choice** (when children share a runtime): language
        version, framework, package manager, test runner config.
