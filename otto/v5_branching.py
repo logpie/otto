@@ -21,6 +21,98 @@ from pathlib import Path
 logger = logging.getLogger("otto.v5_branching")
 
 
+class MergeWorktreeDirtyError(RuntimeError):
+    """Raised when a merge target worktree is dirty before branch checkout."""
+
+    def __init__(
+        self,
+        *,
+        project_dir: Path,
+        current_branch: str,
+        target_branch: str,
+        source_branch: str,
+        dirty_status: list[str],
+    ) -> None:
+        self.project_dir = project_dir
+        self.current_branch = current_branch
+        self.target_branch = target_branch
+        self.source_branch = source_branch
+        self.dirty_status = tuple(dirty_status)
+        preview = "\n".join(f"  {line}" for line in dirty_status[:20])
+        if len(dirty_status) > 20:
+            preview += f"\n  ... {len(dirty_status) - 20} more"
+        super().__init__(
+            "merge worktree dirty before checkout "
+            f"(cwd={project_dir}, current={current_branch or 'HEAD'}, "
+            f"target={target_branch}, source={source_branch}):\n{preview}"
+        )
+
+
+def git_current_branch(project_dir: Path) -> str:
+    """Return the checked-out branch name, or ``HEAD`` when detached/unknown."""
+    cp = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    branch = (cp.stdout or "").strip()
+    if cp.returncode == 0 and branch:
+        return branch
+    cp = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    branch = (cp.stdout or "").strip()
+    if cp.returncode == 0 and branch:
+        return branch
+    return "HEAD"
+
+
+def git_status_porcelain(project_dir: Path) -> list[str]:
+    """Return ``git status --porcelain`` lines for ``project_dir``."""
+    cp = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    if cp.returncode != 0:
+        detail = (cp.stderr or cp.stdout or "").strip()
+        raise RuntimeError(f"git status failed in {project_dir}: {detail}")
+    out: list[str] = []
+    for line in (cp.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        # Linked worktrees live under `.worktrees/` and may be present in
+        # older repos before Otto has refreshed its managed .gitignore block.
+        # They are Otto's own git administration state, not product dirt.
+        if line in {"?? .worktrees", "?? .worktrees/"}:
+            continue
+        out.append(line)
+    return out
+
+
+def assert_clean_before_checkout(
+    *,
+    project_dir: Path,
+    source_branch: str,
+    target_branch: str,
+) -> None:
+    """Fail before a checkout would carry dirty files across branches."""
+    dirty = git_status_porcelain(project_dir)
+    if dirty:
+        raise MergeWorktreeDirtyError(
+            project_dir=project_dir,
+            current_branch=git_current_branch(project_dir),
+            target_branch=target_branch,
+            source_branch=source_branch,
+            dirty_status=dirty,
+        )
+
+
 def integration_branch_name(parent_task_id: str | None) -> str:
     """Compute the integration branch name for a parent task.
 
@@ -112,6 +204,14 @@ playwright-report/
 test-results/
 coverage/
 
+# Otto runtime / orchestration artifacts
+.worktrees/
+.worktrees
+otto_logs/
+otto_logs
+uploads/
+uploads
+
 # TypeScript incremental build cache — frequent cause of cross-worktree
 # merge conflicts (different siblings produce different .tsbuildinfo for
 # the same project). Tooling regenerates these on demand; don't commit.
@@ -124,6 +224,7 @@ tsconfig.*.tsbuildinfo
 # tracks them, then merges conflict because each sibling has a divergent
 # binary. Live run on 2026-05-13 had `api/itracker.db` block a merge.
 *.db
+*.db.bak
 *.sqlite
 *.sqlite3
 *.sqlite3-journal
@@ -406,6 +507,11 @@ def merge_branch_into(
     branch = source_branch
     parent_integration_branch = target_branch
     try:
+        assert_clean_before_checkout(
+            project_dir=project_dir,
+            source_branch=branch,
+            target_branch=parent_integration_branch,
+        )
         # Switch to integration branch.
         cp = subprocess.run(
             ["git", "checkout", parent_integration_branch],
@@ -538,6 +644,8 @@ def merge_branch_into(
                 f"originally conflicted on: {', '.join(files[:5])}"
             )
         return False, f"merge of {branch} aborted with no conflict files reported"
+    except MergeWorktreeDirtyError:
+        raise
     except Exception as exc:  # noqa: BLE001
         return False, f"merge crashed: {exc}"
 
@@ -626,3 +734,216 @@ def commit_worktree(*, worktree_path: Path, message: str) -> tuple[bool, str]:
         return True, f"committed: {message}"
     except Exception as exc:  # noqa: BLE001
         return False, f"commit crashed: {exc}"
+
+
+_INTEGRATION_ALLOWED_PREFIXES = (
+    "api/",
+    "app/",
+    "apps/",
+    "backend/",
+    "client/",
+    "docs/",
+    "frontend/",
+    "lib/",
+    "packages/",
+    "public/",
+    "scripts/",
+    "server/",
+    "spec/",
+    "src/",
+    "test/",
+    "tests/",
+    "web/",
+)
+
+_INTEGRATION_ALLOWED_EXACT = frozenset({
+    ".gitignore",
+    "CHARTER.md",
+    "Dockerfile",
+    "Makefile",
+    "README.md",
+    "decisions.md",
+    "docker-compose.yml",
+    "eslint.config.js",
+    "index.html",
+    "package-lock.json",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pyproject.toml",
+    "requirements-dev.txt",
+    "requirements.txt",
+    "start.sh",
+    "tsconfig.json",
+    "uv.lock",
+    "vite.config.js",
+    "vite.config.ts",
+    "yarn.lock",
+})
+
+
+def _normalise_git_path(path: str) -> str:
+    path = (path or "").replace("\\", "/").strip()
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def _is_integration_product_path(path: str) -> bool:
+    path = _normalise_git_path(path)
+    return path in _INTEGRATION_ALLOWED_EXACT or any(
+        path.startswith(prefix) for prefix in _INTEGRATION_ALLOWED_PREFIXES
+    )
+
+
+def _git_lines(repo: Path, args: list[str]) -> list[str]:
+    cp = subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    if cp.returncode != 0:
+        detail = (cp.stderr or cp.stdout or "").strip()
+        raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
+    return [line for line in (cp.stdout or "").splitlines() if line.strip()]
+
+
+def _changed_paths(repo: Path) -> list[str]:
+    paths = _git_lines(
+        repo,
+        ["ls-files", "--modified", "--deleted", "--others", "--exclude-standard"],
+    )
+    out: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        norm = _normalise_git_path(path)
+        if norm and norm not in seen:
+            out.append(norm)
+            seen.add(norm)
+    return out
+
+
+def _cached_name_status(repo: Path) -> list[tuple[str, str]]:
+    lines = _git_lines(repo, ["diff", "--cached", "--name-status"])
+    out: list[tuple[str, str]] = []
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            out.append((parts[0].strip(), _normalise_git_path(parts[-1])))
+    return out
+
+
+def _allowed_cached_path(repo: Path, status: str, path: str) -> bool:
+    if _is_integration_product_path(path):
+        return True
+    # Deleting runtime files from the index is allowed. This commits removal
+    # from git history without committing the runtime file contents.
+    if status.startswith("D") and path in _gitignored_paths(repo, [path]):
+        return True
+    return False
+
+
+def commit_integration_worktree(
+    *,
+    worktree_path: Path,
+    task_id: str,
+) -> tuple[bool, str]:
+    """Commit integration-agent product edits with a strict path allowlist.
+
+    Unlike ``commit_worktree`` for leaf build branches, this deliberately does
+    not run ``git add -A``. Integration agents may have produced runtime logs,
+    uploads, databases, and nested worktrees while verifying the merged product.
+    The runner stages only product/source paths plus removals of files now
+    covered by the managed ignore block.
+    """
+    message = f"integration: {task_id} runner-managed changes"
+    try:
+        is_repo = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+        )
+        if is_repo.returncode != 0:
+            return True, "no-op (not a git repo)"
+
+        _apply_managed_gitignore(worktree_path / ".gitignore")
+
+        # Start from a clean index so an agent's accidental `git add -A` cannot
+        # bypass the runner allowlist.
+        reset = subprocess.run(
+            ["git", "reset", "-q"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+        )
+        if reset.returncode != 0:
+            return False, f"git reset failed: {(reset.stderr or '').strip()}"
+
+        tracked = _git_lines(worktree_path, ["ls-files"])
+        ignored = _gitignored_paths(worktree_path, tracked)
+        if ignored:
+            rm = subprocess.run(
+                ["git", "rm", "--cached", "--", *sorted(ignored)],
+                cwd=str(worktree_path),
+                capture_output=True,
+                text=True,
+            )
+            if rm.returncode != 0:
+                return False, f"git rm --cached ignored files failed: {(rm.stderr or '').strip()}"
+
+        changed = _changed_paths(worktree_path)
+        allowed = [p for p in changed if _is_integration_product_path(p)]
+        disallowed = [p for p in changed if p not in allowed]
+        if allowed:
+            add = subprocess.run(
+                ["git", "add", "--", *allowed],
+                cwd=str(worktree_path),
+                capture_output=True,
+                text=True,
+            )
+            if add.returncode != 0:
+                return False, f"git add allowlist failed: {(add.stderr or '').strip()}"
+
+        bad_cached = [
+            f"{status}\t{path}"
+            for status, path in _cached_name_status(worktree_path)
+            if not _allowed_cached_path(worktree_path, status, path)
+        ]
+        if bad_cached:
+            return False, (
+                "refusing to commit disallowed staged integration paths: "
+                + ", ".join(bad_cached[:10])
+            )
+
+        diff = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=str(worktree_path),
+            capture_output=True,
+        )
+        if diff.returncode == 0:
+            if disallowed:
+                return False, (
+                    "integration worktree has dirty paths outside commit allowlist: "
+                    + ", ".join(disallowed[:10])
+                )
+            return True, "no-op (nothing to commit)"
+
+        commit = subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+        )
+        if commit.returncode != 0:
+            return False, f"git commit failed: {(commit.stderr or '').strip()}"
+
+        remaining = git_status_porcelain(worktree_path)
+        if remaining:
+            return False, (
+                "committed allowed integration changes, but worktree remains dirty: "
+                + ", ".join(remaining[:10])
+            )
+        return True, f"committed: {message}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"integration commit crashed: {exc}"

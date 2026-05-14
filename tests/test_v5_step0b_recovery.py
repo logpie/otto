@@ -141,6 +141,53 @@ def test_render_integration_prompt_no_branch_for_passing_child(tmp_path: Path) -
     assert follow_lines == []  # no follow-on indented lines emitted
 
 
+def test_step0b_prompt_enumerates_commit_allowlist_and_runtime_excludes() -> None:
+    """Step 0b recovery must scope commits instead of inviting add-all."""
+    prompt = Path("otto/prompts/lead-integration.md").read_text(encoding="utf-8")
+
+    assert "Stage only legitimate product paths" in prompt
+    for allowed in [
+        "frontend/",
+        "api/",
+        "CHARTER.md",
+        "decisions.md",
+        "package.json",
+        "pyproject.toml",
+    ]:
+        assert allowed in prompt
+    for excluded in [
+        ".worktrees/",
+        "otto_logs/",
+        "uploads/",
+        "*.db",
+        "*.db.bak",
+    ]:
+        assert excluded in prompt
+    assert "Never use `git add -A`" in prompt
+    assert "`git diff --cached --name-only`" in prompt
+
+
+def test_integration_prompt_requires_self_commit_with_integration_tag() -> None:
+    """Integration prompt is a secondary guard behind runner enforcement."""
+    prompt = Path("otto/prompts/lead-integration.md").read_text(encoding="utf-8")
+
+    assert "MUST commit those edits yourself before yielding" in prompt
+    assert "message tagged `integration:`" in prompt
+    assert "`git status --short` before and" in prompt
+    assert "`git add .`" in prompt
+
+
+def test_leaf_prompt_commit_hygiene_scopes_pathspecs() -> None:
+    """Leaf agents should not self-commit runtime or sibling files."""
+    prompt = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
+
+    assert "never use `git add -A`" in prompt
+    assert "Stage only explicit paths in your assigned subsystem" in prompt
+    assert "`CHARTER.md` or `decisions.md`" in prompt
+    for excluded in [".worktrees/", "otto_logs/", "uploads/", "*.db.bak"]:
+        assert excluded in prompt
+
+
 def test_default_gitignore_covers_runtime_artifacts() -> None:
     """The runtime-artifacts patterns (db/sqlite/log/pid) must be in
     the default gitignore. Live run on 2026-05-13 hit
