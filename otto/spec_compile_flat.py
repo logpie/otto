@@ -24,13 +24,22 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from otto import __version__ as OTTO_VERSION
 from otto.agent import make_agent_options
 from otto.observability import save_rendered_prompt, sha256_text, update_input_provenance
 from otto.paths import session_intent
+from otto.token_usage import token_usage_from_mapping
+from otto.v5_spec_cache import (
+    cache_key_payload,
+    lookup_spec_cache,
+    store_spec_cache,
+)
 
 logger = logging.getLogger("otto.spec_compile_flat")
 
@@ -535,8 +544,10 @@ async def compile_flat_spec(
     if not intent:
         raise ValueError("compile_flat_spec: intent is empty")
 
+    compile_started_ts = _utc_now()
     spec_dir = session_dir / "spec"
     spec_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = spec_dir / "spec.json"
 
     # Persist intent verbatim per philosophy invariant.
     intent_path = session_intent(project_dir, session_dir.name)
@@ -742,20 +753,86 @@ async def compile_flat_spec(
         },
     )
 
+    initial_prompt_text = _PROMPT_TEMPLATE.format(intent=intent)
+    provider = str(getattr(options, "provider", None) or "")
+    model = str(getattr(options, "model", None) or "")
+    key_payload = cache_key_payload(
+        intent_hash=intent_h,
+        prompt_hash=sha256_text(initial_prompt_text),
+        provider=provider,
+        model=model,
+        schema_version=SCHEMA_VERSION,
+        otto_version=OTTO_VERSION,
+    )
+    cache_disabled = bool(config.get("spec_compile_no_cache") or config.get("no_cache"))
+    if not cache_disabled:
+        cache_hit = lookup_spec_cache(project_dir, key_payload)
+        if cache_hit is not None:
+            prompt_entry = save_rendered_prompt(
+                prompts_dir=session_dir / "prompts",
+                template="compile-spec-flat",
+                rendered_text=initial_prompt_text,
+            )
+            shutil.copyfile(cache_hit.spec_path, spec_path)
+            spec = load_flat_spec(spec_path)
+            spec_text = spec_path.read_text(encoding="utf-8")
+            _write_compile_metrics(
+                session_dir,
+                {
+                    "start_ts": compile_started_ts,
+                    "end_ts": _utc_now(),
+                    "first_token_ts": None,
+                    "prompt_bytes": len(initial_prompt_text.encode("utf-8")),
+                    "output_bytes": len(spec_text.encode("utf-8")),
+                    "total_tokens": 0,
+                    "output_tokens": 0,
+                    "validation_retries": 0,
+                    "provider": provider,
+                    "model": model,
+                    "cache_hit": True,
+                    "cache_key_hash": cache_hit.key_hash,
+                },
+            )
+            update_input_provenance(
+                session_dir=session_dir,
+                intent={
+                    "fallback_reason": "",
+                    "resolved_text": intent,
+                    "sha256": intent_h,
+                    "source": "cli-argument",
+                },
+                spec={
+                    "source": "spec-cache",
+                    "path": str(spec_path),
+                    "sha256": sha256_text(spec_text),
+                    "cache_key_hash": cache_hit.key_hash,
+                    "cache_path": str(cache_hit.cache_dir),
+                },
+                prompts=[prompt_entry],
+            )
+            return spec
+
     # Single-turn compile with retry-on-lint-failure.
     last_warnings: list[str] = []
     last_structured_errors: list[str] = []
     parsed: dict[str, Any] | None = None
     preview = FlatSpec(intent=intent, intent_hash=intent_h)
-    prompt_text = _PROMPT_TEMPLATE.format(intent=intent)
+    prompt_text = initial_prompt_text
     prompt_entry: dict[str, str] = {"template": "compile-spec-flat", "rendered_sha256": "", "rendered_path": ""}
     spec: FlatSpec = preview
     accepted = False
+    attempts_run = 0
+    prompt_bytes_total = 0
+    output_bytes_total = 0
+    total_tokens = 0
+    output_tokens = 0
+    first_token_ts: str | None = None
     for attempt in range(1, max_retries + 2):  # initial + max_retries
+        attempts_run = attempt
         if attempt == 1:
-            prompt_text = _PROMPT_TEMPLATE.format(intent=intent)
+            prompt_text = initial_prompt_text
         else:
-            prompt_text = _PROMPT_TEMPLATE.format(intent=intent) + _PROMPT_RETRY_SUFFIX.format(
+            prompt_text = initial_prompt_text + _PROMPT_RETRY_SUFFIX.format(
                 warnings="\n".join(f"  - {w}" for w in last_warnings)
             )
 
@@ -767,7 +844,14 @@ async def compile_flat_spec(
             rendered_text=prompt_text,
         )
 
+        prompt_bytes_total += len(prompt_text.encode("utf-8"))
         result_text = await _run_compile(prompt_text, options, prompt_subdir, project_dir)
+        output_bytes_total += len(result_text.encode("utf-8"))
+        message_metrics = compile_message_metrics_from_jsonl(prompt_subdir / "messages.jsonl")
+        if first_token_ts is None:
+            first_token_ts = message_metrics.get("first_token_ts")
+        total_tokens += int(message_metrics.get("total_tokens") or 0)
+        output_tokens += int(message_metrics.get("output_tokens") or 0)
 
         try:
             parsed = json.loads(result_text)
@@ -838,6 +922,24 @@ async def compile_flat_spec(
         )
     if not accepted:
         if last_structured_errors:
+            _write_compile_metrics(
+                session_dir,
+                {
+                    "start_ts": compile_started_ts,
+                    "end_ts": _utc_now(),
+                    "first_token_ts": first_token_ts,
+                    "prompt_bytes": prompt_bytes_total,
+                    "output_bytes": output_bytes_total,
+                    "total_tokens": total_tokens,
+                    "output_tokens": output_tokens,
+                    "validation_retries": max(attempts_run - 1, 0),
+                    "provider": provider,
+                    "model": model,
+                    "cache_hit": False,
+                    "cache_key_hash": "",
+                    "error": "; ".join(last_structured_errors),
+                },
+            )
             raise StructuredSpecValidationError("; ".join(last_structured_errors))
         # All attempts had lint warnings. Best-effort: accept anyway but record warnings.
         spec = preview
@@ -848,8 +950,32 @@ async def compile_flat_spec(
         )
 
     # Persist spec.json.
-    spec_path = spec_dir / "spec.json"
     spec_path.write_text(_serialize_spec(spec) + "\n", encoding="utf-8")
+    spec_text = spec_path.read_text(encoding="utf-8")
+    cache_store = None
+    if not cache_disabled:
+        cache_store = store_spec_cache(
+            project_dir=project_dir,
+            key_payload=key_payload,
+            spec_path=spec_path,
+        )
+    _write_compile_metrics(
+        session_dir,
+        {
+            "start_ts": compile_started_ts,
+            "end_ts": _utc_now(),
+            "first_token_ts": first_token_ts,
+            "prompt_bytes": prompt_bytes_total,
+            "output_bytes": output_bytes_total,
+            "total_tokens": total_tokens,
+            "output_tokens": output_tokens,
+            "validation_retries": max(attempts_run - 1, 0),
+            "provider": provider,
+            "model": model,
+            "cache_hit": False,
+            "cache_key_hash": cache_store.key_hash if cache_store is not None else "",
+        },
+    )
 
     # Update input provenance.
     update_input_provenance(
@@ -860,7 +986,12 @@ async def compile_flat_spec(
             "sha256": intent_h,
             "source": "cli-argument",
         },
-        spec={"source": "compile-agent-flat", "path": str(spec_path), "sha256": ""},
+        spec={
+            "source": "compile-agent-flat",
+            "path": str(spec_path),
+            "sha256": sha256_text(spec_text),
+            "cache_key_hash": cache_store.key_hash if cache_store is not None else "",
+        },
         prompts=[prompt_entry],
     )
 
@@ -886,6 +1017,60 @@ async def _run_compile(prompt: str, options: Any, log_dir: Path, project_dir: Pa
         return json.dumps(structured_tool_input)
     result_text = _read_last_success_result_text(messages_jsonl)
     return _extract_first_json_object(result_text if result_text is not None else (text or ""))
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _write_compile_metrics(session_dir: Path, metrics: dict[str, Any]) -> None:
+    payload = {"schema_version": 1, "_written_at": _utc_now(), **metrics}
+    (session_dir / "compile_metrics.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def compile_message_metrics_from_jsonl(messages_jsonl: Path) -> dict[str, Any]:
+    """Extract compile timing/token metrics from one provider transcript."""
+    first_token_ts: str | None = None
+    last_usage: dict[str, int] = {}
+    try:
+        fh = messages_jsonl.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return {"first_token_ts": None, "total_tokens": 0, "output_tokens": 0}
+    with fh:
+        for raw_line in fh:
+            try:
+                record = json.loads(raw_line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            if first_token_ts is None and _record_has_assistant_text(record):
+                first_token_ts = str(record.get("ts") or "") or None
+            usage = token_usage_from_mapping(record.get("usage"))
+            if usage:
+                last_usage = usage
+    return {
+        "first_token_ts": first_token_ts,
+        "total_tokens": int(last_usage.get("total_tokens", 0) or 0),
+        "output_tokens": int(last_usage.get("output_tokens", 0) or 0),
+    }
+
+
+def _record_has_assistant_text(record: dict[str, Any]) -> bool:
+    if record.get("type") != "assistant":
+        return False
+    blocks = record.get("blocks")
+    if not isinstance(blocks, list):
+        return False
+    return any(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and bool(str(block.get("text") or ""))
+        for block in blocks
+    )
 
 
 _FLAT_SPEC_PAYLOAD_KEYS = {
