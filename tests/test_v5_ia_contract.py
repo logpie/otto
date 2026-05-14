@@ -173,22 +173,19 @@ def test_check_coherence_includes_ia_findings(tmp_path: Path) -> None:
     assert any(f.kind == "missing_ia_contract" for f in findings)
 
 
-def test_architect_prompt_requires_pages_from_product_overview() -> None:
+def test_architect_prompt_keeps_concise_ia_contract_requirement() -> None:
     prompt = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
 
-    assert "product_overview.top_level_pages[].id" in prompt
-    assert "product_overview.primary_navigation.sidebar[]" in prompt
-    assert "MUST have a matching" in prompt
+    assert "Information Architecture Contract" in prompt
+    assert "Do not restate JSON in paragraphs" in prompt
 
 
-def test_architect_prompt_caps_charter_prose_without_trimming_ia_contract() -> None:
+def test_architect_prompt_prefers_short_charter_without_slicer_dependency() -> None:
     prompt = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
 
-    assert "The IA JSON block is your contract" in prompt
-    assert "The IA JSON block is uncapped" in prompt
-    assert "should be ≤300 lines" in prompt
-    assert "trim contract data" in prompt
-    assert "CONTEXT SLICE" in prompt
+    assert "Keep prose short" in prompt
+    assert "operational facts" in prompt
+    assert "SCOPED CONTEXT" in prompt
 
 
 def test_coherence_warning_reports_prose_ia_split(tmp_path: Path) -> None:

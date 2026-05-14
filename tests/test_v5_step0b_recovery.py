@@ -181,9 +181,9 @@ def test_leaf_prompt_commit_hygiene_scopes_pathspecs() -> None:
     """Leaf agents should not self-commit runtime or sibling files."""
     prompt = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
 
-    assert "never use `git add -A`" in prompt
-    assert "Stage only explicit paths in your assigned subsystem" in prompt
-    assert "`CHARTER.md` or `decisions.md`" in prompt
+    assert "Never use `git add -A`" in prompt
+    assert "Stage explicit product paths only" in prompt
+    assert "decisions.md" in prompt
     for excluded in [".worktrees/", "otto_logs/", "uploads/", "*.db.bak"]:
         assert excluded in prompt
 

@@ -3,6 +3,40 @@
 Things deliberately not in v5, with rationale for deferral and pointers
 to where they connect.
 
+## Design Principle (governs all entries below)
+
+**Trust the agent. Minimize classification. Reject patches when an LLM
+can decide.**
+
+Throughout v5/v6 we accumulated 20+ patches for things a coding agent
+could figure out from context: failure classifiers, prompt instruction
+heuristics, schema rigidity, etc. Each patch adds surface area for
+future divergence and bugs.
+
+The protocol going forward:
+- **Auto-fix (no agent):** only truly algorithmic ops with no judgment
+  (kill port, sanitize filename, chmod). 5-10 lines of code max.
+- **Agent-fix (default for everything else):** spawn coding agent
+  with error + git status + relevant paths + bounded scope. Let it
+  decide what to commit/stash/fix/retry. Cap by attempts × cost.
+- **Escalate (genuine hard stops only):** disk full, network down,
+  repeated-same-fingerprint after N agent attempts. NOT "I don't have
+  a hardcoded handler for this failure kind."
+
+When tempted to add a classifier, prompt instruction, or rigid schema
+check, ask: "could a coding agent figure this out from context?"
+If yes, don't write the patch.
+
+This principle should ripple through:
+- Repair classifier (rip out the 4-handler taxonomy)
+- DAG/decomposition heuristics (the agent can read its own context)
+- CHARTER/schema validators (relax to "warn agent" not "hard reject")
+- Coverage-matrix prompt enforcement (let the agent decide what to test)
+- Decisions broadcast detection (just tell the agent to write decisions)
+
+Most existing P1 entries below should be re-framed through this lens
+before being implemented.
+
 ## Architectural
 
 ### Recursive in-session subagent dispatch (depth ≥ 2)
@@ -187,6 +221,76 @@ autonomous repair loop restores the v3-era resilience without the
 full certifier loop's complexity. Cost per repair attempt: ~$0.05 and
 30 seconds. Cost of NOT having it (today): hours of wasted compute
 + user-visible "broken" final state.
+
+### CRITICAL: Repair classifier too narrow (let the agent decide)
+**State:** v6d hit `merge_worktree_dirty` — backend's merge blocked
+because `decisions.md` had uncommitted appends from an earlier
+phase. The PreflightRepairController classified this as
+"unknown" → escalate, even though a coding agent could
+trivially handle it (commit the file, retry).
+
+The current classifier (otto/v5_preflight_repair.py) only knows 4
+failure kinds: port_busy, filename_too_long, typescript_error,
+script_valid_failed. Everything else escalates without trying.
+
+This is the same anti-pattern we keep hitting: over-prescriptive
+classification when the agent can decide.
+
+**v6 work (P1):**
+
+1. **Default to agent-fix for any non-hard-stop classification.**
+   Deterministic auto-fixes (no agent): port-busy (kill PIDs),
+   filename-too-long (safe_slug), permissions/chmod patterns.
+   Everything else that *might* be fixable: spawn the repair
+   agent with the full error context and let it decide.
+
+2. **Hard-stop list (genuine escalates only):** disk full, network
+   unreachable, missing external service, repeated-same-failure-
+   after-2-attempts. Don't bucket "uncommitted decisions.md" with
+   "disk full."
+
+3. **Agent gets enough context to fix anything:** failure message,
+   offending file path(s), `git status` output, recent
+   integration log excerpt. Coding agents are good at this kind
+   of thing.
+
+4. **Cap by attempts + cost, not by classification.** Today's
+   caps (2 per kind, 3 total, <10% cost) are right. Don't add
+   "and only if classifier knew the kind."
+
+### CRITICAL: DAG breadth explosion (16 tasks is too many)
+**State:** v6d produced 16 task graph nodes from a single iTracker
+intent (v6c: 9, sc4: 4). Each layer adds breadth: root emits 6,
+multiple emit grandchildren, some grandchildren emit
+great-grandchildren. The DAG rule prevents chains (critical path
+> 2) but doesn't prevent breadth — every child independently
+decides "I'm too big, split."
+
+Symptoms:
+- More setup overhead (each task gets a worktree + prompt render)
+- More integration sessions to run (each pending_children parent
+  needs one)
+- More cross-merge surface = more chances for `merge_worktree_dirty`
+- Diminishing returns on parallelism past max-parallel=3
+
+**v6 work (P1):**
+
+1. **Total-nodes guard at root.** Root planner sees a count
+   estimate (current tree + planned children + estimated
+   sub-decomp). If projected total > N (e.g., 10), refuse to
+   emit more leaves; tell child to inline instead.
+
+2. **Sub-decomp consent budget.** When a child decides to
+   sub-decompose, it doesn't get a free pass — it spends budget
+   from a global counter. If budget exhausted, child must inline.
+
+3. **Heuristic: budget proportional to scope.** A "12-entity
+   Linear-clone" gets a higher budget than "a CLI tool."
+   Architect could declare this.
+
+4. **Make the cost of split visible to lead.** Today the lead
+   prompt doesn't know "you're already at 12 tasks; splitting
+   makes 14." Inject a hint with current node count.
 
 ### Integration packet + risk handoff (fresh-context plumbing)
 **State:** Integration agent runs with fresh SDK session — no
@@ -503,6 +607,44 @@ child's scope. Big context = slower turns + higher cost.
 (filter `core_entities` and `action_surfaces` by what the child
 owns). Send only the slice plus cross-reference index. Architect
 still sees full content.
+
+### Loosen spec-compile cross-coverage enforcement
+**State:** Spec compile takes ~6:31 (v6c), of which ~3:10 (56%) is
+agent reasoning before any structured output. Profiling v6c
+spec.json shows the time isn't output bloat (core_entities is 42%
+of bytes, journeys are 15%, etc. — fine) but the cross-coverage
+enforcement in the prompt:
+
+> "every intent_claim must be covered by at least one
+> core_entity/primary_action/quality_constraint;
+> every primary_action must be referenced by at least one
+> behavior_journey"
+
+(per `otto/spec_compile_flat.py:392` validator + the matching
+prompt text). The agent mentally cross-checks ~53 claims against
+47 fields × 16 actions × 5 journeys. That's the reasoning burden.
+
+**v6 work (efficiency backlog — pair with other perf investigations):**
+- Reduce mandatory cross-coverage to a smaller set (e.g.,
+  intent_claims that map to a core flow only; not every claim
+  must be entity-linked)
+- Or: shorten `success_observable` / `error_observable` to
+  ≤80 chars (currently agents write paragraphs)
+- Or: skip per-field claim mapping; track only entity-level claim
+  coverage
+- Or: drop the requirement that EVERY primary_action be journey-
+  covered; spot-check the critical 3-5 actions
+- Estimated target: cut Claude compile from ~6:31 → ~2:00 without
+  losing the structural contract
+
+**Why not drop journeys (the cheaper path):** Codex audited and
+journeys are 15% of output, not the bottleneck. Removing them
+saves modestly while losing useful narrative context.
+
+**Why deferred:** premature optimization until correctness is
+fully settled. After v6d/v6e validate that nested decomp + repair
+loop reliably land code in main, revisit compile performance as
+part of a broader efficiency pass.
 
 ### Per-agent-role model tuning (cost/quality optimization)
 **State:** Every agent role in Otto today uses the same model

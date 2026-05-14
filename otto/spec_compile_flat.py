@@ -181,28 +181,6 @@ def _obj_id(obj: Any) -> str:
     return str(obj.get("id") or "").strip()
 
 
-def _string_values(obj: Any) -> list[str]:
-    """Collect shallow string/list scalar values from a contract object."""
-    if not isinstance(obj, dict):
-        return []
-    out: list[str] = []
-    for value in obj.values():
-        if isinstance(value, str):
-            out.append(value)
-        elif isinstance(value, list):
-            out.extend(str(item) for item in value if isinstance(item, (str, int, float)))
-    return out
-
-
-def _references_claim(obj: Any, claim_id: str) -> bool:
-    if not isinstance(obj, dict) or not claim_id:
-        return False
-    refs = obj.get("intent_claim_ids")
-    if isinstance(refs, list) and claim_id in {str(r) for r in refs}:
-        return True
-    return any(claim_id in value for value in _string_values(obj))
-
-
 def _is_structured_spec(spec: dict[str, Any]) -> bool:
     """True when the new contract fields are present enough for hard validation."""
     return any((
@@ -225,92 +203,72 @@ def _is_structured_spec(spec: dict[str, Any]) -> bool:
     ))
 
 
-def _schema_version(spec: dict[str, Any]) -> int:
-    try:
-        return int(spec.get("schema_version", SCHEMA_VERSION))
-    except (TypeError, ValueError):
-        return SCHEMA_VERSION
-
-
-def _product_overview_is_legacy_missing(spec: dict[str, Any]) -> bool:
-    product_overview = spec.get("product_overview")
-    return _schema_version(spec) < 3 and (
-        not isinstance(product_overview, dict) or not product_overview
-    )
-
-
 def _validate_product_overview(
     spec: dict[str, Any],
     action_ids: set[str],
-    *,
-    legacy_missing_allowed: bool,
 ) -> tuple[list[str], list[str]]:
     warnings: list[str] = []
     errors: list[str] = []
     product_overview = spec.get("product_overview")
 
     if not isinstance(product_overview, dict) or not product_overview:
-        message = "product_overview is required for schema_version 3 structured specs"
-        if legacy_missing_allowed:
-            warnings.append("legacy v1/v2 spec is missing product_overview; skipping PM overview checks")
-        else:
-            errors.append(message)
+        warnings.append("product_overview is missing; downstream agents will infer product structure")
         return warnings, errors
 
     one_liner = str(product_overview.get("one_liner") or "").strip()
     if not one_liner:
-        errors.append("product_overview.one_liner is required")
+        warnings.append("product_overview.one_liner is missing")
     elif len(one_liner) > 120:
-        errors.append("product_overview.one_liner must be 120 characters or fewer")
+        warnings.append("product_overview.one_liner is longer than 120 characters")
 
     top_level_pages = product_overview.get("top_level_pages")
     if not isinstance(top_level_pages, list) or not top_level_pages:
-        errors.append("product_overview.top_level_pages must contain at least one page")
+        warnings.append("product_overview.top_level_pages is empty or missing")
         top_level_pages = []
 
     page_ids: set[str] = set()
     for idx, page in enumerate(top_level_pages):
         if not isinstance(page, dict):
-            errors.append(f"product_overview.top_level_pages[{idx}] must be an object")
+            warnings.append(f"product_overview.top_level_pages[{idx}] should be an object")
             continue
         page_id = _obj_id(page)
         if not page_id:
-            errors.append(f"product_overview.top_level_pages[{idx}].id is required")
+            warnings.append(f"product_overview.top_level_pages[{idx}].id is missing")
         else:
             page_ids.add(page_id)
         if not str(page.get("purpose") or "").strip():
-            errors.append(f"product_overview.top_level_pages[{page_id or idx}].purpose is required")
+            warnings.append(f"product_overview.top_level_pages[{page_id or idx}].purpose is missing")
 
     navigation = product_overview.get("primary_navigation")
     if not isinstance(navigation, dict):
         navigation = {}
         if spec.get("project_kind") == "webapp":
-            errors.append("product_overview.primary_navigation is required for webapps")
+            warnings.append("product_overview.primary_navigation is missing for webapp")
 
     sidebar = navigation.get("sidebar") if isinstance(navigation, dict) else None
     sidebar_items = [str(item).strip() for item in sidebar] if isinstance(sidebar, list) else []
     sidebar_items = [item for item in sidebar_items if item]
     if spec.get("project_kind") == "webapp" and not sidebar_items:
-        errors.append("product_overview.primary_navigation.sidebar must be non-empty for webapps")
+        warnings.append("product_overview.primary_navigation.sidebar is empty for webapp")
     for page_id in sidebar_items:
         if page_id not in page_ids:
-            errors.append(
+            warnings.append(
                 f"product_overview.primary_navigation.sidebar references unknown page {page_id!r}"
             )
 
     phases = product_overview.get("phases")
     if phases is not None and not isinstance(phases, list):
-        errors.append("product_overview.phases must be a list when present")
+        warnings.append("product_overview.phases must be a list when present")
         phases = []
     for phase_idx, phase in enumerate(_as_list(phases)):
         if not isinstance(phase, dict):
-            errors.append(f"product_overview.phases[{phase_idx}] must be an object")
+            warnings.append(f"product_overview.phases[{phase_idx}] should be an object")
             continue
         phase_id = _obj_id(phase) or f"index {phase_idx}"
         for action_id in _as_list(phase.get("covers_primary_action_ids")):
             action_id_text = str(action_id).strip()
             if action_id_text and action_id_text not in action_ids:
-                errors.append(
+                warnings.append(
                     f"product_overview.phases[{phase_id}].covers_primary_action_ids "
                     f"references unknown action {action_id_text!r}"
                 )
@@ -319,11 +277,11 @@ def _validate_product_overview(
 
 
 def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
-    """Validate the structured flat-spec contract.
+    """Return advisory warnings for the structured flat-spec contract.
 
-    ``strict=False`` is legacy-safe: missing new fields produce warnings only
-    and callers can continue. ``strict=True`` is for newly compiled specs and
-    raises ``StructuredSpecValidationError`` on any hard-rule violation.
+    ``strict`` is kept for caller compatibility. The compiler no longer turns
+    cross-coverage gaps into hard failures; build and integration agents can
+    repair product interpretation from context, while tests protect behavior.
     """
     spec_payload = _coerce_spec(spec)
     warnings: list[str] = []
@@ -332,8 +290,6 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
     structured = _is_structured_spec(spec_payload)
     if not structured:
         warnings.append("structured spec fields are absent; skipping structured contract checks")
-        if strict:
-            errors.append("structured spec fields are required for new v5 compilations")
     journeys = [j for j in _as_list(spec_payload.get("behavior_journeys")) if isinstance(j, dict)]
     intent_claims = [
         claim for claim in _as_list(spec_payload.get("intent_claims")) if isinstance(claim, dict)
@@ -345,19 +301,19 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
         )
 
     if len(journeys) > 5:
-        errors.append(f"behavior_journeys has {len(journeys)} entries; maximum is 5")
+        warnings.append(f"behavior_journeys has {len(journeys)} entries; target cap is <= 5")
 
     if structured:
         for idx, journey in enumerate(journeys):
             jid = _obj_id(journey) or f"index {idx}"
             if journey.get("role") != "illustrative":
-                errors.append(f"behavior_journeys[{jid}].role must be 'illustrative'")
+                warnings.append(f"behavior_journeys[{jid}].role should be 'illustrative'")
             if not isinstance(journey.get("covers_primary_actions"), list):
-                errors.append(f"behavior_journeys[{jid}].covers_primary_actions must be a list")
+                warnings.append(f"behavior_journeys[{jid}].covers_primary_actions should be a list")
             if not str(journey.get("start_state") or "").strip():
-                errors.append(f"behavior_journeys[{jid}].start_state is required")
+                warnings.append(f"behavior_journeys[{jid}].start_state is missing")
             if not str(journey.get("entry_route") or "").strip():
-                errors.append(f"behavior_journeys[{jid}].entry_route is required")
+                warnings.append(f"behavior_journeys[{jid}].entry_route is missing")
 
     action_ids: set[str] = set()
     fields: list[dict[str, Any]] = []
@@ -378,7 +334,6 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
     product_warnings, product_errors = _validate_product_overview(
         spec_payload,
         action_ids,
-        legacy_missing_allowed=_product_overview_is_legacy_missing(spec_payload),
     )
     warnings.extend(product_warnings)
     errors.extend(product_errors)
@@ -391,7 +346,7 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
     }
     for action_id in sorted(action_ids):
         if action_id not in covered_action_ids:
-            errors.append(
+            warnings.append(
                 f"core_entities.primary_actions id {action_id!r} is not covered by any behavior_journey"
             )
 
@@ -399,19 +354,19 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
     for claim in intent_claims:
         claim_id = _obj_id(claim)
         if not claim_id:
-            errors.append("intent_claims entry is missing id")
+            warnings.append("intent_claims entry is missing id")
             continue
-        covered = (
-            any(_references_claim(action, claim_id) for action in actions)
-            or any(_references_claim(field_obj, claim_id) for field_obj in fields)
-            or any(
-                _references_claim(qc, claim_id)
-                for qc in _as_list(spec_payload.get("quality_constraints"))
-            )
-            or claim_id in journey_text
+        refs_text = json.dumps(
+            {
+                "actions": actions,
+                "fields": fields,
+                "quality_constraints": _as_list(spec_payload.get("quality_constraints")),
+            },
+            sort_keys=True,
+            default=str,
         )
-        if not covered:
-            errors.append(
+        if claim_id not in refs_text and claim_id not in journey_text:
+            warnings.append(
                 f"intent_claims id {claim_id!r} is not covered by actions, fields, "
                 "quality_constraints, or a behavior_journey description"
             )
@@ -426,7 +381,7 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
             for j in journeys
         )
         if not has_root_cold_start:
-            errors.append(
+            warnings.append(
                 "webapp specs need at least one behavior_journey from an unauth/empty "
                 "cold start state with entry_route '/'"
             )
@@ -441,28 +396,17 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-_PROMPT_TEMPLATE = """You are a product spec compiler. Your job: read the user's intent and emit a structured JSON product contract for Otto v5.
+_PROMPT_TEMPLATE = """You are a product spec compiler. Read the user's intent and emit a compact JSON product contract for Otto v5.
 
 INTENT:
 {intent}
 
-## Step 0: Product Overview (PM PRD)
+## Output
 
-Before listing entities and actions, produce a `product_overview` section. This is the PM-level model that engineering and design must respect.
+Emit one JSON object through StructuredOutput/final structured JSON. Do not
+write `product-contract.json`, `spec.json`, or any other project-root spec file.
 
-- `one_liner`: a single sentence describing what this product is.
-- `primary_users`: 2-4 user types (e.g., end_user, admin, developer). Don't invent personas with names; just role + one-line jobs-to-be-done.
-- `top_level_pages`: the major navigation surfaces the user moves between. For a webapp, this is the sidebar+nav structure. For a CLI, this is the top-level command tree. For a library, the major module groupings.
-- `primary_navigation.sidebar`: ordered list of page ids that should appear in the primary nav.
-- `primary_navigation.command_palette`: top action ids exposed via keyboard shortcut palette (webapp only; omit if not applicable).
-- `out_of_scope`: explicit non-goals. Include things the user might assume but you're deliberately not building.
-- `phases`: ordered priority groups. Each phase lists action ids it covers. `must_have` is the smallest shippable slice; `should_have` and `nice_to_have` add incrementally.
-
-The engineering layers (intent_claims, core_entities, primary_actions, journeys) MUST be consistent with the product_overview. If you can't fit something into a page, that's a signal it shouldn't be in primary_actions either.
-
-## Required output structure
-
-OUTPUT a single JSON object with this exact shape (no prose, no fences, just JSON):
+Use this shape. Keep it compact; empty arrays are fine when a field is not useful.
 {{
   "project_kind": "webapp" | "cli" | "api" | "library" | "service",
   "product_overview": {{
@@ -485,7 +429,7 @@ OUTPUT a single JSON object with this exact shape (no prose, no fences, just JSO
     ]
   }},
   "intent_claims": [
-    {{"id": "claim.snake_case_short_id", "text": "Raw bullet or claim from the intent.", "source_line": 1}}
+    {{"id": "claim.snake_case_short_id", "text": "Raw intent claim.", "source_line": 1}}
   ],
   "core_entities": [
     {{
@@ -499,8 +443,8 @@ OUTPUT a single JSON object with this exact shape (no prose, no fences, just JSO
         {{
           "id": "entity.action",
           "verb": "create|update|delete|send|export|...",
-          "success_observable": "What the user or API caller can observe after success.",
-          "error_observable": "What the user or API caller can observe after failure.",
+          "success_observable": "What changes after success.",
+          "error_observable": "What the user sees after failure.",
           "intent_claim_ids": ["claim.snake_case_short_id"]
         }}
       ]
@@ -520,7 +464,7 @@ OUTPUT a single JSON object with this exact shape (no prose, no fences, just JSO
     {{
       "id": "snake_case_short_id",
       "role": "illustrative",
-      "description": "User-language steps describing what happens. Like a manual entry.",
+      "description": "User-language steps describing what happens.",
       "covers_primary_actions": ["entity.action"],
       "start_state": "unauthenticated",
       "entry_route": "/"
@@ -528,55 +472,21 @@ OUTPUT a single JSON object with this exact shape (no prose, no fences, just JSO
   ]
 }}
 
-RULES (HARD — do NOT violate):
-0. Emit the spec ONLY via the StructuredOutput tool. If your runtime exposes
-   this as a final structured JSON response, use that structured channel.
-   Do NOT use Write or any file-writing tool to create `product-contract.json`,
-   `spec.json`, or any other spec file in the project root. If output approaches
-   token limits, prefer terser IDs, consolidated claims, and trimmed prose over
-   file-writing.
-
-1. Behavior journeys MUST be in user-language. They describe what a USER does and SEES.
-   GOOD: "User clicks 'Add Transaction', enters $50 with category 'Food', saves. The new transaction appears in the list."
-   BAD:  "Click element with class .add-btn. Verify .txn-list has data-testid='row'."
-   NEVER use: CSS selectors, getByRole, getByText, querySelector, .locator(), data-testid, DOM ids.
-
-2. Emit at most 5 behavior_journeys. They are illustrative samples, not the full contract.
-   Every journey MUST have role "illustrative". Journeys cover representative
-   critical flows only; do NOT enumerate every button, error branch, or feature
-   variant as its own journey.
-
-3. Cover the full intent with structured fields:
-   - Each intent_claims[].id MUST appear in at least one core_entities field/action
-     via intent_claim_ids, one quality_constraint via intent_claim_ids, or literally
-     in a behavior_journey description.
-   - Every core_entities[].primary_actions[].id MUST appear in at least one
-     journey's covers_primary_actions.
-
-4. For webapps, at least one journey MUST start from an unauthenticated or empty
-   cold-start state and use entry_route "/".
-
-5. Include integration journeys when useful, but keep the journey list capped at 5.
-
-6. IDs are stable, unique, and compact. Primary action IDs should look like
-   "issue.create", "transaction.import_csv", "report.export".
-
-7. Keep compile output capped and non-duplicative:
-   - intent_claims cap <= 30. Consolidate repeated or low-priority claims.
-   - Use terse, stable IDs; IDs are identifiers, not prose summaries.
-   - Do not restate the same requirement across product_overview,
-     intent_claims, quality_constraints, and journeys.
-   - Lower-priority quality_constraints detail belongs in a `note` field, not
-     as extra matrix-driving rows.
+Guidance:
+- Behavior journeys are illustrative user-language samples, not the full contract.
+- Use at most 5 representative critical flows; avoid selectors, data-testids, or DOM APIs.
+- IDs should be terse and stable, e.g. `issue.create` or `report.export`.
+- Consolidate repeated or low-priority claims; intent_claims cap <= 30.
+- Prefer useful product structure over perfect cross-reference coverage. Build agents can reason from context.
 """
 
 
 _PROMPT_RETRY_SUFFIX = """
 
-YOUR PREVIOUS OUTPUT WAS REJECTED FOR CONTRACT VALIDATION WARNINGS/ERRORS:
+YOUR PREVIOUS OUTPUT WAS NOT USABLE JSON FOR OTTO:
 {warnings}
 
-Re-emit the JSON. Fix every listed issue. Keep journeys in user-language; no DOM selectors anywhere.
+Re-emit one JSON object. Keep journeys in user-language; no DOM selectors.
 """
 
 
@@ -591,10 +501,9 @@ async def compile_flat_spec(
 ) -> FlatSpec:
     """Compile a flat spec for the user's intent.
 
-    Best-effort on journey-language lint: re-prompt up to ``max_retries``
-    times, then accept with ``lint_warnings``. Structured contract violations
-    are hard failures after retries because downstream v5 checks depend on
-    those IDs.
+    Best-effort on contract quality: retry only for unusable JSON shape, then
+    accept valid JSON with advisory ``lint_warnings``. Downstream build and
+    integration agents can reason over imperfect contracts.
     """
     intent = (intent or "").strip()
     if not intent:
@@ -869,9 +778,8 @@ async def compile_flat_spec(
             _cleanup_root_spec_artifacts(project_dir)
             return spec
 
-    # Single-turn compile with retry-on-lint-failure.
+    # Single-turn compile with retry only for unusable JSON shape.
     last_warnings: list[str] = []
-    last_structured_errors: list[str] = []
     parsed: dict[str, Any] | None = None
     preview = FlatSpec(intent=intent, intent_hash=intent_h)
     prompt_text = initial_prompt_text
@@ -960,49 +868,24 @@ async def compile_flat_spec(
             ],
         )
         warnings = lint_spec(preview)
-        structured_errors: list[str] = []
-        try:
-            warnings.extend(validate_structured_spec(preview, strict=True))
-        except StructuredSpecValidationError as exc:
-            structured_errors.append(str(exc))
-            warnings.extend(structured_errors)
-        if not warnings:
-            spec = preview
-            accepted = True
-            break
-        last_warnings = warnings
-        last_structured_errors = structured_errors
-        logger.warning(
-            "compile_flat_spec attempt %d: %d validation warnings/errors; retrying",
-            attempt,
-            len(warnings),
-        )
-    if not accepted:
-        if last_structured_errors:
-            _write_compile_metrics(
-                session_dir,
-                {
-                    "start_ts": compile_started_ts,
-                    "end_ts": _utc_now(),
-                    "first_token_ts": first_token_ts,
-                    "prompt_bytes": prompt_bytes_total,
-                    "output_bytes": output_bytes_total,
-                    "total_tokens": total_tokens,
-                    "output_tokens": output_tokens,
-                    "validation_retries": max(attempts_run - 1, 0),
-                    "provider": provider,
-                    "model": model,
-                    "cache_hit": False,
-                    "cache_key_hash": "",
-                    "error": "; ".join(last_structured_errors),
-                },
+        warnings.extend(validate_structured_spec(preview, strict=True))
+        preview.lint_warnings = warnings
+        if warnings:
+            logger.warning(
+                "compile_flat_spec attempt %d: accepted with %d advisory warnings",
+                attempt,
+                len(warnings),
             )
-            raise StructuredSpecValidationError("; ".join(last_structured_errors))
-        # All attempts had lint warnings. Best-effort: accept anyway but record warnings.
+        spec = preview
+        accepted = True
+        break
+    if not accepted:
+        # All attempts failed basic JSON shape. Preserve the last preview so
+        # callers still get an auditable artifact instead of losing the run.
         spec = preview
         spec.lint_warnings = last_warnings
         logger.warning(
-            "compile_flat_spec: lint warnings persist after %d attempts; accepting anyway (best-effort)",
+            "compile_flat_spec: valid JSON shape not produced after %d attempts; accepting empty fallback",
             max_retries + 1,
         )
 

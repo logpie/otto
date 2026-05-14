@@ -198,6 +198,7 @@ def test_verification_plan_all_checks_pass(tmp_path: Path) -> None:
         session_dir=session,
         agent_verdict=_verdict(),
         initial_verdict="pass",
+        matrix_scope="leaf",
     )
 
     assert outcome.final_verdict == "pass"
@@ -217,6 +218,7 @@ def test_verification_plan_accepts_dict_from_roundtripped_spec(tmp_path: Path) -
         session_dir=session,
         agent_verdict=_verdict(),
         initial_verdict="pass",
+        matrix_scope="leaf",
     )
 
     assert outcome.final_verdict == "pass"
@@ -234,6 +236,7 @@ def test_route_resolves_failure_downgrades_pass(tmp_path: Path) -> None:
         session_dir=session,
         agent_verdict=_verdict(),
         initial_verdict="pass",
+        matrix_scope="leaf",
     )
 
     route_checks = _checks_by_kind(outcome.verification_plan)["route_resolves"]
@@ -384,6 +387,7 @@ def test_check_matrix_page_resolves(tmp_path: Path) -> None:
         session_dir=session,
         agent_verdict=_verdict(),
         initial_verdict="pass",
+        matrix_scope="leaf",
     )
 
     page_checks = _checks_by_kind(outcome.verification_plan)["page_resolves"]
@@ -403,6 +407,7 @@ def test_endpoint_resolves_failure(tmp_path: Path) -> None:
         session_dir=session,
         agent_verdict=_verdict(),
         initial_verdict="pass",
+        matrix_scope="leaf",
     )
 
     assert _checks_by_kind(outcome.verification_plan)["endpoint_resolves"][0]["status"] == "fail"
@@ -419,6 +424,7 @@ def test_action_has_test_failure(tmp_path: Path) -> None:
         session_dir=session,
         agent_verdict=_verdict(),
         initial_verdict="pass",
+        matrix_scope="leaf",
     )
 
     assert _checks_by_kind(outcome.verification_plan)["action_has_test"][0]["status"] == "fail"
@@ -435,6 +441,7 @@ def test_mutating_action_feedback_failure(tmp_path: Path) -> None:
         session_dir=session,
         agent_verdict=_verdict(),
         initial_verdict="pass",
+        matrix_scope="leaf",
     )
 
     assert _checks_by_kind(outcome.verification_plan)["mutating_action_has_feedback"][0]["status"] == "fail"
@@ -451,6 +458,7 @@ def test_entity_empty_state_failure(tmp_path: Path) -> None:
         session_dir=session,
         agent_verdict=_verdict(),
         initial_verdict="pass",
+        matrix_scope="leaf",
     )
 
     assert _checks_by_kind(outcome.verification_plan)["entity_has_empty_state"][0]["status"] == "fail"
@@ -675,7 +683,11 @@ async def test_v5_pipeline_downgrades_agent_pass_and_preserves_input_verdict(
 
     with patch("otto.v5_runner.compile_flat_spec", new=fake_compile):
         monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_agent)
-        result = await run_v5_pipeline(project_dir=project, intent="build tracker", config={})
+        result = await run_v5_pipeline(
+            project_dir=project,
+            intent="build tracker",
+            config={"verification_plan": {"matrix_scope": "leaf"}},
+        )
 
     assert result.verdict == "partial"
     graph = read_graph(project)

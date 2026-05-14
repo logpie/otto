@@ -10,7 +10,6 @@ import pytest
 from otto.spec_compile_flat import (
     FlatSpec,
     INTENT_CLAIMS_MAX,
-    StructuredSpecValidationError,
     _PROMPT_TEMPLATE,
     _cleanup_root_spec_artifacts,
     _read_structured_output_tool_input,
@@ -109,18 +108,18 @@ def test_valid_structured_flat_spec_passes() -> None:
 
 def test_compile_prompt_contains_v6_output_cap_guidance() -> None:
     assert "intent_claims cap <= 30" in _PROMPT_TEMPLATE
-    assert "terse, stable IDs" in _PROMPT_TEMPLATE
+    assert "terse and stable" in _PROMPT_TEMPLATE
     assert "representative" in _PROMPT_TEMPLATE
-    assert "critical flows only" in _PROMPT_TEMPLATE
-    assert "note` field" in _PROMPT_TEMPLATE
+    assert "critical flows" in _PROMPT_TEMPLATE
+    assert "Build agents can reason from context" in _PROMPT_TEMPLATE
 
 
 def test_compile_prompt_forbids_spec_file_writes() -> None:
-    assert "ONLY via the StructuredOutput tool" in _PROMPT_TEMPLATE
-    assert "Do NOT use Write" in _PROMPT_TEMPLATE
+    assert "StructuredOutput" in _PROMPT_TEMPLATE
+    assert "Do not" in _PROMPT_TEMPLATE
     assert "`product-contract.json`" in _PROMPT_TEMPLATE
     assert "`spec.json`" in _PROMPT_TEMPLATE
-    assert "prefer terser IDs" in _PROMPT_TEMPLATE
+    assert "project-root spec file" in _PROMPT_TEMPLATE
 
 
 def test_root_spec_artifact_cleanup_is_allowlisted_and_idempotent(tmp_path: Path) -> None:
@@ -222,47 +221,52 @@ def test_product_overview_json_roundtrip_validates() -> None:
     assert validate_structured_spec(roundtripped, strict=True) == []
 
 
-def test_product_overview_required_for_webapp() -> None:
+def test_product_overview_missing_is_advisory() -> None:
     spec = _valid_spec()
     spec.product_overview = {}
 
-    with pytest.raises(StructuredSpecValidationError, match="product_overview is required"):
-        validate_structured_spec(spec, strict=True)
+    warnings = validate_structured_spec(spec, strict=True)
+
+    assert any("product_overview is missing" in warning for warning in warnings)
 
 
-def test_product_overview_top_level_pages_must_be_listed() -> None:
+def test_product_overview_top_level_pages_is_advisory() -> None:
     spec = _valid_spec()
     spec.product_overview["top_level_pages"] = []
 
-    with pytest.raises(StructuredSpecValidationError, match="top_level_pages"):
-        validate_structured_spec(spec, strict=True)
+    warnings = validate_structured_spec(spec, strict=True)
+
+    assert any("top_level_pages" in warning for warning in warnings)
 
 
 def test_phases_cross_reference_primary_actions() -> None:
     spec = _valid_spec()
     spec.product_overview["phases"][0]["covers_primary_action_ids"] = ["issue.archive"]
 
-    with pytest.raises(StructuredSpecValidationError, match="issue.archive"):
-        validate_structured_spec(spec, strict=True)
+    warnings = validate_structured_spec(spec, strict=True)
+
+    assert any("issue.archive" in warning for warning in warnings)
 
 
 def test_sidebar_references_must_resolve_to_top_level_pages() -> None:
     spec = _valid_spec()
     spec.product_overview["primary_navigation"]["sidebar"] = ["team.archive"]
 
-    with pytest.raises(StructuredSpecValidationError, match="team.archive"):
-        validate_structured_spec(spec, strict=True)
+    warnings = validate_structured_spec(spec, strict=True)
+
+    assert any("team.archive" in warning for warning in warnings)
 
 
-def test_uncovered_intent_claim_fails() -> None:
+def test_uncovered_intent_claim_warns() -> None:
     spec = _valid_spec()
     spec.intent_claims.append({"id": "claim.audit_log", "text": "Audit log exists", "source_line": 3})
 
-    with pytest.raises(StructuredSpecValidationError, match="claim.audit_log"):
-        validate_structured_spec(spec, strict=True)
+    warnings = validate_structured_spec(spec, strict=True)
+
+    assert any("claim.audit_log" in warning for warning in warnings)
 
 
-def test_unreferenced_primary_action_fails() -> None:
+def test_unreferenced_primary_action_warns() -> None:
     spec = _valid_spec()
     spec.core_entities[0]["primary_actions"].append({
         "id": "issue.delete",
@@ -272,17 +276,19 @@ def test_unreferenced_primary_action_fails() -> None:
         "intent_claim_ids": ["claim.issue_create"],
     })
 
-    with pytest.raises(StructuredSpecValidationError, match="issue.delete"):
-        validate_structured_spec(spec, strict=True)
+    warnings = validate_structured_spec(spec, strict=True)
+
+    assert any("issue.delete" in warning for warning in warnings)
 
 
-def test_webapp_requires_root_cold_start_journey() -> None:
+def test_webapp_root_cold_start_journey_gap_warns() -> None:
     spec = _valid_spec()
     spec.behavior_journeys[0]["start_state"] = "authenticated_seeded_workspace"
     spec.behavior_journeys[0]["entry_route"] = "/app"
 
-    with pytest.raises(StructuredSpecValidationError, match="entry_route '/'"):
-        validate_structured_spec(spec, strict=True)
+    warnings = validate_structured_spec(spec, strict=True)
+
+    assert any("entry_route '/'" in warning for warning in warnings)
 
 
 def test_legacy_flat_spec_loads_and_warns(tmp_path: Path) -> None:

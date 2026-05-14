@@ -118,7 +118,7 @@ async def test_filename_too_long_autofix_fires_and_continues(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_typescript_error_spawns_scoped_repair_agent_and_continues(tmp_path: Path) -> None:
+async def test_non_autofix_failure_spawns_repair_agent_and_continues(tmp_path: Path) -> None:
     session_dir = tmp_path / "session"
     worktree = tmp_path / "repo"
     session_dir.mkdir()
@@ -150,13 +150,13 @@ async def test_typescript_error_spawns_scoped_repair_agent_and_continues(tmp_pat
     result = await controller.repair_until_clean(run_preflight)
 
     assert result.terminal_state == "continued"
-    assert [request.failure_kind for request in requests] == ["typescript_error"]
+    assert [request.failure_kind for request in requests] == ["scaffold_compile_failed"]
     assert requests[0].workspace_paths == ("frontend/src/App.tsx",)
     assert _log_events(session_dir)[0]["action"] == "agent"
 
 
 @pytest.mark.asyncio
-async def test_script_valid_failure_spawns_start_sh_repair_agent_and_continues(tmp_path: Path) -> None:
+async def test_script_valid_failure_uses_agent_default_and_continues(tmp_path: Path) -> None:
     session_dir = tmp_path / "session"
     worktree = tmp_path / "repo"
     session_dir.mkdir()
@@ -185,7 +185,7 @@ async def test_script_valid_failure_spawns_start_sh_repair_agent_and_continues(t
     result = await controller.repair_until_clean(run_preflight)
 
     assert result.terminal_state == "continued"
-    assert [request.failure_kind for request in requests] == ["script_valid_failed"]
+    assert [request.failure_kind for request in requests] == ["clean_deploy_script_valid_failed"]
     assert requests[0].workspace_paths == ("start.sh",)
 
 
@@ -283,4 +283,3 @@ async def test_unmappable_verdict_triggers_one_canonical_rewrite_retry(tmp_path:
     assert len(attempts) == 1
     assert payload is not None
     assert payload["verdict"] == "partial"
-

@@ -96,6 +96,6 @@ async def test_compile_cache_hit_loads_legacy_v2_spec_without_provider_call(
     assert spec.schema_version == 2
     assert spec.product_overview == {}
     warnings = validate_structured_spec(spec, strict=False)
-    assert any("legacy v1/v2 spec is missing product_overview" in w for w in warnings)
+    assert any("product_overview is missing" in w for w in warnings)
     metrics = json.loads((session_dir / "compile_metrics.json").read_text(encoding="utf-8"))
     assert metrics["cache_hit"] is True

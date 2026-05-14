@@ -52,7 +52,6 @@ from otto.v5_preflight_repair import (
     AgentRepairRequest,
     AgentRepairResult,
     PreflightRepairController,
-    is_repairable_preflight_issue,
 )
 from otto.queue.subtask import (
     read_pending,
@@ -1528,7 +1527,7 @@ async def _run_integration_smoke_preflight_with_repair(
     if not _integration_smoke_blocks(first):
         return first
     first_issue = _first_preflight_blocking_issue(first)
-    if first_issue is None or not is_repairable_preflight_issue(first_issue):
+    if first_issue is None:
         return first
 
     controller = PreflightRepairController(
@@ -1594,7 +1593,7 @@ async def _run_preflight_repair_agent(
     integration_branch: str | None,
     on_event: Any = None,
 ) -> AgentRepairResult:
-    """Dispatch a focused build Lead to repair a classified preflight failure."""
+    """Dispatch a focused build Lead to repair a preflight failure."""
     from otto.safe_slug import safe_slug
 
     repair_slug = safe_slug(
@@ -1613,18 +1612,22 @@ async def _run_preflight_repair_agent(
     scope_text = (
         "\n".join(f"- {path}" for path in request.workspace_paths)
         if request.workspace_paths
-        else "- No precise file path was detected; inspect only the failing surface."
+        else "- No precise file path was detected; inspect the failure surface from context."
     )
+    git_status = _git_status_short(request.worktree_path)
     intent = (
         "PRE-FLIGHT REPAIR ONLY.\n\n"
         f"Failure kind: {request.failure_kind}\n"
         f"Failure message: {request.issue.get('message')}\n\n"
-        "Allowed workspace paths:\n"
+        "Raw issue JSON:\n"
+        f"{json.dumps(request.issue, indent=2, sort_keys=True, default=str)}\n\n"
+        "Current git status:\n"
+        f"{git_status or '(clean)'}\n\n"
+        "Likely paths, if any:\n"
         f"{scope_text}\n\n"
         f"{request.instruction}\n\n"
-        "Make the smallest repair needed for this preflight class. Do not "
-        "change provider routing, product scope, or unrelated files. Run the "
-        "narrowest relevant check, then write a canonical verdict.json."
+        "You may edit the directly relevant files needed to fix this failure. "
+        "Run the narrowest relevant check, write a canonical verdict.json, and stop."
     )
     _emit(on_event, {
         "event": "preflight_repair_agent_start",
@@ -1661,6 +1664,23 @@ async def _run_preflight_repair_agent(
         cost_usd=result.cost_usd,
         summary=result.failure_reason or result.final_text[:300] or result.verdict,
     )
+
+
+def _git_status_short(worktree_path: Path) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
 
 
 async def _run_integration(

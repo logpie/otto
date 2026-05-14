@@ -393,7 +393,7 @@ def _render_prompt(
     if tier == "solo":
         tier_hint = "\n## Tier preset: solo\n\nYou MUST call mcp__otto__begin_inline. Do NOT call mcp__otto__submit_subtask.\n"
     elif tier == "modular":
-        tier_hint = "\n## Tier preset: modular\n\nThis intent involves multiple subsystems. Strongly prefer mcp__otto__submit_subtask over inline build. Aim for ≥3 subtasks.\n"
+        tier_hint = "\n## Tier preset: modular\n\nThis intent involves multiple subsystems. Consider decomposition, usually architect plus 3-5 build leaves for a moderate app.\n"
 
     if kind == "plan_or_inline":
         return _interpolate_prompt(template, {
@@ -456,15 +456,14 @@ def _render_prompt(
 def _verification_matrix_scope(config: dict[str, Any]) -> str:
     """Return the v5 runner verification matrix policy.
 
-    Backward compatible default is ``leaf`` which preserves the historical full
-    matrix at every node. New v6 runs can opt into ``integration_only`` under
-    ``verification_plan.matrix_scope``.
+    Default is ``integration_only``: leaves prove local work, while integration
+    runs the full structured matrix against the merged product.
     """
     plan = config.get("verification_plan") if isinstance(config, dict) else None
     value = plan.get("matrix_scope") if isinstance(plan, dict) else None
     if value in {"leaf", "integration_only"}:
         return str(value)
-    return "leaf"
+    return "integration_only"
 
 
 def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]:

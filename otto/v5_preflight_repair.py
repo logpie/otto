@@ -81,7 +81,7 @@ AutoRepairCallable = Callable[[Path, dict[str, Any]], dict[str, Any]]
 
 
 class PreflightRepairController:
-    """Classify and repair deterministic preflight failures with hard caps."""
+    """Repair preflight failures with deterministic shortcuts plus agent default."""
 
     def __init__(
         self,
@@ -184,15 +184,6 @@ class PreflightRepairController:
                 reason="kind_attempt_cap",
                 fingerprint=fingerprint,
             )
-        if action == "escalate":
-            return self._escalate(
-                issue,
-                failure_kind=failure_kind,
-                action=action,
-                reason=str(classification.get("reason") or "unrepairable"),
-                fingerprint=fingerprint,
-            )
-
         self._seen_fingerprints.add(fingerprint)
         self._attempts_by_kind[failure_kind] += 1
         self._total_attempts += 1
@@ -411,6 +402,7 @@ def _first_blocking_issue(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def classify_preflight_issue(issue: dict[str, Any]) -> dict[str, Any]:
+    """Choose a deterministic shortcut, otherwise hand the issue to an agent."""
     kind = str(issue.get("kind") or "").strip()
     message = str(issue.get("message") or "")
     lowered = f"{kind}\n{message}".lower()
@@ -423,40 +415,16 @@ def classify_preflight_issue(issue: dict[str, Any]) -> dict[str, Any]:
         or "errno 63" in lowered
     ):
         return {"failure_kind": "filename_too_long", "action": "auto_fix"}
-    if "script_valid_failed" in kind:
-        return {
-            "failure_kind": "script_valid_failed",
-            "action": "agent",
-            "workspace_paths": ("start.sh",),
-            "instruction": "Repair only start.sh so shell validation and port-conflict handling pass.",
-        }
-    if "typescript_error" in kind or re.search(r"\bTS\d{4}\b", message):
-        paths = tuple(_extract_ts_paths(message))
-        return {
-            "failure_kind": "typescript_error",
-            "action": "agent",
-            "workspace_paths": paths,
-            "instruction": (
-                "Repair the TypeScript compile failure in the listed files. "
-                "Do not broaden product scope."
-            ),
-        }
-    if "malformed_verdict" in kind:
-        return {
-            "failure_kind": "malformed_verdict",
-            "action": "agent",
-            "workspace_paths": ("verdict.json",),
-            "instruction": "Rewrite verdict.json in canonical Otto shape.",
-        }
     return {
-        "failure_kind": kind or "unknown",
-        "action": "escalate",
-        "reason": "unclassified_failure",
+        "failure_kind": kind or "preflight_failed",
+        "action": "agent",
+        "workspace_paths": tuple(_extract_likely_paths(message)),
+        "instruction": (
+            "Inspect the failure, git status, and nearby files. Make the "
+            "smallest repair that lets the preflight pass without changing "
+            "provider routing or product scope."
+        ),
     }
-
-
-def is_repairable_preflight_issue(issue: dict[str, Any]) -> bool:
-    return classify_preflight_issue(issue).get("action") in {"auto_fix", "agent"}
 
 
 def failure_fingerprint(issue: dict[str, Any], *, failure_kind: str) -> str:
@@ -466,9 +434,12 @@ def failure_fingerprint(issue: dict[str, Any], *, failure_kind: str) -> str:
     return short_hash(f"{failure_kind}\n{normalized}", length=12)
 
 
-def _extract_ts_paths(message: str) -> list[str]:
+def _extract_likely_paths(message: str) -> list[str]:
     paths: list[str] = []
-    for match in re.finditer(r"([A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx))(?::|\(|\s)", message):
+    for match in re.finditer(
+        r"([A-Za-z0-9_./-]+\.(?:py|ts|tsx|js|jsx|json|toml|yaml|yml|sh|md))(?::|\(|\s|$)",
+        message,
+    ):
         path = match.group(1).strip()
         if path not in paths:
             paths.append(path)
