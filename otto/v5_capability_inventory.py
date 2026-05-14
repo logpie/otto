@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -426,7 +426,7 @@ def render_inventory(inv: CapabilityInventory) -> str:
             label = f"`{e.rel_dir}/package.json`" if e.rel_dir else "`package.json`"
             lines.append(f"- {label} (pkg manager: `{e.package_manager}`)")
             if e.scripts:
-                lines.append(f"    - scripts:")
+                lines.append("    - scripts:")
                 for name, cmd in sorted(e.scripts.items()):
                     lines.append(f"        - `{name}`: `{cmd}`")
             test_related_deps = sorted({
@@ -472,7 +472,7 @@ def render_inventory(inv: CapabilityInventory) -> str:
             if optional_test:
                 lines.append(f"    - optional-deps groups with tests: {', '.join(f'`{g}`' for g in optional_test)}")
             if e.scripts:
-                lines.append(f"    - scripts:")
+                lines.append("    - scripts:")
                 for name, cmd in sorted(e.scripts.items()):
                     lines.append(f"        - `{name}`: `{cmd}`")
             framework = sorted({
@@ -543,6 +543,31 @@ class CoherenceFinding:
     detail: str     # human-readable explanation
 
 
+_IA_HEADING = re.compile(
+    r"^##\s+Information Architecture Contract\s*$",
+    flags=re.MULTILINE,
+)
+_FENCED_JSON = re.compile(r"```(?:json)?\s*\n(.*?)\n```", flags=re.DOTALL)
+_KNOWN_SURFACE_KINDS = frozenset({
+    "route",
+    "nav",
+    "sidebar",
+    "topbar",
+    "toolbar",
+    "empty_state",
+    "keyboard",
+    "command_palette",
+    "modal",
+    "form",
+    "button",
+    "card",
+    "list",
+    "table",
+    "settings",
+    "global",
+})
+
+
 def _extract_operating_notes_block(charter_text: str) -> str | None:
     """Return the body of the 'Agent operating notes' section, or None."""
     start_m = _OPERATING_NOTES_HEADING.search(charter_text)
@@ -552,6 +577,289 @@ def _extract_operating_notes_block(charter_text: str) -> str | None:
     next_m = _NEXT_SECTION.search(charter_text, pos=body_start)
     body_end = next_m.start() if next_m else len(charter_text)
     return charter_text[body_start:body_end]
+
+
+def _extract_ia_block(charter_text: str) -> str | None:
+    """Return the Information Architecture Contract section body, if present."""
+    start_m = _IA_HEADING.search(charter_text)
+    if not start_m:
+        return None
+    body_start = start_m.end()
+    next_m = _NEXT_SECTION.search(charter_text, pos=body_start)
+    body_end = next_m.start() if next_m else len(charter_text)
+    return charter_text[body_start:body_end]
+
+
+def parse_information_architecture_contract(source: str | Path) -> dict[str, Any] | None:
+    """Parse the CHARTER Information Architecture Contract JSON block.
+
+    ``source`` may be raw CHARTER markdown or a path to CHARTER.md. Returns
+    ``None`` when the section or valid JSON object is absent.
+    """
+    if isinstance(source, Path):
+        try:
+            text = source.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    else:
+        text = source
+    block = _extract_ia_block(text)
+    if block is None:
+        return None
+    fenced = _FENCED_JSON.search(block)
+    json_text = fenced.group(1).strip() if fenced else block.strip()
+    if not json_text:
+        return None
+    try:
+        payload = json.loads(json_text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _latest_spec_payload(project_dir: Path) -> dict[str, Any] | None:
+    """Best-effort lookup for the root v5 spec when callers do not pass one."""
+    sessions = project_dir / "otto_logs" / "sessions"
+    if not sessions.exists():
+        return None
+    candidates = sorted(
+        sessions.glob("*/spec/spec.json"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _coerce_spec(spec: Any) -> dict[str, Any]:
+    """Return a JSON-shaped flat spec payload for IA coherence checks."""
+    if isinstance(spec, dict):
+        return dict(spec)
+    if is_dataclass(spec) and not isinstance(spec, type):
+        payload = asdict(spec)
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def _spec_project_kind(spec: dict[str, Any]) -> str | None:
+    value = spec.get("project_kind")
+    return str(value) if value else None
+
+
+def _spec_primary_action_ids(spec: dict[str, Any]) -> set[str]:
+    entities = spec.get("core_entities")
+    out: set[str] = set()
+    if not isinstance(entities, list):
+        return out
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        for action in entity.get("primary_actions") or []:
+            if isinstance(action, dict) and action.get("id"):
+                out.add(str(action["id"]))
+    return out
+
+
+def _spec_product_page_ids(spec: dict[str, Any]) -> set[str]:
+    product_overview = spec.get("product_overview")
+    if not isinstance(product_overview, dict):
+        return set()
+    out: set[str] = set()
+    for page in product_overview.get("top_level_pages") or []:
+        if isinstance(page, dict) and page.get("id"):
+            out.add(str(page["id"]))
+    return out
+
+
+def _spec_sidebar_page_ids(spec: dict[str, Any]) -> set[str]:
+    product_overview = spec.get("product_overview")
+    if not isinstance(product_overview, dict):
+        return set()
+    navigation = product_overview.get("primary_navigation")
+    if not isinstance(navigation, dict):
+        return set()
+    return {
+        str(page_id)
+        for page_id in navigation.get("sidebar") or []
+        if str(page_id).strip()
+    }
+
+
+def _known_ia_surface_ids(ia: dict[str, Any]) -> set[str]:
+    out: set[str] = set()
+    for collection in ("routes", "nav_surfaces", "action_surfaces", "settings_sections"):
+        for item in ia.get(collection) or []:
+            if isinstance(item, dict) and item.get("id"):
+                out.add(str(item["id"]))
+    for item in ia.get("empty_states") or []:
+        if not isinstance(item, dict):
+            continue
+        entity = str(item.get("entity") or "")
+        route = str(item.get("list_route") or "")
+        if entity:
+            out.add(f"{entity}.empty_state")
+        if route:
+            out.add(f"{route}.empty_state")
+    return out
+
+
+def _surface_reference_valid(surface: str, known_surface_ids: set[str]) -> bool:
+    if not surface:
+        return False
+    if surface in known_surface_ids or surface in _KNOWN_SURFACE_KINDS:
+        return True
+    parts = [part for part in surface.split(".") if part]
+    if not parts:
+        return False
+    return parts[0] in _KNOWN_SURFACE_KINDS or parts[-1] in _KNOWN_SURFACE_KINDS
+
+
+def validate_information_architecture_contract(
+    project_dir: Path,
+    *,
+    spec: Any | None = None,
+    project_kind: str | None = None,
+) -> list[CoherenceFinding]:
+    """Validate CHARTER.md's machine-readable IA contract.
+
+    Missing IA is a webapp coherence failure. Other project kinds skip the
+    requirement unless an IA block is present.
+    """
+    charter = project_dir / "CHARTER.md"
+    if spec is None:
+        spec = _latest_spec_payload(project_dir)
+    spec_payload = _coerce_spec(spec)
+    kind = project_kind or _spec_project_kind(spec_payload)
+
+    try:
+        charter_text = charter.read_text(encoding="utf-8")
+    except OSError:
+        if kind == "webapp":
+            return [CoherenceFinding(
+                kind="missing_ia_contract",
+                reference="CHARTER.md",
+                detail="webapp coherence requires CHARTER.md with an Information Architecture Contract",
+            )]
+        return []
+
+    block = _extract_ia_block(charter_text)
+    if block is None:
+        if kind == "webapp":
+            return [CoherenceFinding(
+                kind="missing_ia_contract",
+                reference="## Information Architecture Contract",
+                detail="webapp CHARTER.md is missing the Information Architecture Contract section",
+            )]
+        return []
+
+    ia = parse_information_architecture_contract(charter_text)
+    if ia is None:
+        return [CoherenceFinding(
+            kind="invalid_ia_contract",
+            reference="## Information Architecture Contract",
+            detail="Information Architecture Contract section does not contain a valid JSON object",
+        )]
+
+    findings: list[CoherenceFinding] = []
+    route_ids = {
+        str(route.get("id"))
+        for route in ia.get("routes") or []
+        if isinstance(route, dict) and route.get("id")
+    }
+    nav_linked_route_ids: set[str] = set()
+    for surface in ia.get("nav_surfaces") or []:
+        if not isinstance(surface, dict):
+            continue
+        linked_routes = surface.get("must_link_routes")
+        if not isinstance(linked_routes, list):
+            continue
+        nav_linked_route_ids.update(str(route_id) for route_id in linked_routes if str(route_id).strip())
+    known_surfaces = _known_ia_surface_ids(ia)
+
+    for route_id in sorted(nav_linked_route_ids):
+        if route_id not in route_ids:
+            findings.append(CoherenceFinding(
+                kind="ia_unknown_nav_route",
+                reference=route_id,
+                detail=f"nav_surfaces[].must_link_routes references {route_id!r}, not in routes[].id",
+            ))
+
+    for page_id in sorted(_spec_product_page_ids(spec_payload)):
+        if page_id not in route_ids:
+            findings.append(CoherenceFinding(
+                kind="ia_missing_product_page_route",
+                reference=page_id,
+                detail=(
+                    f"product_overview.top_level_pages page {page_id!r} has no matching "
+                    "CHARTER.IA routes[].id"
+                ),
+            ))
+
+    for page_id in sorted(_spec_sidebar_page_ids(spec_payload)):
+        if page_id not in nav_linked_route_ids:
+            findings.append(CoherenceFinding(
+                kind="ia_missing_sidebar_nav_link",
+                reference=page_id,
+                detail=(
+                    f"product_overview.primary_navigation.sidebar page {page_id!r} is not linked "
+                    "from CHARTER.IA nav_surfaces[].must_link_routes"
+                ),
+            ))
+
+    for action in ia.get("action_surfaces") or []:
+        if not isinstance(action, dict):
+            continue
+        action_id = str(action.get("id") or "<missing-action-id>")
+        target = str(action.get("target_route") or "")
+        if target and target not in route_ids:
+            findings.append(CoherenceFinding(
+                kind="ia_unknown_target_route",
+                reference=action_id,
+                detail=f"action_surfaces[{action_id}].target_route {target!r} is not in routes[].id",
+            ))
+        surfaces = action.get("surfaces")
+        if not isinstance(surfaces, list):
+            findings.append(CoherenceFinding(
+                kind="ia_invalid_surface",
+                reference=action_id,
+                detail=f"action_surfaces[{action_id}].surfaces must be a list",
+            ))
+            continue
+        for surface in surfaces:
+            ref = str(surface)
+            if not _surface_reference_valid(ref, known_surfaces):
+                findings.append(CoherenceFinding(
+                    kind="ia_unknown_surface",
+                    reference=ref,
+                    detail=(
+                        f"action_surfaces[{action_id}] references unknown surface {ref!r}; "
+                        "use a known surface kind or declared surface id"
+                    ),
+                ))
+
+    action_surface_ids = {
+        str(action.get("id"))
+        for action in ia.get("action_surfaces") or []
+        if isinstance(action, dict) and action.get("id")
+    }
+    for action_id in sorted(_spec_primary_action_ids(spec_payload)):
+        if action_id not in action_surface_ids:
+            findings.append(CoherenceFinding(
+                kind="ia_missing_action_surface",
+                reference=action_id,
+                detail=(
+                    f"spec primary action {action_id!r} has no matching "
+                    "CHARTER.IA action_surfaces[].id"
+                ),
+            ))
+
+    return findings
 
 
 def _looks_like_path(ref: str, inv: CapabilityInventory) -> bool:
@@ -664,52 +972,68 @@ def _command_resolves(
     return True, None
 
 
-def check_coherence(project_dir: Path, inv: CapabilityInventory) -> list[CoherenceFinding]:
+def check_coherence(
+    project_dir: Path,
+    inv: CapabilityInventory,
+    *,
+    spec: Any | None = None,
+    project_kind: str | None = None,
+) -> list[CoherenceFinding]:
     """Walk operating-notes code spans, verify each resolves.
 
-    Warning-only — returns findings but doesn't block. Caller decides
-    whether to surface, fail preflight, etc.
+    Also validates the machine-readable CHARTER IA contract when a webapp
+    spec is available. Warning-only at this layer — returns findings but
+    doesn't block. Caller decides whether to surface, fail preflight, etc.
     """
+    spec_payload = _coerce_spec(spec) if spec is not None else None
     charter = project_dir / "CHARTER.md"
     findings: list[CoherenceFinding] = []
     if not charter.exists():
+        findings.extend(validate_information_architecture_contract(
+            project_dir, spec=spec_payload, project_kind=project_kind
+        ))
         return findings
 
     try:
         text = charter.read_text(encoding="utf-8")
     except OSError:
+        findings.extend(validate_information_architecture_contract(
+            project_dir, spec=spec_payload, project_kind=project_kind
+        ))
         return findings
 
     notes = _extract_operating_notes_block(text)
-    if notes is None:
-        return findings
+    if notes is not None:
+        # Track seen to dedupe.
+        seen: set[str] = set()
+        for span_m in _CODE_SPAN.finditer(notes):
+            ref = span_m.group(1).strip()
+            if not ref or ref in seen:
+                continue
+            seen.add(ref)
 
-    # Track seen to dedupe.
-    seen: set[str] = set()
-    for span_m in _CODE_SPAN.finditer(notes):
-        ref = span_m.group(1).strip()
-        if not ref or ref in seen:
-            continue
-        seen.add(ref)
+            if _looks_like_shell_cmd(ref):
+                resolves, detail = _command_resolves(project_dir, ref, inv)
+                if not resolves:
+                    findings.append(CoherenceFinding(
+                        kind="unknown_script",
+                        reference=ref,
+                        detail=detail or "shell command target not found in scaffold",
+                    ))
+            elif _looks_like_path(ref, inv):
+                if not _path_exists(project_dir, ref):
+                    findings.append(CoherenceFinding(
+                        kind="missing_path",
+                        reference=ref,
+                        detail=(
+                            f"operating notes reference `{ref}` but no such "
+                            f"file/dir exists in scaffold"
+                        ),
+                    ))
 
-        if _looks_like_shell_cmd(ref):
-            resolves, detail = _command_resolves(project_dir, ref, inv)
-            if not resolves:
-                findings.append(CoherenceFinding(
-                    kind="unknown_script",
-                    reference=ref,
-                    detail=detail or "shell command target not found in scaffold",
-                ))
-        elif _looks_like_path(ref, inv):
-            if not _path_exists(project_dir, ref):
-                findings.append(CoherenceFinding(
-                    kind="missing_path",
-                    reference=ref,
-                    detail=(
-                        f"operating notes reference `{ref}` but no such "
-                        f"file/dir exists in scaffold"
-                    ),
-                ))
+    findings.extend(validate_information_architecture_contract(
+        project_dir, spec=spec_payload, project_kind=project_kind
+    ))
 
     return findings
 
