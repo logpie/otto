@@ -189,3 +189,18 @@ No Mission Control UI work belongs in these batches unless a later explicit requ
 
 Before implementing Batch 1, run the required Plan Gate through `codex-gate` if available in that session. Before completing or merging each non-trivial batch, run the Implementation Gate and append findings to `review.md` per repo instructions. This plan intentionally stops before implementation.
 
+## Implementation notes for Dispatch 2
+
+Date: 2026-05-14
+
+- Gate availability: the local `codex-gate` skill was present, but the `mcp__codex__codex` tool was not available in this session. Plan/implementation gates could not be invoked through MCP; validation was local only.
+- Batch 2: `verification_plan.matrix_scope` now supports the backward-compatible default `leaf` (full matrix at every node) and opt-in `integration_only` (leaf local checks, integration full matrix). Leaf local mode keeps `no_stub_text`, `verdict_consistency`, local test/journey evidence, and decisions enforcement; integration nodes still run the full IA matrix.
+- Batch 2: `decisions_appended` is accepted in `verdict.json` while legacy verdicts without the field remain valid. Runner enforcement uses a narrow git-status heuristic over changed shared schema/type/wire files only; matching `decisions.md` entries prevent downgrade.
+- Batch 3: spec compile cache keys include intent hash, rendered `compile-spec-flat` prompt hash, provider, model, flat-spec schema version, and Otto version. Cache entries live under `otto_logs/cross-sessions/spec-cache/<key-hash>/`; malformed entries miss safely. `otto v5 run --no-cache` disables lookup/store for diagnostics.
+- Batch 3: `compile_metrics.json` is written at the v5 session root for both cache hits and misses with timestamps, first assistant token timestamp when available, prompt/output byte counts, tokens, validation retries, provider, model, and cache hit/miss.
+- Batch 4: architect-time shared toolchain preflight now runs manifest-driven `npm ci/install`, `uv sync`, and Playwright browser install once in the architect worktree, logs command/timing data under `otto_logs/preflight/toolchain-preflight-<architect>-attempt-N.json`, then reuses existing install-dir propagation for child worktrees.
+- Batch 4: the lead prompt now rejects child DAGs with a critical path longer than two build stages unless the chain is flattened or inlined, and explicitly forbids a tests-only final child.
+
+## Findings during implementation
+
+- No deferred out-of-scope findings for Dispatch 2.
