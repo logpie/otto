@@ -532,3 +532,24 @@ What this unblocks:
 
 Pending (NOT blocking A6 closure):
 - A6.6 (file preserve markers, e.g. `.otto/preserve` file pattern) — deferred until needed by a real user; mechanism options sketched in progress.md.
+
+---
+
+## Implementation Gate — 2026-05-14 — Pre-v6c hardening
+
+Codex MCP gate status: skipped because the `mcp__codex__codex` tool required
+by `/codex-gate` is not available in this session. Local deterministic review
+and verification were used instead.
+
+Findings from the new hardening tests:
+- [IMPORTANT] Lead verdict rescue missed Codex/OpenAI-style terminal `result`
+  records — fixed in `otto/lead.py`.
+- [IMPORTANT] Nested schedulers could re-dispatch a `pending_children`
+  decomposition task after releasing the global lease — fixed in
+  `otto/queue/subtask.py`.
+
+Verification:
+- New hardening tests: 8 passed.
+- Requested focused suite: 412 passed, 2229 deselected.
+- Ruff on touched files: passed.
+- Py compile on touched Python files: passed.

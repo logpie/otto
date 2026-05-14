@@ -61,6 +61,78 @@ Codex peer gate note: the `mcp__codex__codex` tool required by the local
 not to split work across Codex calls. I will keep a file trail here and verify
 with local regression tests.
 
+## Pre-v6c hardening
+
+Codex peer gate note: unchanged. The `mcp__codex__codex` tool required for
+the project-level Plan Gate is not available in this session, so this section
+uses deterministic local tests and records the skipped gate explicitly.
+
+### Selected Tests
+
+1. Provider divergence for Lead verdict extraction.
+   Add a regression proving `run_lead()` recovers a valid verdict JSON from a
+   Codex/OpenAI-style `result` record in `lead/messages.jsonl`, not only from
+   Claude-style assistant text blocks.
+   Verify: fake agent writes no `verdict.json`, only a result-record JSON
+   verdict; `run_lead()` returns `pass` and persists the recovered file.
+
+2. Spec cache invariant hardening.
+   Add direct cache tests for prompt-hash/schema-version mismatches plus a v2
+   cached spec load path.
+   Verify: lookup misses on changed prompt/schema keys; legacy v2 cache hit
+   loads without provider invocation and preserves back-compat warnings.
+
+3. Nested global dispatch lease stress.
+   Add a recursive scheduler stress test with root siblings plus a decomposed
+   parent and grandchildren.
+   Verify: `max_parallel=2` is never exceeded across nested `_process_children`
+   loops and every task id dispatches once.
+
+4. Four root children reach root integration.
+   Add a `run_v5_pipeline()` regression where four root children write real
+   files on real git branches, root integration starts on `main`, sees all
+   files, and final verdict is honest.
+   Verify: root integration asserts all files exist before returning pass; each
+   child commit is reachable from `main`.
+
+5. Step 0b full-pipeline recovery.
+   Add a `run_v5_pipeline()` regression where a child is persisted as
+   `merge_blocked`, root integration merges its build branch, and reconciliation
+   flips final aggregate back to `pass`.
+   Verify: `child_recovery_reconciled` event emitted; child graph verdict is
+   `pass`; final result is `pass`.
+
+6. Skipped report via `run_lead()`.
+   Add a fake agent result with `intent_coverage.skipped`.
+   Verify: real `run_lead()` finally path writes timestamped append-only
+   `skipped_report.md`.
+
+7. Architect-time IA coherence emission.
+   Add a runner-level architect preflight regression with a latest spec and a
+   CHARTER IA contract missing one `product_overview.top_level_pages` route.
+   Verify: `_process_children()` emits `coherence_finding` with
+   `ia_missing_product_page_route`.
+
+### Bugs Found And Fixed
+
+- Lead provider divergence: `_read_agent_verdict()` rescued inline verdict JSON
+  only from assistant text blocks. Codex/OpenAI-style terminal `result` records
+  with valid verdict JSON were ignored, downgrading real work to `unverified`.
+  Fixed `_rescue_verdict_from_messages()` to parse both `result.structured_output`
+  and JSON embedded in `result.result`.
+- Nested scheduler duplicate dispatch: a task with `verdict=pending_children`
+  was not terminal, so after its lease released another scheduler loop could
+  dispatch the same decomposition Lead again and duplicate its grandchildren.
+  Fixed `take_ready()` to treat `pending_children` as non-runnable for the
+  task's own dispatch while preserving terminal-only dependency completion.
+
+### Verification Run
+
+- `uv run --extra dev pytest tests/test_v5_provider_parity.py tests/test_v5_spec_cache_hardening.py tests/test_v5_dispatch_lease_stress.py tests/test_v5_root_integration_e2e.py tests/test_v5_step0b_full_pipeline.py tests/test_v5_skipped_report_lead_integration.py tests/test_v5_ia_runner_coherence.py -q` passed: 8 passed.
+- `uv run --extra dev pytest tests/ -q -k "v5 or spec_compile or branching" --ignore=tests/integration` passed: 412 passed, 2229 deselected.
+- `uv run ruff check otto/lead.py otto/queue/subtask.py tests/test_v5_provider_parity.py tests/test_v5_spec_cache_hardening.py tests/test_v5_dispatch_lease_stress.py tests/test_v5_root_integration_e2e.py tests/test_v5_step0b_full_pipeline.py tests/test_v5_skipped_report_lead_integration.py tests/test_v5_ia_runner_coherence.py` passed.
+- `uv run python -m py_compile otto/lead.py otto/queue/subtask.py tests/test_v5_provider_parity.py tests/test_v5_spec_cache_hardening.py tests/test_v5_dispatch_lease_stress.py tests/test_v5_root_integration_e2e.py tests/test_v5_step0b_full_pipeline.py tests/test_v5_skipped_report_lead_integration.py tests/test_v5_ia_runner_coherence.py` passed.
+
 ## P1.1 Global concurrency lease
 
 Change `otto/v5_runner.py`: add a per-run shared dispatch lease object and pass

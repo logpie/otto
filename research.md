@@ -1,5 +1,66 @@
 # Otto redesign — research
 
+## Pre-v6c test coverage audit (2026-05-14)
+
+Scope: raise confidence before another live v6 run by reading the focused
+`tests/test_v5_*.py`, `tests/test_spec_compile*.py`, and branching coverage,
+then adding deterministic high-signal regressions. No live runs.
+
+Current focused coverage already includes:
+
+- Spec compile structure/lint/legacy parsing, StructuredOutput tool extraction,
+  result structured output extraction, cache reuse/miss by model, corrupt-cache
+  ignore, compile metrics, and root spec artifact cleanup.
+- V5 task graph, pending queue, dependency ordering, flat global dispatch lease,
+  root and subtree integration preflight payloads, Step 0b summary/prompt
+  helpers, skipped-report helper, clean-state verification, port cleanup,
+  install-dir propagation helpers, IA contract direct validation, matrix-scope
+  wiring, and branch merge/noise handling.
+- The landed v6b regression suite for decomposed child subtree propagation to
+  `main`, including shallow+deep mixed root children.
+
+Highest-leverage gaps selected:
+
+1. Provider divergence in Lead verdict recovery. Spec compile has explicit
+   StructuredOutput/result fallbacks, but Lead verdict rescue only checks
+   assistant text blocks. Codex-style inline final `result` records can
+   silently become `unverified` even when a valid verdict JSON is present.
+   Likelihood high, cost low, directly v6-relevant.
+2. Spec cache invariant tests beyond model changes. Cache key payload includes
+   prompt hash/schema version/provider/model/otto version, but focused tests
+   only prove identical reuse and model miss. Add prompt/schema mismatch and
+   legacy v2 cache-hit loading checks. Likelihood medium, cost low.
+3. Nested global dispatch lease stress. Existing lease test covers concurrent
+   flat schedulers; live failure involved nested decomposition and capacity
+   across recursive scheduler loops. Likelihood high, cost medium.
+4. Root integration sees real files from all root children. Existing tests show
+   child files reach `main`; add full `run_v5_pipeline` coverage that root
+   integration starts after four children and observes all product files before
+   final pass. Likelihood high, cost medium.
+5. Step 0b recovery in the full pipeline. Existing tests cover summary rendering
+   and reconcile helper directly; add full root integration behavior where the
+   integration agent merges a blocked child branch and final aggregate flips
+   back to pass. Likelihood high, cost medium.
+6. Skipped report through `run_lead`, not just helper. Existing test calls the
+   writer directly; add a fake agent session with `intent_coverage.skipped` and
+   verify `skipped_report.md` is append-written by the real finally path.
+   Likelihood medium-high, cost low.
+7. Architect-time IA coherence emission. Direct validator catches missing
+   `product_overview.top_level_pages` routes, but runner-time architect
+   preflight must emit that finding from the latest spec/CHARTER. Likelihood
+   medium-high, cost low.
+
+Not selected for this batch:
+
+- `otto v5 run --resume` smoke. The current `otto v5` CLI has no `--resume`
+  option; i2p resume coverage lives on the monolithic `build --resume` path,
+  which the dispatch explicitly says not to touch. This remains a product gap
+  to decide separately rather than a quick pre-v6c regression.
+- Multi-attempt generic child retry. The implemented retry machinery is
+  architect-preflight retry plus provider fallback, both covered at narrower
+  levels. A generic child retry/session-reattach feature is not present enough
+  to pin without changing product semantics.
+
 ## v6 bugfix batch research (2026-05-14)
 
 Scope: fix P1/P2/P3 issues from the v6b audit in the `cc-i2p-2`

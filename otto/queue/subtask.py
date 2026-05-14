@@ -140,6 +140,7 @@ def read_pending(project_dir: Path) -> list[dict[str, Any]]:
 _TERMINAL_VERDICTS = frozenset({
     "pass", "partial", "unverified", "merge_blocked", "catastrophic",
 })
+_NON_RUNNABLE_VERDICTS = _TERMINAL_VERDICTS | {"pending_children"}
 
 
 def _globally_completed_task_ids(project_dir: Path) -> set[str]:
@@ -164,6 +165,27 @@ def _globally_completed_task_ids(project_dir: Path) -> set[str]:
     return done
 
 
+def _globally_non_runnable_task_ids(project_dir: Path) -> set[str]:
+    """Tasks whose graph verdict means they should not be dispatched again.
+
+    ``pending_children`` is not terminal for dependency satisfaction, but it is
+    terminal for the planning Lead's own dispatch: that Lead already emitted
+    children and must not be picked up again by a sibling scheduler loop.
+    """
+    from otto.queue.task_graph import read_graph
+
+    try:
+        graph = read_graph(project_dir)
+    except Exception:  # noqa: BLE001 — best-effort
+        return set()
+    done: set[str] = set()
+    for tid, t in (graph.get("tasks") or {}).items():
+        verdict = t.get("verdict")
+        if isinstance(verdict, str) and verdict in _NON_RUNNABLE_VERDICTS:
+            done.add(tid)
+    return done
+
+
 def take_ready(
     project_dir: Path,
     *,
@@ -180,12 +202,17 @@ def take_ready(
     # the graph hasn't observed yet; global catches across recursive calls.
     globally_done = _globally_completed_task_ids(project_dir)
     completed_all = set(completed_task_ids) | globally_done
+    non_runnable = (
+        set(completed_task_ids)
+        | globally_done
+        | _globally_non_runnable_task_ids(project_dir)
+    )
 
     pending = read_pending(project_dir)
     ready: list[dict[str, Any]] = []
     for entry in pending:
         tid = entry.get("task_id")
-        if not tid or tid in completed_all or tid in in_flight_task_ids:
+        if not tid or tid in non_runnable or tid in in_flight_task_ids:
             continue
         if entry.get("review_state") not in ("approved", None):
             continue

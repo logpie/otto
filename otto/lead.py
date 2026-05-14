@@ -573,8 +573,11 @@ def _rescue_verdict_from_messages(session_dir: Path) -> dict[str, Any] | None:
     """Search the last assistant turn(s) for an inline JSON verdict object.
 
     The agent's prompt asks it to write verdict.json via the Write tool, but
-    agents sometimes inline the JSON in their final message instead. Parse
-    the message stream as a fallback so we don't lose work to a missing file.
+    agents sometimes inline the JSON in their final message instead. Providers
+    do not all serialize that final answer the same way: Claude-style logs
+    commonly expose assistant text blocks, while Codex/OpenAI-style logs may
+    put the final answer on a terminal ``result`` record. Parse both so we
+    don't lose work to a missing file.
     """
     messages_paths = [
         session_dir / "lead" / "messages.jsonl",
@@ -594,7 +597,21 @@ def _rescue_verdict_from_messages(session_dir: Path) -> dict[str, Any] | None:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(msg, dict) or msg.get("type") != "assistant":
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("type") == "result" and msg.get("subtype") == "success":
+                structured_output = msg.get("structured_output")
+                if isinstance(structured_output, dict) and structured_output.get("verdict") in (
+                    "pass", "partial", "unverified", "merge_blocked",
+                ):
+                    return structured_output
+                result_text = msg.get("result")
+                if isinstance(result_text, str):
+                    payload = _extract_verdict_json(result_text)
+                    if payload is not None:
+                        return payload
+                continue
+            if msg.get("type") != "assistant":
                 continue
             for block in msg.get("blocks") or []:
                 if block.get("type") != "text":
