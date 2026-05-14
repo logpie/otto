@@ -32,6 +32,7 @@ import asyncio
 import logging
 import shutil
 import subprocess
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -665,11 +666,47 @@ async def _process_children(
                         })
                 else:
                     # Architect passed AND scaffold preflight is clean.
+                    # Run shared toolchain preflight in the architect
+                    # worktree so ignored install dirs exist there before
+                    # propagation. This is non-blocking optimization state:
+                    # clean scaffold verification above remains the
+                    # correctness gate, while this preflight logs exactly
+                    # what dependency bootstrap commands ran.
+                    arch_worktree = project_dir / ".worktrees" / architect_tid
+                    try:
+                        from otto.v5_clean_verify import preflight_shared_toolchains
+
+                        toolchain_result = preflight_shared_toolchains(
+                            arch_worktree,
+                            timeout_s=300,
+                            logger_fn=lambda m: logger.info("preflight: %s", m),
+                        )
+                        log_path = _write_toolchain_preflight_log(
+                            project_dir=project_dir,
+                            architect_task_id=architect_tid,
+                            retry_count=get_retry_count(project_dir, architect_tid),
+                            result=toolchain_result.to_jsonable(),
+                        )
+                        _emit(on_event, {
+                            "event": "toolchain_preflight_done",
+                            "architect_task_id": architect_tid,
+                            "passed": toolchain_result.passed,
+                            "command_count": len(toolchain_result.commands),
+                            "log_path": str(log_path),
+                        })
+                        if not toolchain_result.passed:
+                            logger.warning(
+                                "toolchain preflight had failures for architect %s: %s",
+                                architect_tid,
+                                "; ".join(toolchain_result.failure_messages[:3]),
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("toolchain preflight failed: %s", exc)
+
                     # Propagate its node_modules/.venv into project_dir so
                     # feature children's worktrees can symlink instead of
                     # re-running `npm install` / `uv sync`.
                     try:
-                        arch_worktree = project_dir / ".worktrees" / architect_tid
                         n = _propagate_install_dirs_from_architect(
                             project_dir, arch_worktree
                         )
@@ -687,21 +724,6 @@ async def _process_children(
                         logger.warning(
                             "propagate install dirs from architect failed: %s", exc
                         )
-
-                    # Ensure Playwright browsers are cached once. 22% of
-                    # recent agent logs ran `npx playwright install` and
-                    # waited 30-60s for chromium download. Doing it here
-                    # (only when project actually uses Playwright AND the
-                    # browser isn't cached) turns subsequent agent installs
-                    # into 1-2s no-ops.
-                    try:
-                        if _ensure_playwright_browsers(project_dir):
-                            _emit(on_event, {
-                                "event": "playwright_browsers_ready",
-                                "architect_task_id": architect_tid,
-                            })
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("playwright preinstall failed: %s", exc)
 
                     # Source-of-truth fix (Part A): build the capability
                     # inventory from the actual scaffold + inject it into
@@ -1585,6 +1607,27 @@ def _emit(on_event: Any, payload: dict[str, Any]) -> None:
         on_event(payload)
     except Exception:  # noqa: BLE001 — observability is best-effort
         pass
+
+
+def _write_toolchain_preflight_log(
+    *,
+    project_dir: Path,
+    architect_task_id: str,
+    retry_count: int,
+    result: dict[str, Any],
+) -> Path:
+    log_dir = project_dir / "otto_logs" / "preflight"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"toolchain-preflight-{architect_task_id}-attempt-{retry_count + 1}.json"
+    payload = {
+        "schema_version": 1,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "architect_task_id": architect_task_id,
+        "retry_count": retry_count,
+        **result,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 # Names that mark a dir as install state we want to share across worktrees.

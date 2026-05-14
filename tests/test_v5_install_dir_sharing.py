@@ -13,13 +13,18 @@ projects, where install dirs live in subdirs (``frontend/node_modules``,
 
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
+from typing import Any
 
 from otto.v5_runner import (
     _iter_install_dirs,
     _link_shared_install_dirs,
     _propagate_install_dirs_from_architect,
+    _write_toolchain_preflight_log,
 )
+from otto.v5_clean_verify import preflight_shared_toolchains
 
 
 def _populate_dir(d: Path, *, files: dict[str, str] | None = None) -> None:
@@ -180,3 +185,70 @@ def test_propagate_missing_architect_worktree_returns_zero(tmp_path: Path) -> No
     project.mkdir()
     missing = tmp_path / "does_not_exist"
     assert _propagate_install_dirs_from_architect(project, missing) == 0
+
+
+def test_toolchain_preflight_runs_manifests_inside_architect_worktree(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    architect_wt = tmp_path / "project" / ".worktrees" / "v5-architect"
+    (architect_wt / "frontend").mkdir(parents=True)
+    (architect_wt / "frontend" / "package.json").write_text(
+        '{"devDependencies":{"@playwright/test":"1.0.0"}}\n',
+        encoding="utf-8",
+    )
+    (architect_wt / "api").mkdir()
+    (architect_wt / "api" / "pyproject.toml").write_text(
+        "[project]\nname='api'\n",
+        encoding="utf-8",
+    )
+    commands: list[tuple[list[str], Path]] = []
+
+    def fake_which(name: str) -> str | None:
+        return f"/usr/bin/{name}" if name in {"npm", "uv", "npx"} else None
+
+    def fake_run(cmd: list[str], *, cwd: Path, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append((cmd, Path(cwd)))
+        if cmd[1] in {"install", "ci"}:
+            (Path(cwd) / "node_modules").mkdir()
+        if cmd[1] == "sync":
+            (Path(cwd) / ".venv").mkdir()
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("otto.v5_clean_verify.shutil.which", fake_which)
+    monkeypatch.setattr("otto.v5_clean_verify._playwright_chromium_cached", lambda: False)
+    monkeypatch.setattr("otto.v5_clean_verify.subprocess.run", fake_run)
+
+    result = preflight_shared_toolchains(architect_wt)
+
+    assert result.passed is True
+    assert result.manifest_counts == {"package_json": 1, "pyproject": 1}
+    assert [cmd[:3] for cmd, _cwd in commands] == [
+        ["/usr/bin/npm", "install", "--no-audit"],
+        ["/usr/bin/uv", "sync"],
+        ["/usr/bin/npx", "playwright", "install"],
+    ]
+    assert (architect_wt / "frontend" / "node_modules").is_dir()
+    assert (architect_wt / "api" / ".venv").is_dir()
+
+
+def test_toolchain_preflight_log_is_numbered_and_timestamped(tmp_path: Path) -> None:
+    result = {
+        "passed": True,
+        "worktree": str(tmp_path / ".worktrees" / "v5-architect"),
+        "commands": [],
+        "failure_messages": [],
+        "manifest_counts": {"package_json": 0, "pyproject": 0},
+    }
+
+    path = _write_toolchain_preflight_log(
+        project_dir=tmp_path,
+        architect_task_id="v5-architect",
+        retry_count=1,
+        result=result,
+    )
+
+    assert path.name == "toolchain-preflight-v5-architect-attempt-2.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["_written_at"]
+    assert payload["architect_task_id"] == "v5-architect"

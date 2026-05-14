@@ -37,7 +37,7 @@ import socket
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -76,6 +76,34 @@ class CleanVerifyResult:
     # Optional debug info — preserved temp dir path, listening ports, etc.
     temp_dir: Path | None = None
     listening_ports: list[int] = field(default_factory=list)
+
+
+@dataclass
+class ToolchainCommandResult:
+    command: list[str]
+    cwd: str
+    started_at: str
+    duration_s: float
+    returncode: int | None
+    status: Literal["passed", "failed", "skipped"]
+    reason: str = ""
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+
+
+@dataclass
+class ToolchainPreflightResult:
+    passed: bool
+    worktree: str
+    _written_at: str
+    commands: list[ToolchainCommandResult] = field(default_factory=list)
+    failure_messages: list[str] = field(default_factory=list)
+    manifest_counts: dict[str, int] = field(default_factory=dict)
+
+    def to_jsonable(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["commands"] = [asdict(command) for command in self.commands]
+        return payload
 
 
 # Stateful dirs that should NOT be copied to the clean temp.
@@ -129,16 +157,24 @@ def _copy_project_clean(
 def _find_manifests(temp_root: Path) -> tuple[list[Path], list[Path]]:
     """Find package.json and pyproject.toml under temp_root, skipping
     nested stateful dirs we missed in copy."""
-    package_jsons = [
-        p
-        for p in temp_root.rglob("package.json")
-        if "node_modules" not in p.parts and ".worktrees" not in p.parts
-    ]
-    pyprojects = [
-        p
-        for p in temp_root.rglob("pyproject.toml")
-        if ".venv" not in p.parts and ".worktrees" not in p.parts
-    ]
+    def _rel_parts(path: Path) -> tuple[str, ...]:
+        try:
+            return path.relative_to(temp_root).parts
+        except ValueError:
+            return path.parts
+
+    package_jsons = []
+    for p in temp_root.rglob("package.json"):
+        rel_parts = _rel_parts(p)
+        if "node_modules" in rel_parts or ".worktrees" in rel_parts:
+            continue
+        package_jsons.append(p)
+    pyprojects = []
+    for p in temp_root.rglob("pyproject.toml"):
+        rel_parts = _rel_parts(p)
+        if ".venv" in rel_parts or ".worktrees" in rel_parts:
+            continue
+        pyprojects.append(p)
     return package_jsons, pyprojects
 
 
@@ -274,6 +310,191 @@ def _scaffold_verify(
             )
 
     return True, None, None, steps
+
+
+def _iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def preflight_shared_toolchains(
+    worktree_dir: Path,
+    *,
+    timeout_s: int = 300,
+    logger_fn: Any = None,
+) -> ToolchainPreflightResult:
+    """Install shared toolchains once in the architect worktree.
+
+    This is an optimization and observability layer for v5 children. It runs
+    after the architect scaffold passes clean verification so ignored install
+    dirs exist in the architect worktree and can be symlink-propagated into
+    child worktrees.
+    """
+
+    def log(message: str) -> None:
+        if logger_fn:
+            logger_fn(message)
+
+    package_jsons, pyprojects = _find_manifests(worktree_dir)
+    result = ToolchainPreflightResult(
+        passed=True,
+        worktree=str(worktree_dir),
+        _written_at=_iso_now(),
+        manifest_counts={
+            "package_json": len(package_jsons),
+            "pyproject": len(pyprojects),
+        },
+    )
+
+    npm_path = shutil.which("npm")
+    for package_json in package_jsons:
+        has_lockfile = (package_json.parent / "package-lock.json").exists()
+        cmd = (
+            [npm_path or "npm", "ci", "--no-audit", "--no-fund"]
+            if has_lockfile
+            else [npm_path or "npm", "install", "--no-audit", "--no-fund"]
+        )
+        if not npm_path:
+            _record_toolchain_skip(
+                result,
+                command=cmd,
+                cwd=package_json.parent,
+                reason="npm not on PATH",
+            )
+            continue
+        _run_toolchain_command(result, cmd, cwd=package_json.parent, timeout_s=timeout_s, log=log)
+
+    uv_path = shutil.which("uv")
+    for pyproject in pyprojects:
+        cmd = [uv_path or "uv", "sync"]
+        if not uv_path:
+            _record_toolchain_skip(
+                result,
+                command=cmd,
+                cwd=pyproject.parent,
+                reason="uv not on PATH",
+            )
+            continue
+        _run_toolchain_command(result, cmd, cwd=pyproject.parent, timeout_s=timeout_s, log=log)
+
+    playwright_cwd = _playwright_install_cwd(package_jsons)
+    if playwright_cwd is not None:
+        npx_path = shutil.which("npx")
+        cmd = [npx_path or "npx", "playwright", "install", "chromium"]
+        if _playwright_chromium_cached():
+            _record_toolchain_skip(
+                result,
+                command=cmd,
+                cwd=playwright_cwd,
+                reason="chromium already cached",
+                failed=False,
+            )
+        elif not npx_path:
+            _record_toolchain_skip(
+                result,
+                command=cmd,
+                cwd=playwright_cwd,
+                reason="npx not on PATH",
+            )
+        else:
+            _run_toolchain_command(result, cmd, cwd=playwright_cwd, timeout_s=timeout_s, log=log)
+
+    result.passed = not result.failure_messages
+    return result
+
+
+def _run_toolchain_command(
+    result: ToolchainPreflightResult,
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_s: int,
+    log: Any,
+) -> None:
+    started_at = _iso_now()
+    started = time.monotonic()
+    log(f"toolchain-preflight: running {' '.join(command)} in {cwd}")
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        duration_s = time.monotonic() - started
+        status: Literal["passed", "failed"] = "passed" if proc.returncode == 0 else "failed"
+        result.commands.append(ToolchainCommandResult(
+            command=command,
+            cwd=str(cwd),
+            started_at=started_at,
+            duration_s=round(duration_s, 3),
+            returncode=proc.returncode,
+            status=status,
+            stdout_tail=(proc.stdout or "")[-800:],
+            stderr_tail=(proc.stderr or "")[-800:],
+        ))
+        if proc.returncode != 0:
+            result.failure_messages.append(
+                f"{' '.join(command)} failed in {cwd}: exit {proc.returncode}"
+            )
+    except subprocess.TimeoutExpired as exc:
+        duration_s = time.monotonic() - started
+        result.commands.append(ToolchainCommandResult(
+            command=command,
+            cwd=str(cwd),
+            started_at=started_at,
+            duration_s=round(duration_s, 3),
+            returncode=None,
+            status="failed",
+            reason=f"timed out after {timeout_s}s",
+            stdout_tail=(exc.stdout or "")[-800:] if isinstance(exc.stdout, str) else "",
+            stderr_tail=(exc.stderr or "")[-800:] if isinstance(exc.stderr, str) else "",
+        ))
+        result.failure_messages.append(
+            f"{' '.join(command)} timed out in {cwd} after {timeout_s}s"
+        )
+
+
+def _record_toolchain_skip(
+    result: ToolchainPreflightResult,
+    *,
+    command: list[str],
+    cwd: Path,
+    reason: str,
+    failed: bool = True,
+) -> None:
+    result.commands.append(ToolchainCommandResult(
+        command=command,
+        cwd=str(cwd),
+        started_at=_iso_now(),
+        duration_s=0.0,
+        returncode=None,
+        status="skipped",
+        reason=reason,
+    ))
+    if failed:
+        result.failure_messages.append(f"{' '.join(command)} skipped in {cwd}: {reason}")
+
+
+def _playwright_install_cwd(package_jsons: list[Path]) -> Path | None:
+    for package_json in package_jsons:
+        try:
+            text = package_json.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "@playwright/test" in text:
+            return package_json.parent
+    return None
+
+
+def _playwright_chromium_cached() -> bool:
+    cache_root = Path(os.path.expanduser("~/.cache/ms-playwright"))
+    if not cache_root.exists():
+        return False
+    try:
+        return any(entry.name.startswith("chromium-") and entry.is_dir() for entry in cache_root.iterdir())
+    except OSError:
+        return False
 
 
 def _parse_declared_port_envs(project_dir: Path) -> list[tuple[str | None, int]]:
