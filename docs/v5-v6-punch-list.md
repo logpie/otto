@@ -58,6 +58,136 @@ worktree preserved, user can resolve manually.
 conflict context and the task's prior session_id resumed; cap at 2
 attempts.
 
+### Enforce children's use of existing decisions.md broadcast
+**State:** The append-only `decisions.md` broadcast channel already
+exists. The lead prompt instructs children to read it (line 20: "Read
+CHARTER.md and decisions.md at the repo root") and append to it
+(Step 4 at line 479: "Record boundary decisions to decisions.md").
+Sibling appends merge cleanly via union-merge (line 489). Children
+that run later read decisions.md and see earlier siblings' entries.
+The infrastructure is there.
+
+What's missing is **agent culture of actually using it**. Sample audit
+from sc6 (today's run): 7 entries, all from `architect` at 04:52,
+zero from feature children — despite multiple feature children making
+non-trivial cross-cutting choices (e.g., `created_at` formatting, draft
+storage key shape, image upload endpoint path). The prompt instructs;
+children don't comply.
+
+**Why:** the append instruction is at Step 4 of the prompt — buried
+after Build and Verify. Children focus on their scope, treat
+decisions.md as "the architect's file," and skip it. No enforcement
+mechanism downgrades verdict if a child made a broadcastable decision
+without recording it.
+
+**v6 work (small):** three escalating fixes, cheapest first:
+1. Promote decisions.md append from Step 4 to a top-level
+   "responsibility" with explicit triggers ("any choice that affects
+   shape, naming, file ownership, env vars, or wire shapes → append").
+2. Add `decisions_appended: [{decision_id, summary}]` to verdict.json
+   schema. The agent must list its appends or explicitly state
+   "no boundary decisions made in this scope".
+3. Runner-side check: for every cross-subsystem touchpoint the agent
+   modified (detected by file path heuristic — shared schemas, types,
+   wire formats), require a matching decisions.md entry, else
+   downgrade verdict to partial with diagnostic.
+
+**Why this matters:** if children broadcast decisions, integration
+gets a richer reconciliation trail and (more importantly) parallel
+siblings landing AFTER a decision can read it. The "Slack equivalent"
+debate dissolves: we don't need a comm channel because the broadcast
+log already exists. We just need agents to actually post to it.
+
+### Shell script + scaffold portability validation (shift-left)
+**State:** sc6 run wasted 77 minutes because `start.sh` used bash-4
+syntax (`${service^^}`) that fails on macOS's bash 3.2. The bug
+existed at minute 9 (architect emitted start.sh); preflight discovered
+it at minute 86. `verify_from_clean(scope="scaffold")` at
+`otto/v5_preflight.py:193` runs build/typecheck but deliberately
+skips executing `start.sh`. `bash -n` would NOT have caught this
+(bash-3 parses `${var^^}` as syntactically valid; fails at runtime).
+
+**v6 work:** add a `script_valid` check to `otto/v5_clean_verify.py`,
+called post-architect:
+- For every root-owned `*.sh`: shebang present, executable bit, `bash
+  -n` syntax check, bash-4-feature detection when host bash <4
+  (regex for `${var^^}` / `${var,,}` / arrays).
+- Dynamic exec: bind a temporary local port, run `API_PORT=<busy>
+  bash start.sh`, expect a clean PORT_CONFLICT message. Catches the
+  exact untested branch without booting the full app.
+- Improve `_parse_declared_ports()` to recognize CHARTER table rows
+  like `| API_PORT | 8000 |` (today only catches inline forms).
+
+### Inject preflight result into integration agent (autonomous fix for trivial blocks)
+**State:** `_run_integration()` at `v5_runner.py:1178` runs
+`smoke_clean_deploy()` but only logs and continues. The result is
+NOT injected into the integration agent's task input. The
+integration agent has prompt authority for "small fixes" up to 50
+LOC (`lead-integration.md:211`) but bypassed `start.sh` entirely and
+never saw the bug. So we lost autonomous repair for a one-line shell
+fix; final verdict was `partial` on a product whose frontend code
+never landed in `main`.
+
+The earlier draft of this entry proposed a separate `preflight-repair`
+agent. Discarded — over-segmentation. The integration agent has the
+right context, authority, and worktree; it just lacked the preflight
+error as input. One-session repair is the correct design.
+
+**v6 work:** in `_run_integration()`:
+1. Resolve integration worktree (NOT `project_dir` — `project_dir`
+   may be on `main` while merged children live on
+   `i2p/integ/<task>`)
+2. Run `smoke_clean_deploy()` on the integration worktree
+3. Spawn integration agent with task input that includes:
+   - children's verdicts (today)
+   - structured smoke result (NEW): failure_kind, offending_file,
+     error_excerpt, classification (`trivially_fixable` |
+     `escalate`)
+4. Agent reconciles + applies small repairs within its existing
+   50-LOC scope
+5. Runner re-runs `smoke_clean_deploy()` after agent returns;
+   downgrades to `merge_blocked` if still red
+
+Keep classification + structured preflight result modular (might be
+reused later for per-leaf preflight or post-deploy repair). Do NOT
+add a new prompt file by default.
+
+**Trivially-fixable criteria** (by *kind of change*, not LOC):
+
+ELIGIBLE — bug class + scope of change:
+- Failure classes: `clean_deploy_start_failed`, `script_valid_failed`,
+  `missing_env_var`, `wrong_file_permissions`, `import_path_typo`
+- Allowed file edits: launch scripts (start.sh), env config files
+  (.env.example, vite.config, tsconfig), shell glue, missing imports,
+  wire-shape glue when integration finds child mismatches
+- Examples: bad shell substitution, missing shebang/chmod, wrong env
+  var name, undefined import, port allocation defaults
+
+NOT ELIGIBLE — anything that adds product surface:
+- New API endpoints, routes, types, entities, dependencies
+- New tests (test files belong to children's scope)
+- Changes to auth logic, encryption, persistence layer
+- Adding or removing user-visible features
+- Hosts/infra issues that aren't agent-fixable (port busy on host,
+  browser unavailable, install failures across many files)
+- Repeated same failure (already tried once)
+
+LOC heuristic (soft, in prompt only — NOT a runner-side gate):
+"Small fixes typically 10-30 lines. If exceeding ~50, that's a sign
+you're out of scope — escalate as merge_blocked."
+
+The hard gate is by file type + bug class. The LOC number is just
+a self-check signal to the agent.
+
+**Why this matters:** Otto v3 had repair loops via the certifier
+("round 1 fail → round 2 fix"). v5 hierarchical traded that for
+simpler one-shot verification. For a class of trivially-fixable
+preflight failures (shell scripts, env vars, file modes), a tiny
+autonomous repair loop restores the v3-era resilience without the
+full certifier loop's complexity. Cost per repair attempt: ~$0.05 and
+30 seconds. Cost of NOT having it (today): hours of wasted compute
++ user-visible "broken" final state.
+
 ## Verifier / audit
 
 ### Audit's LLM-judge integration
@@ -114,6 +244,61 @@ Not implemented.
 `RunPayload`; route to `otto v5 run` instead of `otto run` when tier is
 set.
 
+### Spec visualization — PM PRD layer
+**State:** structured spec at `<session>/spec/spec.json` carries the
+PM-PRD-layer fields (`product_overview.one_liner`, `primary_users`,
+`top_level_pages`, `primary_navigation`, `out_of_scope`, `phases`) and
+the engineering layer (`core_entities`, `primary_actions`,
+`intent_claims`, `behavior_journeys`). Both are JSON; reviewers
+currently inspect via `cat spec.json | jq` or by reading the file
+manually.
+
+**v6 work:** MC drilldown for a session adds a "Spec" tab rendering
+the PM PRD as a clean product brief: one-liner header, user-type
+cards, top-level page list with purposes, sidebar + command-palette
+preview, out-of-scope list, must-have/should-have/nice-to-have phases
+as collapsible groups. This is the artifact a stakeholder would
+review before approving the build.
+
+### Spec visualization — engineering PRD layer
+**State:** same as above. The engineering layer is the contract
+machines check, but humans currently read it as raw JSON.
+
+**v6 work:** MC "Spec" tab also renders the engineering PRD with:
+- entity cards (fields + states + primary_actions, expandable)
+- a global table of primary_actions with `success_observable` and
+  `error_observable` per action
+- intent_claims list with `source_line` links back to intent.md
+- journeys rendered as numbered steps with `covers_primary_actions`
+  pills + `start_state`/`entry_route` chips
+- traceability: hover an action → highlight the intent_claims that
+  reference it; hover a claim → highlight downstream entities/actions
+
+### Spec diagrams (auto-rendered from engineering PRD)
+**State:** the engineering PRD has all the structured data needed for
+several diagram types but produces none. Reviewers must reconstruct
+the architecture mentally from JSON.
+
+**v6 work:** auto-render diagrams from spec.json + CHARTER.IA:
+- **Entity-relationship diagram (ERD):** nodes = core_entities, edges
+  = field references (e.g., `issue.assignee → user.id`). Surface
+  state machines per entity (the `states[]` list).
+- **Action-surface map:** for each action, show which UI surfaces
+  expose it (e.g., `issue.create` → [sidebar | command_palette |
+  keyboard.C | empty_state.cta]). Highlights "single-surface" actions
+  as discoverability risks.
+- **Route graph:** routes as nodes, navigation edges between them.
+  Marks `entry_route: "/"` as the cold-start root. Marks routes
+  unreachable from any nav surface.
+- **Journey flow:** for each behavior_journey, render
+  `start_state → covers_primary_actions[] → terminal_state` as a
+  swimlane with cross-references to action IDs.
+- **Phase coverage:** stacked bar showing which entities/actions land
+  in must_have vs should_have vs nice_to_have.
+
+Use mermaid or d3 for rendering; both are stable and the data is
+small enough that client-side render is fine.
+
 ## Cleanup
 
 ### Move v4 group/contract synthesis to legacy/
@@ -133,6 +318,101 @@ v5 by default after bench validates v5.
 
 **v6 work:** flip the default; preserve `--legacy` for one release; then
 delete.
+
+## Wall-clock performance & scheduling
+
+Findings from sc6 (today's live run with structured-contract +
+PM-PRD-layer code): wall-clock regressed from 49 min → 63+ min vs
+yesterday's pre-redesign baseline. Total agent-seconds: 72.5 min with
+only ~13% parallelism gain. Codex's independent audit identified
+several mitigations. Listed in priority order.
+
+### Cache spec compile by intent hash
+**State:** every run re-compiles the spec from intent.md, even when
+intent and prompt are unchanged. On sc6, spec compile took 9:57 (vs
+yesterday's 1:03) under Claude with the new structured-contract
+schema. Retries pay this cost again.
+
+**v6 work:** key spec.json on `(intent.md hash, compile-prompt hash,
+provider, model, otto version)`. Reuse if all match. No cross-version
+reuse (safety). Lowest-risk fix; ~10 min savings per retry.
+
+### Critical-path-aware sub-decomposition
+**State:** sc6's frontend lead sub-decomposed into a serialized chain
+(auth → app_shell → views_pair → tests_only_child), serializing ~50
+min of agent work that yesterday's inline frontend did in ~20 min.
+The lead made the local decision to split correctly — but didn't
+optimize the global DAG shape.
+
+**v6 work:** add critical-path discipline to the lead prompt: *"If
+your proposed child DAG critical path is > 2 build stages, either
+restructure the shared contracts/scaffolds so leaves can fan out, or
+inline the dependent chain."* Also: forbid `tests-only final child`
+patterns — feature leaves must own their own tests, not pass them to
+a final test-only sibling that serializes everything.
+
+**Why deferred:** needs careful prompt language; risk of recreating
+the "giant inline blob" anti-pattern if heuristic is too blunt.
+
+### Run full check matrix only at integration nodes
+**State:** every leaf session today runs the full 160-row check
+matrix against the WHOLE CHARTER.IA, regardless of the leaf's actual
+scope. Result: 100+ false-fail checks per leaf (route_resolves /
+endpoint_resolves for surfaces the leaf doesn't own), which
+correctly downgrade to partial but mislead the reader and burn
+compute.
+
+**v6 work:** leaves run only cheap local-scope checks (their own
+files, their declared tests). Integration nodes run the full matrix
+against the merged code. Saves ~5+ min/leaf and produces cleaner
+per-leaf verdicts.
+
+### Investigate Claude compile output explosion
+**State:** sc6 spec compile took 9:57 (Claude) vs ~3:30 (codex same
+prompt). Claude emitted ~200K total tokens and ~45K output tokens
+for the spec; codex emitted similar structure in 1/3 the time. Not
+plain "Claude is slow" — this is schema/output explosion. Schema
+encourages verbose IDs and per-claim duplication.
+
+**v6 work:** add provider timing metrics (time-to-first-token,
+output tokens, validation retries, prompt/output byte sizes). Then
+apply caps:
+- max intent_claims (≤30)
+- terse IDs instead of verbose repeated prose
+- journeys cover representative critical flows only, not every surface
+- "nice-to-have" contract detail degrades to notes, not matrix rows
+
+If codex consistently produces valid specs in 3:30 with adequate
+quality, route compile to codex by default (with claude as fallback).
+
+### Toolchain pre-flight in shared worktree
+**State:** every child agent fights `node_modules` install /
+Vitest config / `playwright install` overhead during its build. Pure
+runner overhead, paid N times.
+
+**v6 work:** runner pre-flights the worktree once (npm install, uv
+sync, playwright install) at architect time. Children inherit a
+known-good install dir via the existing symlink propagation.
+
+### Per-child context slicing
+**State:** every child agent receives the full spec.json (~60KB) +
+CHARTER.md (~36KB). Most of that content is irrelevant to the
+child's scope. Big context = slower turns + higher cost.
+
+**v6 work:** runner slices spec + CHARTER per child by scope
+(filter `core_entities` and `action_surfaces` by what the child
+owns). Send only the slice plus cross-reference index. Architect
+still sees full content.
+
+### Architect CHARTER output size cap
+**State:** sc4 CHARTER was 1138 lines; sc6 was 902 lines. Both
+include exhaustive prose alongside the structured IA JSON. The prose
+duplicates much of what the JSON contract already declares.
+
+**v6 work:** architect prompt instructs: "the IA JSON is the
+contract; prose sections explain WHY, not WHAT. Prefer
+machine-readable contracts; eliminate prose that just restates JSON
+fields." Target ~500 lines max.
 
 ## Operations
 
