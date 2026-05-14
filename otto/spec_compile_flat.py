@@ -45,6 +45,15 @@ logger = logging.getLogger("otto.spec_compile_flat")
 
 SCHEMA_VERSION = 3
 INTENT_CLAIMS_MAX = 30
+ROOT_SPEC_ARTIFACT_FILENAMES = frozenset({
+    "product-contract.json",
+    "product_contract.json",
+    "spec.json",
+    "flat-spec.json",
+    "flat_spec.json",
+    "otto-spec.json",
+    "otto_spec.json",
+})
 
 
 class StructuredSpecValidationError(ValueError):
@@ -132,6 +141,29 @@ def lint_spec(spec: Any) -> list[str]:
         for issue in per_journey:
             warnings.append(f"journey {jid!r}: {issue}")
     return warnings
+
+
+def _cleanup_root_spec_artifacts(project_dir: Path) -> list[Path]:
+    """Remove redundant spec files a compile agent may have written at repo root.
+
+    The canonical flat spec is persisted under ``session_dir/spec/spec.json``.
+    Some providers try to recover from output-size pressure by writing a JSON
+    contract into the project root. Those files are unused and can block later
+    merge worktree checks, so remove only a narrow allowlist of known names.
+    """
+    removed: list[Path] = []
+    for name in sorted(ROOT_SPEC_ARTIFACT_FILENAMES):
+        artifact = project_dir / name
+        if not artifact.is_file():
+            continue
+        try:
+            artifact.unlink()
+        except OSError as exc:
+            logger.warning("compile_flat_spec: could not remove stray root spec artifact %s: %s", artifact, exc)
+            continue
+        removed.append(artifact)
+        logger.warning("compile_flat_spec: removed stray root spec artifact %s", artifact)
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +529,13 @@ OUTPUT a single JSON object with this exact shape (no prose, no fences, just JSO
 }}
 
 RULES (HARD — do NOT violate):
+0. Emit the spec ONLY via the StructuredOutput tool. If your runtime exposes
+   this as a final structured JSON response, use that structured channel.
+   Do NOT use Write or any file-writing tool to create `product-contract.json`,
+   `spec.json`, or any other spec file in the project root. If output approaches
+   token limits, prefer terser IDs, consolidated claims, and trimmed prose over
+   file-writing.
+
 1. Behavior journeys MUST be in user-language. They describe what a USER does and SEES.
    GOOD: "User clicks 'Add Transaction', enters $50 with category 'Food', saves. The new transaction appears in the list."
    BAD:  "Click element with class .add-btn. Verify .txn-list has data-testid='row'."
@@ -827,6 +866,7 @@ async def compile_flat_spec(
                 },
                 prompts=[prompt_entry],
             )
+            _cleanup_root_spec_artifacts(project_dir)
             return spec
 
     # Single-turn compile with retry-on-lint-failure.
@@ -965,6 +1005,8 @@ async def compile_flat_spec(
             "compile_flat_spec: lint warnings persist after %d attempts; accepting anyway (best-effort)",
             max_retries + 1,
         )
+
+    _cleanup_root_spec_artifacts(project_dir)
 
     # Persist spec.json.
     spec_path.write_text(_serialize_spec(spec) + "\n", encoding="utf-8")

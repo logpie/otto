@@ -95,6 +95,13 @@ def git_status_porcelain(project_dir: Path) -> list[str]:
     return out
 
 
+def _split_checkout_dirty_status(dirty: list[str]) -> tuple[list[str], list[str]]:
+    """Split porcelain status into checkout-blocking tracked dirt and untracked files."""
+    untracked = [line for line in dirty if line.startswith("?? ")]
+    tracked = [line for line in dirty if not line.startswith("?? ")]
+    return tracked, untracked
+
+
 def assert_clean_before_checkout(
     *,
     project_dir: Path,
@@ -103,13 +110,28 @@ def assert_clean_before_checkout(
 ) -> None:
     """Fail before a checkout would carry dirty files across branches."""
     dirty = git_status_porcelain(project_dir)
-    if dirty:
+    tracked_dirty, untracked = _split_checkout_dirty_status(dirty)
+    if tracked_dirty:
         raise MergeWorktreeDirtyError(
             project_dir=project_dir,
             current_branch=git_current_branch(project_dir),
             target_branch=target_branch,
             source_branch=source_branch,
             dirty_status=dirty,
+        )
+    if untracked:
+        preview = "\n".join(f"  {line}" for line in untracked[:20])
+        if len(untracked) > 20:
+            preview += f"\n  ... {len(untracked) - 20} more"
+        logger.warning(
+            "merge worktree has untracked files before checkout; proceeding "
+            "because git preserves unrelated untracked files "
+            "(cwd=%s, current=%s, target=%s, source=%s):\n%s",
+            project_dir,
+            git_current_branch(project_dir),
+            target_branch,
+            source_branch,
+            preview,
         )
 
 

@@ -12,8 +12,10 @@ from otto.spec_compile_flat import (
     INTENT_CLAIMS_MAX,
     StructuredSpecValidationError,
     _PROMPT_TEMPLATE,
+    _cleanup_root_spec_artifacts,
     _read_structured_output_tool_input,
     _run_compile,
+    compile_flat_spec,
     load_flat_spec,
     validate_structured_spec,
 )
@@ -111,6 +113,79 @@ def test_compile_prompt_contains_v6_output_cap_guidance() -> None:
     assert "representative" in _PROMPT_TEMPLATE
     assert "critical flows only" in _PROMPT_TEMPLATE
     assert "note` field" in _PROMPT_TEMPLATE
+
+
+def test_compile_prompt_forbids_spec_file_writes() -> None:
+    assert "ONLY via the StructuredOutput tool" in _PROMPT_TEMPLATE
+    assert "Do NOT use Write" in _PROMPT_TEMPLATE
+    assert "`product-contract.json`" in _PROMPT_TEMPLATE
+    assert "`spec.json`" in _PROMPT_TEMPLATE
+    assert "prefer terser IDs" in _PROMPT_TEMPLATE
+
+
+def test_root_spec_artifact_cleanup_is_allowlisted_and_idempotent(tmp_path: Path) -> None:
+    removed_names = {
+        "product-contract.json",
+        "product_contract.json",
+        "spec.json",
+        "flat-spec.json",
+        "otto_spec.json",
+    }
+    for name in removed_names:
+        (tmp_path / name).write_text('{"unused": true}\n', encoding="utf-8")
+    keep = tmp_path / "legitimate-config.json"
+    keep.write_text('{"keep": true}\n', encoding="utf-8")
+
+    removed = _cleanup_root_spec_artifacts(tmp_path)
+    removed_again = _cleanup_root_spec_artifacts(tmp_path)
+
+    assert {path.name for path in removed} == removed_names
+    assert removed_again == []
+    assert not any((tmp_path / name).exists() for name in removed_names)
+    assert keep.read_text(encoding="utf-8") == '{"keep": true}\n'
+
+
+@pytest.mark.asyncio
+async def test_compile_flat_spec_removes_root_spec_artifacts_after_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_options(_project_dir: Path, _config: dict[str, object], *, agent_type: str | None = None):
+        assert agent_type == "spec"
+        return SimpleNamespace(
+            max_turns=1,
+            provider="claude",
+            model="claude-sonnet-test",
+        )
+
+    async def fake_run_compile(
+        _prompt: str,
+        _options: object,
+        log_dir: Path,
+        project_dir: Path,
+    ) -> str:
+        (project_dir / "product-contract.json").write_text('{"stray": true}\n', encoding="utf-8")
+        (project_dir / "spec.json").write_text('{"stray": true}\n', encoding="utf-8")
+        (project_dir / "legitimate-config.json").write_text('{"keep": true}\n', encoding="utf-8")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "messages.jsonl").write_text("", encoding="utf-8")
+        return json.dumps(asdict(_valid_spec()))
+
+    monkeypatch.setattr("otto.spec_compile_flat.make_agent_options", fake_options)
+    monkeypatch.setattr("otto.spec_compile_flat._run_compile", fake_run_compile)
+
+    session_dir = tmp_path / "otto_logs" / "sessions" / "s1"
+    await compile_flat_spec(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        intent="build an issue tracker",
+        config={"spec_compile_no_cache": True},
+    )
+
+    assert not (tmp_path / "product-contract.json").exists()
+    assert not (tmp_path / "spec.json").exists()
+    assert (tmp_path / "legitimate-config.json").read_text(encoding="utf-8") == '{"keep": true}\n'
+    assert (session_dir / "spec" / "spec.json").is_file()
 
 
 def test_intent_claims_over_cap_warns_without_strict_failure() -> None:
