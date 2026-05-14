@@ -204,3 +204,24 @@ Date: 2026-05-14
 ## Findings during implementation
 
 - No deferred out-of-scope findings for Dispatch 2.
+- Dispatch 3 gate availability: the local `codex-gate` skill was present, but
+  the `mcp__codex__codex` tool was still unavailable in this session. Plan and
+  implementation gates could not be invoked through MCP; validation was local
+  only.
+- Batch 5: the lead prompt now states that the IA JSON block is the CHARTER
+  contract, prose is rationale-only, and total CHARTER should target <= 500
+  lines without trimming contract data. The coherence gate now warns when
+  non-IA CHARTER prose exceeds the 500-line target.
+- Batch 5: child context slicing is implemented in `otto/v5_context_slicer.py`
+  and remains off by default. Opt-in runs can use `--slice-context`; `--full-context`
+  is the explicit escape hatch. Slice decisions are written to each child
+  session's `context_slice.json` with included/excluded entities, claim counts,
+  fallback state, and full artifact paths.
+- Batch 6: the compile-spec-flat prompt now caps `intent_claims` at <= 30,
+  asks for terse IDs, representative journeys, and lower-priority detail in
+  `quality_constraints[].note`. The structured spec validator warns, rather
+  than fails, when `intent_claims` exceeds the cap.
+- Dispatch 3 lint cleanup: repo-wide ruff exposed mechanical pre-existing
+  v5 lint issues outside the batch files. They were fixed without behavioral
+  changes so the requested ruff gate could pass.
+- No deferred out-of-scope findings for Dispatch 3.

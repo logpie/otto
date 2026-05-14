@@ -5,6 +5,20 @@ implementation of `plan-parallel.md`.
 
 ---
 
+## v6 Dispatch 3 — Gate Availability (2026-05-14)
+
+The local `codex-gate` skill was present, but the `mcp__codex__codex` tool was
+not available in this session. Plan Gate and Implementation Gate could not be
+invoked through MCP. Local validation was used instead:
+
+- `uv run --extra dev pytest tests/test_v5_context_slicer.py tests/test_v5_ia_contract.py tests/test_v5_capability_inventory.py tests/test_spec_compile_flat_structured.py tests/test_v5_record_preservation.py -q` — 68 passed
+- `uv run --extra dev pytest tests/ -q -k "v5 or spec_compile or charter" --ignore=tests/integration` — 354 passed, 2261 deselected
+- `uv run ruff check otto scripts tests` — passed
+
+No review findings were produced because the MCP gate was unavailable.
+
+---
+
 ## Phase 1 — Implementation Gate (Codex, 2026-04-19)
 
 ### Round 1 (read-only review of initial Phase 1 implementation)

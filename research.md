@@ -1,5 +1,63 @@
 # Otto redesign — research
 
+## Dispatch 3 v6 perf-quality research (2026-05-14)
+
+Scope: implement Batches 5 and 6 from `plan-v6-perf-quality.md` on the
+`cc-i2p-2` worktree only. Batches 1-4 are already present in this branch.
+
+Relevant current paths:
+
+- `otto/prompts/lead.md` contains the architect CHARTER instructions, the
+  Information Architecture Contract JSON shape, the DAG critical-path rule,
+  and the leaf read-first rules.
+- `otto/v5_capability_inventory.py` parses and validates the CHARTER IA JSON
+  block in `parse_information_architecture_contract()` and
+  `validate_information_architecture_contract()`. The warning-only coherence
+  gate is `check_coherence()`, which is the right place to add a CHARTER line
+  cap warning without post-processing the architect output.
+- `otto/v5_runner.py` copies parent `spec/spec.json` into each child session
+  in `_run_child()`, then calls `_run_lead_with_fallback()`. This is the lowest
+  impact place to generate opt-in per-child slice artifacts before prompt
+  rendering.
+- `otto/lead.py` renders `lead.md` and saves the rendered prompt. It currently
+  has no per-child context placeholder, so slicing needs a small optional
+  prompt note that defaults to full repo-root context.
+- `otto/cli_v5.py` wires `otto v5 run`. Batch 5 needs an explicit
+  `--full-context` escape hatch and an opt-in slicing switch or config value
+  because slicing must remain off by default.
+- `otto/spec_compile_flat.py` owns the compile-spec-flat prompt and structured
+  spec validation. `validate_structured_spec(strict=False)` already returns
+  warnings instead of raising, which matches the requested over-cap warning for
+  legacy or externally loaded specs.
+
+Constraints and decisions:
+
+- No provider routing changes. Claude remains the configured default path.
+- No live runs. Validation stays unit/focused test based.
+- Slicing remains opt-in. Default `otto v5 run` still passes full context.
+- Full IA JSON stays intact in CHARTER slices. Prose may be filtered, but
+  `Agent operating notes` is treated as operational cross-cutting context and
+  preserved conservatively when slicing is enabled.
+- Scope ambiguity falls back to full context and is written to
+  `<child_session>/context_slice.json`.
+- The Codex MCP tool required by `codex-gate` is not available in this session;
+  this matches the Dispatch 2 implementation note in the plan. I will record
+  the unavailable gate in `review.md` and use local tests/ruff for validation.
+
+Open questions resolved by conservative defaults:
+
+- Existing subtask entries do not declare `owned_paths` or `action_ids`. The
+  slicer can consume those fields if present, but for current children it must
+  derive action scope from exact action-id mentions and entity/action words in
+  the task intent. If no confident action/entity match exists, it falls back to
+  full context.
+- Child prompts currently tell agents to read repo-root `CHARTER.md`. The
+  prompt will continue to say that for full-context runs. When slicing is
+  enabled, a rendered note points the child at session-local slice artifacts
+  first, with full artifact paths available as a fallback.
+
+---
+
 This document is the load-bearing source of truth for Otto's redesign
 around Feature / Group / Guardrail. It supersedes any prior
 "V21 detail panel" framing in this branch — the panel is one
