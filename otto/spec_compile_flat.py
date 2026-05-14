@@ -44,6 +44,7 @@ from otto.v5_spec_cache import (
 logger = logging.getLogger("otto.spec_compile_flat")
 
 SCHEMA_VERSION = 3
+INTENT_CLAIMS_MAX = 30
 
 
 class StructuredSpecValidationError(ValueError):
@@ -302,6 +303,14 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
         if strict:
             errors.append("structured spec fields are required for new v5 compilations")
     journeys = [j for j in _as_list(spec_payload.get("behavior_journeys")) if isinstance(j, dict)]
+    intent_claims = [
+        claim for claim in _as_list(spec_payload.get("intent_claims")) if isinstance(claim, dict)
+    ]
+
+    if len(intent_claims) > INTENT_CLAIMS_MAX:
+        warnings.append(
+            f"intent_claims has {len(intent_claims)} entries; target cap is <= {INTENT_CLAIMS_MAX}"
+        )
 
     if len(journeys) > 5:
         errors.append(f"behavior_journeys has {len(journeys)} entries; maximum is 5")
@@ -355,9 +364,7 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
             )
 
     journey_text = "\n".join(str(j.get("description") or "") for j in journeys)
-    for claim in _as_list(spec_payload.get("intent_claims")):
-        if not isinstance(claim, dict):
-            continue
+    for claim in intent_claims:
         claim_id = _obj_id(claim)
         if not claim_id:
             errors.append("intent_claims entry is missing id")
@@ -475,7 +482,7 @@ OUTPUT a single JSON object with this exact shape (no prose, no fences, just JSO
     {{"id": "member", "name": "Member", "gates": ["entity.action"]}}
   ],
   "quality_constraints": [
-    {{"id": "quality.visible_feedback", "text": "All forms have user-visible feedback on submit.", "intent_claim_ids": ["claim.snake_case_short_id"]}}
+    {{"id": "quality.visible_feedback", "text": "All forms have user-visible feedback on submit.", "intent_claim_ids": ["claim.snake_case_short_id"], "note": "Lower-priority detail goes here instead of becoming another matrix-driving row."}}
   ],
   "behavior_journeys": [
     {{
@@ -496,7 +503,9 @@ RULES (HARD — do NOT violate):
    NEVER use: CSS selectors, getByRole, getByText, querySelector, .locator(), data-testid, DOM ids.
 
 2. Emit at most 5 behavior_journeys. They are illustrative samples, not the full contract.
-   Every journey MUST have role "illustrative".
+   Every journey MUST have role "illustrative". Journeys cover representative
+   critical flows only; do NOT enumerate every button, error branch, or feature
+   variant as its own journey.
 
 3. Cover the full intent with structured fields:
    - Each intent_claims[].id MUST appear in at least one core_entities field/action
@@ -512,6 +521,14 @@ RULES (HARD — do NOT violate):
 
 6. IDs are stable, unique, and compact. Primary action IDs should look like
    "issue.create", "transaction.import_csv", "report.export".
+
+7. Keep compile output capped and non-duplicative:
+   - intent_claims cap <= 30. Consolidate repeated or low-priority claims.
+   - Use terse, stable IDs; IDs are identifiers, not prose summaries.
+   - Do not restate the same requirement across product_overview,
+     intent_claims, quality_constraints, and journeys.
+   - Lower-priority quality_constraints detail belongs in a `note` field, not
+     as extra matrix-driving rows.
 """
 
 

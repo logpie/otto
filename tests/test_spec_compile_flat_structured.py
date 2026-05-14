@@ -9,7 +9,9 @@ import pytest
 
 from otto.spec_compile_flat import (
     FlatSpec,
+    INTENT_CLAIMS_MAX,
     StructuredSpecValidationError,
+    _PROMPT_TEMPLATE,
     _read_structured_output_tool_input,
     _run_compile,
     load_flat_spec,
@@ -101,6 +103,29 @@ def _valid_spec() -> FlatSpec:
 
 def test_valid_structured_flat_spec_passes() -> None:
     assert validate_structured_spec(_valid_spec(), strict=True) == []
+
+
+def test_compile_prompt_contains_v6_output_cap_guidance() -> None:
+    assert "intent_claims cap <= 30" in _PROMPT_TEMPLATE
+    assert "terse, stable IDs" in _PROMPT_TEMPLATE
+    assert "representative" in _PROMPT_TEMPLATE
+    assert "critical flows only" in _PROMPT_TEMPLATE
+    assert "note` field" in _PROMPT_TEMPLATE
+
+
+def test_intent_claims_over_cap_warns_without_strict_failure() -> None:
+    spec = _valid_spec()
+    claim_ids = [f"claim.issue_create_{idx}" for idx in range(INTENT_CLAIMS_MAX + 1)]
+    spec.intent_claims = [
+        {"id": claim_id, "text": f"Create issue claim {idx}", "source_line": idx}
+        for idx, claim_id in enumerate(claim_ids, start=1)
+    ]
+    spec.core_entities[0]["fields"][0]["intent_claim_ids"] = claim_ids
+    spec.core_entities[0]["primary_actions"][0]["intent_claim_ids"] = claim_ids
+
+    warnings = validate_structured_spec(spec, strict=True)
+
+    assert any("intent_claims has 31 entries" in warning for warning in warnings)
 
 
 def test_validate_structured_spec_accepts_dict_from_disk() -> None:
