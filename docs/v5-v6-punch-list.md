@@ -188,6 +188,106 @@ full certifier loop's complexity. Cost per repair attempt: ~$0.05 and
 30 seconds. Cost of NOT having it (today): hours of wasted compute
 + user-visible "broken" final state.
 
+### Integration packet + risk handoff (fresh-context plumbing)
+**State:** Integration agent runs with fresh SDK session — no
+inherited conversation from planning phase. Principled (forces
+durable artifacts, external verifier role). But today the runner
+renders only thin child info into the integration prompt:
+`task_id`, `verdict`, truncated intent. Full child verdict
+payloads (partial/skipped items, evidence paths, decisions
+appended, runner check failures) don't reach the integration
+prompt. Result: integration has to rediscover known issues from
+code or misses them.
+
+This is NOT a fresh-context problem per se. It's a missing-
+artifacts problem. Two complementary fixes:
+
+**v6 work:**
+
+1. **`integration_packet.json` (runner-built):** before each
+   integration session, runner writes a structured packet
+   containing:
+   - Full child verdict JSONs (not truncated)
+   - Child session dirs + build branches
+   - Changed-file summaries per child
+   - `intent_coverage.partial/.skipped` from each child
+   - `decisions_appended` aggregated
+   - Runner check matrix failures per child
+   - Preflight results
+   - Applicable journey IDs
+
+   Integration prompt instructs: "first read
+   `<session_dir>/integration_packet.json` — it's your context."
+
+2. **`risk_handoff.md` / `integration_risks.json` (agent-emitted):**
+   distinct from decisions.md. Decisions = settled choices.
+   Risk handoff = unsettled concerns. Each child verdict
+   schema gains:
+   - `known_gaps[]` — what the agent knows is missing
+   - `contract_deltas[]` — assumptions made about
+     siblings' interfaces that should be verified
+   - `integration_checks_to_run[]` — concrete probes
+     integration should run
+
+   Integration agent reads these and runs the suggested
+   checks before declaring pass.
+
+**Why this matters:** today's design assumed `decisions.md` would
+capture cross-cutting context. It doesn't capture *unsettled* state
+— uncertainty + open questions + expected seams. Integration is
+flying blind on exactly the things that most need verification.
+
+Codex's framing: "Decisions capture settled choices. Integration
+also needs unsettled risks."
+
+Sound architecture, weak plumbing. P1 to make fresh-context
+integration trustworthy.
+
+### CRITICAL: verdict.json schema parsing brittleness
+**State:** v6c live run surfaced this. Frontend child
+`v5-cff316946049` ran 25:50, cost $4.58, wrote a valid JSON
+verdict.json — but in a NON-CANONICAL schema:
+
+```json
+{"status": "success", "tests": {"total": 34, ...}, "deliverables": [...]}
+```
+
+Otto expects:
+
+```json
+{"verdict": "pass"|"partial"|"unverified", "journeys": [], "intent_coverage": {...}, ...}
+```
+
+Runner marked the session `unverified` ("Agent did not write
+verdict.json"), discarded the work. 25 min + $4.58 thrown out.
+The error message is also misleading — the file DID exist, just
+not in the expected shape.
+
+**Why this is critical:** the entire runner-verdict pipeline
+(downgrades, status reflection, merge propagation) hinges on
+canonical verdict shape. One schema slip = lost work. Provider
+divergence likely makes this more frequent (Claude vs Codex may
+default to different shapes).
+
+**v6 work (P1 — must fix before v6 considered shipped):**
+1. Forgiving verdict parser: detect known alternative shapes
+   (e.g., agent's `status: "success"`) and map to canonical fields
+   when possible. Keep a strict mode for new agents.
+2. Better error message: distinguish "verdict.json missing"
+   from "verdict.json found but unparseable" (with quoted
+   excerpt + expected schema).
+3. Prompt audit: make verdict schema example more prominent +
+   include a NEGATIVE example showing what's wrong (e.g.,
+   `{"status": "success"}` → REJECTED).
+4. Recovery: when verdict is unparseable and tests appear to
+   have passed (based on agent's reported deliverables), consider
+   issuing a single retry round asking the agent to rewrite
+   verdict in canonical shape. Cap at 1 retry to avoid loops.
+
+This is now the #1 P1 item for any further v6 hardening. Verdict
+shape is the load-bearing contract between agents and the runner;
+brittle parsing means silently-discarded work.
+
 ## Verifier / audit
 
 ### Audit's LLM-judge integration
@@ -403,6 +503,31 @@ child's scope. Big context = slower turns + higher cost.
 (filter `core_entities` and `action_surfaces` by what the child
 owns). Send only the slice plus cross-reference index. Architect
 still sees full content.
+
+### Per-agent-role model tuning (cost/quality optimization)
+**State:** Every agent role in Otto today uses the same model
+(`sonnet` for Claude per `otto/config.py:142`). All phases — spec
+compile, root planner, architect, leaf builds, fix loops,
+integration sessions — run on the same Sonnet model. Otto v5
+supports per-role CLI overrides (`--build-model`, `--fix-model`,
+`--certifier-model`) but defaults treat all roles uniformly.
+
+**v6 work (not critical, file for later iteration):**
+- Audit which roles would benefit from a stronger model (e.g.,
+  integration agent + final verifier might benefit from Opus —
+  they're load-bearing for correctness).
+- Audit which roles would tolerate a weaker model (e.g.,
+  scaffolding-only architect, syntax-fix-only leaf retries —
+  could use Haiku to cut cost).
+- Build a per-role model matrix as a config preset (e.g.,
+  "balanced" / "quality" / "cheap" profile in otto.yaml).
+- Validate empirically: same intent across profiles, measure
+  cost/wall/quality.
+
+**Why deferred:** Sonnet uniformly works. Not a correctness gap.
+Pure cost/quality optimization. Revisit after the structural
+fixes settle and we have stable baselines to measure variance
+against.
 
 ### Architect CHARTER output size cap
 **State:** sc4 CHARTER was 1138 lines; sc6 was 902 lines. Both

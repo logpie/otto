@@ -45,6 +45,7 @@ LeadKind = Literal["plan_or_inline", "integration"]
 LeadVerdict = Literal[
     "pass", "partial", "unverified", "merge_blocked", "pending_children", "catastrophic"
 ]
+_CANONICAL_VERDICTS = ("pass", "partial", "unverified", "merge_blocked")
 
 
 @dataclass
@@ -216,6 +217,15 @@ async def run_lead(
         # verdict — its terminal state is pending_children until parent
         # integration runs.
         result.verify_called, result.verify_result = _read_agent_verdict(session_dir)
+        if not result.verify_called and _malformed_verdict_context(session_dir) is not None:
+            retry_cost = await _request_canonical_verdict_rewrite(
+                session_dir=session_dir,
+                options=options,
+                project_dir=project_dir,
+                timeout_s=int(config.get("run_budget_seconds") or 3600),
+            )
+            result.cost_usd += retry_cost
+            result.verify_called, result.verify_result = _read_agent_verdict(session_dir)
 
         is_integration = kind == "integration"
         if not is_integration and result.decomposition == "emit" and result.emitted_subtask_ids:
@@ -479,8 +489,10 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
     if candidate.exists():
         try:
             payload = json.loads(candidate.read_text(encoding="utf-8"))
-            if isinstance(payload, dict) and payload.get("verdict"):
-                return True, payload
+            canonical = _canonicalize_verdict_payload(payload)
+            if canonical is not None:
+                _rewrite_canonical_verdict(candidate, canonical)
+                return True, canonical
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -492,18 +504,20 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
     if misplaced is not None:
         try:
             payload = json.loads(misplaced.read_text(encoding="utf-8"))
-            if isinstance(payload, dict) and payload.get("verdict"):
+            canonical = _canonicalize_verdict_payload(payload)
+            if canonical is not None:
                 logger.warning(
                     "agent wrote verdict.json to %s instead of %s — recovering",
                     misplaced, candidate,
                 )
                 try:
                     candidate.write_text(
-                        misplaced.read_text(encoding="utf-8"), encoding="utf-8"
+                        json.dumps(canonical, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
                     )
                 except OSError:
                     pass
-                return True, payload
+                return True, canonical
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -512,8 +526,9 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
     if legacy.exists():
         try:
             payload = json.loads(legacy.read_text(encoding="utf-8"))
-            if isinstance(payload, dict) and payload.get("verdict"):
-                return True, payload
+            canonical = _canonicalize_verdict_payload(payload)
+            if canonical is not None:
+                return True, canonical
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -522,15 +537,196 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
     # object with the expected shape in the last assistant turn.
     rescued = _rescue_verdict_from_messages(session_dir)
     if rescued is not None:
+        canonical = _canonicalize_verdict_payload(rescued)
+        if canonical is None:
+            return False, None
         try:
             (session_dir / "verdict.json").write_text(
-                json.dumps(rescued, indent=2) + "\n", encoding="utf-8",
+                json.dumps(canonical, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
             )
         except OSError:
             pass
-        return True, rescued
+        return True, canonical
 
     return False, None
+
+
+async def _read_agent_verdict_with_rewrite(
+    session_dir: Path,
+    *,
+    rewrite_once: Any,
+) -> tuple[bool, dict[str, Any] | None, bool]:
+    """Read verdict, invoking one canonical rewrite callback if needed."""
+    called, payload = _read_agent_verdict(session_dir)
+    if called:
+        return called, payload, False
+    context = _malformed_verdict_context(session_dir)
+    if context is None:
+        return False, None, False
+    result = rewrite_once(context)
+    if hasattr(result, "__await__"):
+        await result
+    called, payload = _read_agent_verdict(session_dir)
+    return called, payload, True
+
+
+async def _request_canonical_verdict_rewrite(
+    *,
+    session_dir: Path,
+    options: Any,
+    project_dir: Path,
+    timeout_s: int,
+) -> float:
+    context = _malformed_verdict_context(session_dir)
+    if context is None:
+        return 0.0
+    prompt = (
+        "Otto could not parse your verdict.json because it was not in the "
+        "canonical schema. Rewrite only the verdict file at this exact path:\n\n"
+        f"{session_dir / 'verdict.json'}\n\n"
+        "Use this JSON shape:\n"
+        '{"verdict":"pass|partial|unverified|merge_blocked","summary":"...",'
+        '"journeys":[],"evidence":[]}\n\n'
+        "Original verdict.json content:\n"
+        "```json\n"
+        f"{context['original_text']}\n"
+        "```\n\n"
+        "Do not edit product code. Do not run a broad repair. Write the "
+        "canonical verdict and stop."
+    )
+    try:
+        from otto.agent import run_agent_with_timeout
+
+        _text, cost, _agent_session_id, _breakdown = await run_agent_with_timeout(
+            prompt,
+            options,
+            log_dir=session_dir / "lead" / "verdict-rewrite-01",
+            phase_name="VERDICT_REWRITE",
+            phase_label="verdict-rewrite",
+            timeout=max(30, min(timeout_s, 300)),
+            project_dir=project_dir,
+        )
+        return float(cost or 0.0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("canonical verdict rewrite retry failed: %s", exc)
+        return 0.0
+
+
+def _rewrite_canonical_verdict(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        existing = None
+    if existing == payload:
+        return
+    try:
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _canonicalize_verdict_payload(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    verdict = str(payload.get("verdict") or "").strip().lower()
+    if verdict in _CANONICAL_VERDICTS:
+        canonical = dict(payload)
+        canonical["verdict"] = verdict
+        return canonical
+
+    status = str(payload.get("status") or payload.get("result") or "").strip().lower()
+    if status in {"success", "succeeded", "pass", "passed", "ok", "done"} and _tests_indicate_pass(payload):
+        canonical = dict(payload)
+        canonical["verdict"] = "pass"
+        canonical.setdefault("summary", _summary_from_noncanonical(payload))
+        canonical.setdefault("journeys", [])
+        canonical.setdefault("evidence", list(payload.get("deliverables") or []))
+        canonical["canonicalized_from"] = {
+            "status": payload.get("status"),
+            "keys": sorted(str(key) for key in payload.keys()),
+        }
+        return canonical
+    if status in {"partial", "warning", "warn"}:
+        canonical = dict(payload)
+        canonical["verdict"] = "partial"
+        canonical.setdefault("summary", _summary_from_noncanonical(payload))
+        canonical.setdefault("journeys", [])
+        canonical.setdefault("evidence", list(payload.get("deliverables") or []))
+        canonical["canonicalized_from"] = {
+            "status": payload.get("status"),
+            "keys": sorted(str(key) for key in payload.keys()),
+        }
+        return canonical
+    return None
+
+
+def _summary_from_noncanonical(payload: dict[str, Any]) -> str:
+    summary = str(payload.get("summary") or payload.get("message") or "").strip()
+    return summary or "Non-canonical verdict was mapped to canonical Otto schema."
+
+
+def _tests_indicate_pass(payload: dict[str, Any]) -> bool:
+    tests = payload.get("tests")
+    if tests in (None, "", [], {}):
+        return bool(payload.get("deliverables") or payload.get("evidence"))
+    return _value_indicates_pass(tests)
+
+
+def _value_indicates_pass(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"pass", "passed", "success", "succeeded", "ok"}:
+            return True
+        if lowered in {"fail", "failed", "failure", "error", "errored", "timeout"}:
+            return False
+        return False
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, list):
+        return bool(value) and all(_value_indicates_pass(item) for item in value)
+    if isinstance(value, dict):
+        if "passed" in value:
+            return _value_indicates_pass(value.get("passed"))
+        if "status" in value:
+            return _value_indicates_pass(value.get("status"))
+        if "exit_code" in value:
+            return _value_indicates_pass(value.get("exit_code"))
+        if "returncode" in value:
+            return _value_indicates_pass(value.get("returncode"))
+        return bool(value) and all(_value_indicates_pass(item) for item in value.values())
+    return False
+
+
+def _malformed_verdict_context(session_dir: Path) -> dict[str, Any] | None:
+    candidates = [session_dir / "verdict.json"]
+    misplaced = _find_misplaced_verdict(session_dir)
+    if misplaced is not None and misplaced not in candidates:
+        candidates.append(misplaced)
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            original_text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            parsed = json.loads(original_text)
+        except json.JSONDecodeError as exc:
+            return {
+                "path": str(path),
+                "original_text": original_text,
+                "error": f"json_decode_error:{exc}",
+            }
+        if _canonicalize_verdict_payload(parsed) is None:
+            return {
+                "path": str(path),
+                "original_text": original_text,
+                "error": "noncanonical_shape",
+            }
+    return None
 
 
 def _find_misplaced_verdict(session_dir: Path) -> Path | None:

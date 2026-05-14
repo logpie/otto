@@ -58,6 +58,7 @@ from otto.build import (
 )
 from otto.checks import Evidence, run_checks
 from otto.observability import iso_timestamp
+from otto.safe_slug import safe_slug
 from otto.setup_gitignore import non_product_paths_from_porcelain
 from otto.spec_compile import SPEC_FILENAME, Group, Spec
 from otto.spec_state import aborted_group_ids, emit
@@ -721,6 +722,11 @@ def _missing_cross_group_check_evidence(
     return evidence
 
 
+def _merge_raw_log_dir(session_dir: Path, group_id: str) -> Path:
+    """Runner-owned raw merge log directory for one group/component."""
+    return session_dir / "merge" / safe_slug(group_id, max_len=48)
+
+
 def _path_matches_owned_path(path_ref: str, owned_path: str) -> bool:
     ref = path_ref.strip().lstrip("./")
     owned = owned_path.strip().lstrip("./")
@@ -764,7 +770,7 @@ async def _process_candidate(
     progress_repair_extensions_used = 0
     repair_session_id = ""
     repair_scope_baseline: dict[str, tuple[bool, str]] | None = None
-    raw_log_dir = session_dir / "merge" / group_obj.id
+    raw_log_dir = _merge_raw_log_dir(session_dir, group_obj.id)
     merge_worktree = candidate.merge_worktree or candidate.worktree
     shared_merge_and_repair_worktree = _same_worktree(
         candidate.worktree,

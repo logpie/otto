@@ -48,6 +48,12 @@ from otto.v5_preflight import (
     run_preflight,
     smoke_clean_deploy,
 )
+from otto.v5_preflight_repair import (
+    AgentRepairRequest,
+    AgentRepairResult,
+    PreflightRepairController,
+    is_repairable_preflight_issue,
+)
 from otto.queue.subtask import (
     read_pending,
     take_ready,
@@ -475,36 +481,53 @@ async def run_v5_pipeline(
                 context="root_integration_start",
                 on_event=on_event,
             )
-            preflight_result = _run_integration_smoke_preflight(
+            preflight_result = await _run_integration_smoke_preflight_with_repair(
+                project_dir=project_dir,
                 worktree_path=project_dir,
                 task_id=ROOT_TASK_ID,
                 phase="pre_agent",
-                on_event=on_event,
-            )
-            integration_result = await run_lead(
-                task_id=ROOT_TASK_ID,
-                intent=intent,
-                project_dir=project_dir,
                 session_dir=integration_session_dir,
-                integration_branch=None,  # root integration ultimately merges to main
                 config=config,
-                kind="integration",
-                child_summaries=child_summaries,
-                preflight_result=preflight_result,
-            )
-            _commit_integration_agent_changes(
-                project_dir=project_dir,
-                task_id=ROOT_TASK_ID,
-                worktree_path=project_dir,
-                result=integration_result,
+                integration_branch=None,
                 on_event=on_event,
             )
-            post_preflight_result = _run_integration_smoke_preflight(
-                worktree_path=project_dir,
-                task_id=ROOT_TASK_ID,
-                phase="post_agent",
-                on_event=on_event,
-            )
+            if _preflight_repair_escalated(preflight_result):
+                integration_result = _preflight_blocked_result(
+                    task_id=ROOT_TASK_ID,
+                    preflight_result=preflight_result,
+                )
+            else:
+                integration_result = await run_lead(
+                    task_id=ROOT_TASK_ID,
+                    intent=intent,
+                    project_dir=project_dir,
+                    session_dir=integration_session_dir,
+                    integration_branch=None,  # root integration ultimately merges to main
+                    config=config,
+                    kind="integration",
+                    child_summaries=child_summaries,
+                    preflight_result=preflight_result,
+                )
+                _commit_integration_agent_changes(
+                    project_dir=project_dir,
+                    task_id=ROOT_TASK_ID,
+                    worktree_path=project_dir,
+                    result=integration_result,
+                    on_event=on_event,
+                )
+            if _preflight_repair_escalated(preflight_result):
+                post_preflight_result = preflight_result
+            else:
+                post_preflight_result = await _run_integration_smoke_preflight_with_repair(
+                    project_dir=project_dir,
+                    worktree_path=project_dir,
+                    task_id=ROOT_TASK_ID,
+                    phase="post_agent",
+                    session_dir=integration_session_dir,
+                    config=config,
+                    integration_branch=None,
+                    on_event=on_event,
+                )
             if integration_result.verify_result is None:
                 integration_result.verify_result = {}
             if isinstance(integration_result.verify_result, dict):
@@ -1439,6 +1462,198 @@ def _integration_smoke_blocks(payload: dict[str, Any]) -> bool:
     )
 
 
+def _preflight_repair_escalated(payload: dict[str, Any]) -> bool:
+    repair = payload.get("repair")
+    return isinstance(repair, dict) and repair.get("terminal_state") == "escalated"
+
+
+def _preflight_blocked_result(
+    *,
+    task_id: str,
+    preflight_result: dict[str, Any],
+) -> LeadResult:
+    reason = (
+        "Integration preflight repair escalated before agent dispatch: "
+        + "; ".join(
+            str(issue.get("message") or issue.get("kind"))
+            for issue in preflight_result.get("issues", [])
+            if isinstance(issue, dict)
+            and issue.get("severity") in ("error", "block")
+        )
+    )
+    return LeadResult(
+        task_id=task_id,
+        verdict="merge_blocked",
+        verify_called=True,
+        verify_result={
+            "verdict": "merge_blocked",
+            "summary": reason,
+            "pre_integration_preflight": preflight_result,
+        },
+        failure_reason=reason,
+    )
+
+
+async def _run_integration_smoke_preflight_with_repair(
+    *,
+    project_dir: Path,
+    worktree_path: Path,
+    task_id: str,
+    phase: str,
+    session_dir: Path,
+    config: dict[str, Any],
+    integration_branch: str | None,
+    on_event: Any = None,
+) -> dict[str, Any]:
+    """Run integration smoke preflight with bounded deterministic repair."""
+
+    def run_once() -> dict[str, Any]:
+        return _run_integration_smoke_preflight(
+            worktree_path=worktree_path,
+            task_id=task_id,
+            phase=phase,
+            on_event=on_event,
+        )
+
+    first = run_once()
+    if not _integration_smoke_blocks(first):
+        return first
+    first_issue = _first_preflight_blocking_issue(first)
+    if first_issue is None or not is_repairable_preflight_issue(first_issue):
+        return first
+
+    controller = PreflightRepairController(
+        session_dir=session_dir,
+        worktree_path=worktree_path,
+        original_budget_usd=_preflight_original_budget_usd(config),
+        agent_repair=lambda request: _run_preflight_repair_agent(
+            request=request,
+            task_id=task_id,
+            project_dir=project_dir,
+            config=config,
+            integration_branch=integration_branch,
+            on_event=on_event,
+        ),
+    )
+    result = await controller.repair_until_clean(run_once, initial_payload=first)
+    payload = result.preflight_payload
+    payload["repair"] = result.to_jsonable()
+    _emit(on_event, {
+        "event": "preflight_repair_done",
+        "task_id": task_id,
+        "phase": phase,
+        "terminal_state": result.terminal_state,
+        "attempts": len(result.attempts),
+        "log_path": str(controller.log_path),
+    })
+    return payload
+
+
+def _first_preflight_blocking_issue(payload: dict[str, Any]) -> dict[str, Any] | None:
+    for issue in payload.get("issues") or []:
+        if isinstance(issue, dict) and issue.get("severity") in ("error", "block"):
+            return issue
+    return None
+
+
+def _preflight_original_budget_usd(config: dict[str, Any]) -> float:
+    budgets = config.get("budgets") if isinstance(config, dict) else None
+    if isinstance(budgets, dict):
+        for key in ("total_cost_usd", "tree_budget_usd", "max_cost_usd"):
+            try:
+                value = float(budgets.get(key) or 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0:
+                return value
+    for key in ("tree_budget_usd", "max_cost_usd", "budget_usd"):
+        try:
+            value = float(config.get(key) or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            value = 0.0
+        if value > 0:
+            return value
+    return 25.0
+
+
+async def _run_preflight_repair_agent(
+    *,
+    request: AgentRepairRequest,
+    task_id: str,
+    project_dir: Path,
+    config: dict[str, Any],
+    integration_branch: str | None,
+    on_event: Any = None,
+) -> AgentRepairResult:
+    """Dispatch a focused build Lead to repair a classified preflight failure."""
+    from otto.safe_slug import safe_slug
+
+    repair_slug = safe_slug(
+        f"{task_id}-preflight-{request.failure_kind}-{request.attempt_index}",
+        max_len=48,
+    )
+    repair_session_dir = request.session_dir / "preflight-repair" / repair_slug
+    repair_session_dir.mkdir(parents=True, exist_ok=True)
+    link_path = repair_session_dir / "worktree"
+    if not link_path.exists():
+        try:
+            link_path.symlink_to(request.worktree_path)
+        except OSError:
+            pass
+
+    scope_text = (
+        "\n".join(f"- {path}" for path in request.workspace_paths)
+        if request.workspace_paths
+        else "- No precise file path was detected; inspect only the failing surface."
+    )
+    intent = (
+        "PRE-FLIGHT REPAIR ONLY.\n\n"
+        f"Failure kind: {request.failure_kind}\n"
+        f"Failure message: {request.issue.get('message')}\n\n"
+        "Allowed workspace paths:\n"
+        f"{scope_text}\n\n"
+        f"{request.instruction}\n\n"
+        "Make the smallest repair needed for this preflight class. Do not "
+        "change provider routing, product scope, or unrelated files. Run the "
+        "narrowest relevant check, then write a canonical verdict.json."
+    )
+    _emit(on_event, {
+        "event": "preflight_repair_agent_start",
+        "task_id": task_id,
+        "failure_kind": request.failure_kind,
+        "workspace_paths": list(request.workspace_paths),
+        "session_dir": str(repair_session_dir),
+    })
+    result = await _run_lead_with_fallback(
+        task_id=repair_slug,
+        intent=intent,
+        project_dir=project_dir,
+        session_dir=repair_session_dir,
+        integration_branch=integration_branch,
+        config=config,
+        kind="plan_or_inline",
+        context_slice_note=(
+            "This is a focused runner preflight repair. Stay within the "
+            "listed workspace paths unless the failure message proves a "
+            "directly adjacent file is required."
+        ),
+        on_event=on_event,
+    )
+    ok = result.verdict != "catastrophic"
+    _emit(on_event, {
+        "event": "preflight_repair_agent_done",
+        "task_id": task_id,
+        "failure_kind": request.failure_kind,
+        "verdict": result.verdict,
+        "cost_usd": result.cost_usd,
+    })
+    return AgentRepairResult(
+        ok=ok,
+        cost_usd=result.cost_usd,
+        summary=result.failure_reason or result.final_text[:300] or result.verdict,
+    )
+
+
 async def _run_integration(
     *,
     project_dir: Path,
@@ -1548,38 +1763,55 @@ async def _run_integration(
 
     parent_integration_branch = own_integration_branch
     integration_cwd = integration_worktree or project_dir
-    preflight_result = _run_integration_smoke_preflight(
+    preflight_result = await _run_integration_smoke_preflight_with_repair(
+        project_dir=project_dir,
         worktree_path=integration_cwd,
         task_id=task_id,
         phase="pre_agent",
+        session_dir=integration_session_dir,
+        config=config,
+        integration_branch=parent_integration_branch,
         on_event=on_event,
     )
 
     _emit(on_event, {"event": "integration_start", "task_id": task_id})
-    result = await run_lead(
-        task_id=task_id,
-        intent=intent,
-        project_dir=project_dir,
-        session_dir=integration_session_dir,
-        integration_branch=parent_integration_branch,
-        config=config,
-        kind="integration",
-        child_summaries=summaries,
-        preflight_result=preflight_result,
-    )
-    _commit_integration_agent_changes(
-        project_dir=project_dir,
-        task_id=task_id,
-        worktree_path=integration_cwd,
-        result=result,
-        on_event=on_event,
-    )
-    post_preflight_result = _run_integration_smoke_preflight(
-        worktree_path=integration_cwd,
-        task_id=task_id,
-        phase="post_agent",
-        on_event=on_event,
-    )
+    if _preflight_repair_escalated(preflight_result):
+        result = _preflight_blocked_result(
+            task_id=task_id,
+            preflight_result=preflight_result,
+        )
+    else:
+        result = await run_lead(
+            task_id=task_id,
+            intent=intent,
+            project_dir=project_dir,
+            session_dir=integration_session_dir,
+            integration_branch=parent_integration_branch,
+            config=config,
+            kind="integration",
+            child_summaries=summaries,
+            preflight_result=preflight_result,
+        )
+        _commit_integration_agent_changes(
+            project_dir=project_dir,
+            task_id=task_id,
+            worktree_path=integration_cwd,
+            result=result,
+            on_event=on_event,
+        )
+    if _preflight_repair_escalated(preflight_result):
+        post_preflight_result = preflight_result
+    else:
+        post_preflight_result = await _run_integration_smoke_preflight_with_repair(
+            project_dir=project_dir,
+            worktree_path=integration_cwd,
+            task_id=task_id,
+            phase="post_agent",
+            session_dir=integration_session_dir,
+            config=config,
+            integration_branch=parent_integration_branch,
+            on_event=on_event,
+        )
     if result.verify_result is None:
         result.verify_result = {}
     if isinstance(result.verify_result, dict):
