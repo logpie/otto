@@ -97,12 +97,13 @@ async def run_lead(
             scoped session artifacts. Empty means use full repo context.
     """
     started = time.monotonic()
-    record_task(
-        project_dir,
-        task_id=task_id,
-        intent=intent,
-        integration_branch=integration_branch,
-    )
+    record_task_kwargs: dict[str, Any] = {
+        "task_id": task_id,
+        "intent": intent,
+    }
+    if kind == "plan_or_inline":
+        record_task_kwargs["integration_branch"] = integration_branch
+    record_task(project_dir, **record_task_kwargs)
 
     result = LeadResult(task_id=task_id)
     failure_reason = ""

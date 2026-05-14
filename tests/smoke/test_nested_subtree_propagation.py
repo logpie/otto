@@ -17,9 +17,9 @@ import pytest
 
 from otto.lead import LeadResult
 from otto.queue.subtask import v5_pending_path
-from otto.queue.task_graph import record_task, set_decomposition, set_verdict
+from otto.queue.task_graph import get_task, record_task, set_decomposition, set_verdict
 from otto.v5_branching import child_branch_name, integration_branch_name
-from otto.v5_runner import ROOT_TASK_ID, _process_children
+from otto.v5_runner import ROOT_TASK_ID, _process_children, _propagate_subtree_integration
 
 from .conftest import git
 
@@ -93,6 +93,12 @@ class FakeLead:
     async def __call__(self, **kwargs: Any) -> LeadResult:
         task_id = kwargs["task_id"]
         if kwargs.get("kind") == "integration":
+            record_task(
+                self.repo,
+                task_id=task_id,
+                intent=kwargs["intent"],
+                integration_branch=kwargs["integration_branch"],
+            )
             marker = _worktree(kwargs["project_dir"], kwargs["session_dir"]) / "docs" / f"integration-{task_id}.md"
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(f"integration marker for {task_id}\n", encoding="utf-8")
@@ -139,8 +145,32 @@ def _assert_main_has(repo: Path, *, task_id: str, rel_path: str, content: str) -
     assert git(repo, "merge-base", "--is-ancestor", file_commit, "main").returncode == 0
 
 
+def test_subtree_propagation_self_merge_marks_merge_blocked(tmp_path: Path) -> None:
+    record_task(
+        tmp_path,
+        task_id="v5-loop",
+        intent="malformed parent loop",
+        parent_task_id="v5-loop",
+        integration_branch=integration_branch_name("v5-loop"),
+    )
+
+    ok, detail, source, target = _propagate_subtree_integration(
+        project_dir=tmp_path,
+        task_id="v5-loop",
+    )
+
+    assert ok is False
+    assert source == target == integration_branch_name("v5-loop")
+    assert "self-merge" in detail
+    assert (get_task(tmp_path, "v5-loop") or {}).get("verdict") == "merge_blocked"
+
+
 @pytest.mark.asyncio
 async def test_root_frontend_grandchildren_reach_main(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """This test reproduces the v6c silent self-merge no-op bug.
+
+    Without the fix, target collapses to source and the test fails.
+    """
     record_task(git_repo, task_id=ROOT_TASK_ID, intent="root", parent_task_id=None)
     set_decomposition(git_repo, ROOT_TASK_ID, "emit")
     set_verdict(git_repo, ROOT_TASK_ID, "pending_children")

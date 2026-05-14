@@ -307,6 +307,42 @@ def _commit_integration_agent_changes(
         result.verdict = "merge_blocked"
 
 
+def _propagate_subtree_integration(
+    *,
+    project_dir: Path,
+    task_id: str,
+) -> tuple[bool, str, str, str]:
+    """Merge a decomposed child's integration branch into its parent target."""
+    from otto.v5_branching import integration_branch_name, merge_branch_into
+
+    child_entry = get_task(project_dir, task_id) or {}
+    parent_id = child_entry.get("parent_task_id") or ROOT_TASK_ID
+    target = "main" if parent_id == ROOT_TASK_ID else integration_branch_name(parent_id)
+    source = integration_branch_name(task_id)
+    if source == target:
+        detail = (
+            "refusing subtree integration self-merge: source and target are both "
+            f"{source!r} for task {task_id!r} with parent_task_id={parent_id!r}; "
+            "propagation would otherwise be a silent no-op"
+        )
+        set_verdict(project_dir, task_id, "merge_blocked")
+        return False, detail, source, target
+
+    try:
+        ok, detail = merge_branch_into(
+            project_dir=project_dir,
+            source_branch=source,
+            target_branch=target,
+        )
+    except MergeWorktreeDirtyError as exc:
+        detail = str(exc)
+        set_verdict(project_dir, task_id, "merge_blocked")
+        return False, detail, source, target
+    if not ok:
+        set_verdict(project_dir, task_id, "merge_blocked")
+    return ok, detail, source, target
+
+
 async def run_v5_pipeline(
     *,
     project_dir: Path,
@@ -988,17 +1024,9 @@ async def _process_children(
                         # because the web subtree never propagated.
                         if integ_result.verdict in ("pass", "partial", "unverified"):
                             try:
-                                from otto.v5_branching import (
-                                    integration_branch_name,
-                                    merge_branch_into,
-                                )
-                                child_entry = get_task(project_dir, tid) or {}
-                                target = child_entry.get("integration_branch") or "main"
-                                source = integration_branch_name(tid)
-                                ok, detail = merge_branch_into(
+                                ok, detail, source, target = _propagate_subtree_integration(
                                     project_dir=project_dir,
-                                    source_branch=source,
-                                    target_branch=target,
+                                    task_id=tid,
                                 )
                                 _emit(on_event, {
                                     "event": "subtree_propagated" if ok else "subtree_propagation_blocked",
@@ -1012,25 +1040,6 @@ async def _process_children(
                                         "subtree integration propagation failed for %s: %s",
                                         tid, detail,
                                     )
-                                    # Reflect the failure in the verdict so
-                                    # the aggregate doesn't claim pass
-                                    # while the work isn't on the parent
-                                    # branch.
-                                    set_verdict(project_dir, tid, "merge_blocked")
-                            except MergeWorktreeDirtyError as exc:
-                                detail = str(exc)
-                                _emit(on_event, {
-                                    "event": "subtree_propagation_blocked",
-                                    "task_id": tid,
-                                    "source": source,
-                                    "target": target,
-                                    "detail": detail,
-                                })
-                                logger.warning(
-                                    "subtree integration propagation dirty for %s: %s",
-                                    tid, detail,
-                                )
-                                set_verdict(project_dir, tid, "merge_blocked")
                             except Exception as exc:  # noqa: BLE001
                                 logger.warning(
                                     "subtree propagation crashed for %s: %s",
