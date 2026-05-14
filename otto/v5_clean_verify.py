@@ -55,6 +55,7 @@ FailureKind = Literal[
     "build_timeout",
     "py_compile_failed",
     "py_compile_timeout",
+    "script_valid_failed",
     "no_start_sh",
     "port_busy",
     "start_failed",
@@ -275,21 +276,254 @@ def _scaffold_verify(
     return True, None, None, steps
 
 
-def _parse_declared_ports(project_dir: Path) -> list[int]:
-    """Best-effort port extraction from CHARTER.md."""
-    declared: list[int] = []
+def _parse_declared_port_envs(project_dir: Path) -> list[tuple[str | None, int]]:
+    """Best-effort port extraction with optional env var names."""
+    declared: list[tuple[str | None, int]] = []
     charter = project_dir / "CHARTER.md"
-    if not charter.exists():
-        return declared
+    if charter.exists():
+        try:
+            text = charter.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        for m in re.finditer(r"(?:127\.0\.0\.1|localhost):(\d{4,5})", text):
+            declared.append((None, int(m.group(1))))
+        for m in re.finditer(r"\b(?:port|Port|PORT)\s*[:=]?\s*(\d{4,5})\b", text):
+            declared.append((None, int(m.group(1))))
+        for line in text.splitlines():
+            if "|" not in line:
+                continue
+            env_match = re.search(r"`?([A-Z][A-Z0-9_]*PORT)`?", line)
+            port_match = re.search(r"`?(\d{4,5})`?", line)
+            if env_match and port_match:
+                declared.append((env_match.group(1), int(port_match.group(1))))
+
+    start_sh = project_dir / "start.sh"
+    if start_sh.exists():
+        try:
+            script = start_sh.read_text(encoding="utf-8")
+        except OSError:
+            script = ""
+        for m in re.finditer(
+            r"\b([A-Z][A-Z0-9_]*PORT)\s*=\s*[\"']?\$\{\1:-(\d{4,5})\}",
+            script,
+        ):
+            declared.append((m.group(1), int(m.group(2))))
+        for m in re.finditer(
+            r"\b([A-Z][A-Z0-9_]*PORT)\s*=\s*[\"']?(\d{4,5})\b",
+            script,
+        ):
+            declared.append((m.group(1), int(m.group(2))))
+
+    seen: set[tuple[str | None, int]] = set()
+    unique: list[tuple[str | None, int]] = []
+    for env_name, port in declared:
+        item = (env_name, port)
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return sorted(unique, key=lambda item: (item[1], item[0] or ""))
+
+
+def _parse_declared_ports(project_dir: Path) -> list[int]:
+    """Best-effort port extraction from CHARTER.md and start.sh."""
+    return sorted({port for _env, port in _parse_declared_port_envs(project_dir)})
+
+
+def _root_shell_scripts(temp_root: Path) -> list[Path]:
+    return sorted(p for p in temp_root.glob("*.sh") if p.is_file())
+
+
+def _host_bash_major(bash: str) -> int | None:
     try:
-        text = charter.read_text(encoding="utf-8")
+        proc = subprocess.run(
+            [bash, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    first = (proc.stdout or proc.stderr or "").splitlines()
+    if not first:
+        return None
+    match = re.search(r"version\s+(\d+)\.", first[0])
+    return int(match.group(1)) if match else None
+
+
+def _uses_bash4_case_expansion(text: str) -> bool:
+    return bool(re.search(r"\$\{[^}\n]+(?:\^\^|,,)[^}\n]*\}", text))
+
+
+def _bind_local_port(port: int) -> socket.socket | None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+        sock.listen(1)
+        return sock
     except OSError:
-        return declared
-    for m in re.finditer(r"(?:127\.0\.0\.1|localhost):(\d{4,5})", text):
-        declared.append(int(m.group(1)))
-    for m in re.finditer(r"\b(?:port|Port|PORT)\s*[:=]?\s*(\d{4,5})\b", text):
-        declared.append(int(m.group(1)))
-    return sorted(set(declared))
+        sock.close()
+        return None
+
+
+def _run_start_sh_port_conflict_probe(
+    temp_root: Path,
+    bash: str,
+    timeout_s: int,
+    log: Any,
+) -> tuple[bool, str | None, list[str]]:
+    steps: list[str] = []
+    start_sh = temp_root / "start.sh"
+    if not start_sh.exists():
+        return True, None, steps
+    try:
+        script = start_sh.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, f"start.sh could not be read: {exc}", steps
+    if "PORT_CONFLICT" not in script and "lsof" not in script:
+        return True, None, steps
+
+    candidates = _parse_declared_port_envs(temp_root)
+    if not candidates:
+        log("script_valid: port-conflict probe skipped; no declared port")
+        return True, None, steps
+
+    for env_name, port in candidates:
+        listener = _bind_local_port(port)
+        if listener is None:
+            continue
+        try:
+            env = dict(os.environ)
+            if env_name:
+                env[env_name] = str(port)
+            steps.append("script_valid:port_conflict_probe")
+            log(f"script_valid: probing start.sh port-conflict branch on {port}")
+            proc = subprocess.Popen(  # noqa: S603 - local generated script
+                [bash, "start.sh"],
+                cwd=temp_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                start_new_session=True,
+            )
+            try:
+                out, _ = proc.communicate(timeout=max(1, timeout_s))
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+                return (
+                    False,
+                    "start.sh did not exit through its PORT_CONFLICT branch "
+                    f"within {timeout_s}s; the validator refused to let it "
+                    "continue into a full service launch.",
+                    steps,
+                )
+            output = out or ""
+            lowered = output.lower()
+            shell_errors = (
+                "bad substitution",
+                "command not found",
+                "syntax error",
+                "unbound variable",
+                "numeric argument required",
+            )
+            if any(err in lowered for err in shell_errors):
+                return (
+                    False,
+                    "start.sh PORT_CONFLICT branch hit a shell/runtime error. "
+                    f"Output (truncated): {output[-800:]!r}",
+                    steps,
+                )
+            if proc.returncode != 0 and "PORT_CONFLICT" in output:
+                return True, None, steps
+            return (
+                False,
+                "start.sh did not report PORT_CONFLICT cleanly when "
+                f"declared port {port} was busy. Exit={proc.returncode}. "
+                f"Output (truncated): {output[-800:]!r}",
+                steps,
+            )
+        finally:
+            listener.close()
+
+    log("script_valid: port-conflict probe skipped; declared ports already busy")
+    return True, None, steps
+
+
+def _script_valid(
+    temp_root: Path,
+    timeout_s: int,
+    log: Any,
+) -> tuple[bool, FailureKind | None, str | None, list[str]]:
+    """Validate root shell scripts without launching the full product."""
+    steps: list[str] = []
+    scripts = _root_shell_scripts(temp_root)
+    if not scripts:
+        return True, None, None, steps
+
+    bash = shutil.which("bash")
+    if not bash:
+        return False, "script_valid_failed", "bash not on PATH", steps
+    bash_major = _host_bash_major(bash)
+
+    for script in scripts:
+        rel = script.name
+        steps.append(f"script_valid:shebang:{rel}")
+        try:
+            text = script.read_text(encoding="utf-8")
+        except OSError as exc:
+            return False, "script_valid_failed", f"{rel} could not be read: {exc}", steps
+        first_line = text.splitlines()[0] if text.splitlines() else ""
+        if not first_line.startswith("#!"):
+            return False, "script_valid_failed", f"{rel} is missing a shebang", steps
+
+        steps.append(f"script_valid:executable:{rel}")
+        if not os.access(script, os.X_OK):
+            return False, "script_valid_failed", f"{rel} is not executable", steps
+
+        steps.append(f"script_valid:bash_n:{rel}")
+        try:
+            proc = subprocess.run(
+                [bash, "-n", rel],
+                cwd=temp_root,
+                capture_output=True,
+                text=True,
+                timeout=max(3, min(timeout_s, 10)),
+            )
+        except subprocess.TimeoutExpired:
+            return False, "script_valid_failed", f"bash -n {rel} timed out", steps
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "")[-800:]
+            return (
+                False,
+                "script_valid_failed",
+                f"bash -n {rel} failed: exit {proc.returncode}. Tail: {tail!r}",
+                steps,
+            )
+
+        if bash_major is not None and bash_major < 4 and _uses_bash4_case_expansion(text):
+            return (
+                False,
+                "script_valid_failed",
+                f"{rel} uses bash-4-only case-modification expansion "
+                "(${var^^} or ${var,,}), but host bash is "
+                f"{bash_major}.x.",
+                steps,
+            )
+
+    passed, message, probe_steps = _run_start_sh_port_conflict_probe(
+        temp_root,
+        bash=bash,
+        timeout_s=max(2, min(timeout_s, 5)),
+        log=log,
+    )
+    steps.extend(probe_steps)
+    if not passed:
+        return False, "script_valid_failed", message, steps
+    return True, None, None, steps
 
 
 def _check_ports_free(declared_ports: list[int]) -> list[int]:
@@ -488,9 +722,10 @@ def verify_from_clean(
 
     Steps:
       1. Copy project to a temp dir, excluding stateful dirs.
-      2. For each manifest: install deps via lockfile when present,
+      2. Validate root shell scripts without launching full services.
+      3. For each manifest: install deps via lockfile when present,
          then run build (if a build script is declared).
-      3. If ``scope`` >= ``"subtree"`` and ``start.sh`` exists: run it
+      4. If ``scope`` >= ``"subtree"`` and ``start.sh`` exists: run it
          in the temp dir and probe declared ports.
       4. Clean up the temp dir (unless ``preserve_temp=True``).
 
@@ -543,6 +778,23 @@ def verify_from_clean(
                 failure_message=copy_err,
             )
 
+        # Shift-left root shell portability before installing deps. The
+        # dynamic branch probe forces only the fast PORT_CONFLICT path.
+        script_ok, script_kind, script_message, script_steps = _script_valid(
+            temp_root,
+            timeout_s=timeout_s,
+            log=log,
+        )
+        if not script_ok:
+            return CleanVerifyResult(
+                passed=False,
+                scope=scope,
+                failure_kind=script_kind,
+                failure_message=script_message,
+                steps_run=script_steps,
+                temp_dir=temp_root if preserve_temp else None,
+            )
+
         # Scaffold-level verification: install + build everywhere.
         passed, kind, message, steps_a = _scaffold_verify(
             temp_root, timeout_s=timeout_s, log=log
@@ -553,7 +805,7 @@ def verify_from_clean(
                 scope=scope,
                 failure_kind=kind,
                 failure_message=message,
-                steps_run=steps_a,
+                steps_run=script_steps + steps_a,
                 temp_dir=temp_root if preserve_temp else None,
             )
 
@@ -572,14 +824,14 @@ def verify_from_clean(
                     scope=scope,
                     failure_kind=kind,
                     failure_message=message,
-                    steps_run=steps_a + steps_b,
+                    steps_run=script_steps + steps_a + steps_b,
                     temp_dir=temp_root if preserve_temp else None,
                     listening_ports=listening,
                 )
             return CleanVerifyResult(
                 passed=True,
                 scope=scope,
-                steps_run=steps_a + steps_b,
+                steps_run=script_steps + steps_a + steps_b,
                 temp_dir=temp_root if preserve_temp else None,
                 listening_ports=listening,
             )
@@ -588,7 +840,7 @@ def verify_from_clean(
         return CleanVerifyResult(
             passed=True,
             scope=scope,
-            steps_run=steps_a,
+            steps_run=script_steps + steps_a,
             temp_dir=temp_root if preserve_temp else None,
         )
     except Exception as exc:  # noqa: BLE001 — last-resort

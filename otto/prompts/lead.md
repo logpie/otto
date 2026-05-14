@@ -172,6 +172,65 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
 
      - **Stack choice** (when children share a runtime): language
        version, framework, package manager, test runner config.
+     - **Information Architecture Contract** (required for webapps):
+       create a `## Information Architecture Contract` heading in
+       CHARTER.md and place one fenced `json` block immediately under
+       it. This is machine-read by Otto's coherence gate, so keep it
+       valid JSON and keep IDs stable. The IA contract must preserve
+       the PM PRD layer from `spec/spec.json`: every
+       `product_overview.top_level_pages[].id` MUST have a matching
+       `routes[].id`, and every
+       `product_overview.primary_navigation.sidebar[]` entry MUST be
+       linked from `nav_surfaces[]`. Align `action_surfaces[].id` with
+       the primary action IDs from `spec/spec.json`
+       (`core_entities[].primary_actions[].id`).
+
+       Required shape:
+       ```json
+       {
+         "entry_states": [
+           {"id": "unauthenticated", "route": "/", "expected": "Landing or sign-in screen is operable"}
+         ],
+         "routes": [
+           {"id": "team.backlog", "path": "/app/:workspaceSlug/:teamPrefix/backlog", "key_text": "Backlog"}
+         ],
+         "nav_surfaces": [
+           {"id": "sidebar", "must_link_routes": ["team.backlog"]}
+         ],
+         "action_surfaces": [
+           {
+             "id": "issue.create",
+             "label": "Create issue",
+             "surfaces": ["backlog.empty_state", "keyboard.C", "command_palette"],
+             "target_route": "team.backlog"
+           }
+         ],
+         "api_endpoints": [
+           {"id": "issues.create", "method": "POST", "path": "/api/issues"}
+         ],
+         "ws_events": [
+           {"id": "issue.created", "direction": "server_to_client"}
+         ],
+         "data_contracts": [
+           {"id": "Issue", "fields": ["id", "title", "status"]}
+         ],
+         "empty_states": [
+           {"entity": "issue", "list_route": "team.backlog", "cta_present": true}
+         ],
+         "settings_sections": [
+           {"id": "account", "path": "/app/:workspaceSlug/settings/account"}
+         ]
+       }
+       ```
+
+       Every action surface target route must be one of `routes[].id`.
+       Every `nav_surfaces[].must_link_routes[]` entry must be one of
+       `routes[].id`, and the sidebar nav surface must include the PM
+       `product_overview.primary_navigation.sidebar[]` routes.
+       Surface references may be concrete IDs such as
+       `backlog.empty_state` or known surface kinds such as
+       `keyboard.C`, `command_palette`, `sidebar`, `modal`, `form`,
+       `button`, `table`, `settings`, and `global`.
      - **Wire shapes** (when children communicate over a protocol):
        exact request/response/frame/message shapes, not prose. This
        is the most common decomp quality bug — two Leads implement
@@ -463,3 +522,9 @@ You DON'T need to write entries for purely-internal decisions.
   IPv6 binding ambiguity, CORS) that the integration agent is
   designed to handle once, downstream.
 - decisions.md and CHARTER.md are read-first, write-on-decide.
+- If you commit anything yourself, never use `git add -A` or
+  `git add .`. Stage only explicit paths in your assigned subsystem,
+  plus `CHARTER.md` or `decisions.md` when you intentionally changed
+  those files. Never stage `.worktrees/`, `otto_logs/`, `uploads/`,
+  `*.db`, `*.db.bak`, `*.sqlite`, `*.log`, `node_modules/`, `.venv/`,
+  `dist/`, or `build/`.

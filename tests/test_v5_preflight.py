@@ -8,6 +8,7 @@ import pytest
 
 from otto.v5_preflight import (
     PreflightIssue,
+    check_scaffold_compiles,
     filter_blocked_descendants,
     run_preflight,
 )
@@ -173,3 +174,34 @@ def test_clean_graph_no_issues(tmp_path: Path):
     (tmp_path / "CHARTER.md").write_text("# x\n")
     issues = run_preflight(tmp_path, g, [])
     assert issues == []
+
+
+def test_check_scaffold_compiles_maps_script_valid_failure_to_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from otto.v5_clean_verify import CleanVerifyResult
+
+    def fake_verify_from_clean(*_args, **_kwargs) -> CleanVerifyResult:
+        return CleanVerifyResult(
+            passed=False,
+            scope="scaffold",
+            failure_kind="script_valid_failed",
+            failure_message="start.sh uses bash-4-only expansion",
+        )
+
+    monkeypatch.setattr(
+        "otto.v5_clean_verify.verify_from_clean",
+        fake_verify_from_clean,
+    )
+
+    issues = check_scaffold_compiles(tmp_path, architect_task_id="v5-arch")
+
+    assert issues == [
+        PreflightIssue(
+            kind="script_valid_failed",
+            severity="block",
+            message="start.sh uses bash-4-only expansion",
+            task_id="v5-arch",
+        )
+    ]

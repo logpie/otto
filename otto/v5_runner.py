@@ -29,7 +29,6 @@ Phase 2 design notes:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import shutil
 import subprocess
@@ -43,7 +42,6 @@ from typing import Any
 from otto import paths as _paths
 from otto.lead import LeadResult, run_lead
 from otto.v5_preflight import (
-    PreflightIssue,
     check_scaffold_compiles,
     filter_blocked_descendants,
     run_preflight,
@@ -52,7 +50,6 @@ from otto.v5_preflight import (
 from otto.queue.subtask import (
     read_pending,
     take_ready,
-    v5_pending_path,
 )
 from otto.queue.task_graph import (
     aggregate_verdict,
@@ -67,6 +64,7 @@ from otto.queue.task_graph import (
     tree_total_cost,
 )
 from otto.spec_compile_flat import compile_flat_spec, FlatSpec
+from otto.v5_branching import MergeWorktreeDirtyError
 
 logger = logging.getLogger("otto.v5_runner")
 
@@ -137,6 +135,130 @@ def _new_session_id() -> str:
     return time.strftime("%Y-%m-%d-%H%M%S", time.gmtime()) + "-" + uuid.uuid4().hex[:6]
 
 
+def _v5_root_branch(project_dir: Path, config: dict[str, Any]) -> str:
+    """Branch that should receive root-level v5 integration work."""
+    configured = str(config.get("default_branch") or "").strip()
+    if configured:
+        return configured
+    try:
+        from otto.config import detect_default_branch
+
+        detected = detect_default_branch(project_dir)
+        if detected:
+            return detected
+    except Exception:  # noqa: BLE001 - fall back to the historical default.
+        pass
+    return "main"
+
+
+def _checkout_v5_branch_clean(
+    *,
+    project_dir: Path,
+    branch: str,
+    context: str,
+    on_event: Any = None,
+) -> None:
+    """Checkout ``branch`` for v5 orchestration, refusing dirty worktrees."""
+    from otto.v5_branching import (
+        assert_clean_before_checkout,
+        git_current_branch,
+        git_status_porcelain,
+    )
+
+    is_repo = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    if is_repo.returncode != 0:
+        return
+    current = git_current_branch(project_dir)
+    if current == branch:
+        remaining = git_status_porcelain(project_dir)
+        if remaining:
+            raise RuntimeError(
+                f"already on {branch!r} during {context}, but worktree is dirty: "
+                + ", ".join(remaining[:10])
+            )
+        return
+    assert_clean_before_checkout(
+        project_dir=project_dir,
+        source_branch=current,
+        target_branch=branch,
+    )
+    cp = subprocess.run(
+        ["git", "checkout", branch],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    if cp.returncode != 0:
+        detail = (cp.stderr or cp.stdout or "").strip()
+        raise RuntimeError(
+            f"checkout {branch!r} failed during {context} from "
+            f"{current!r}: {detail}"
+        )
+    actual = git_current_branch(project_dir)
+    if actual != branch:
+        raise RuntimeError(
+            f"checkout {branch!r} during {context} reported success but "
+            f"current branch is {actual!r}"
+        )
+    remaining = git_status_porcelain(project_dir)
+    if remaining:
+        raise RuntimeError(
+            f"checkout {branch!r} during {context} left dirty worktree: "
+            + ", ".join(remaining[:10])
+        )
+    _emit(on_event, {
+        "event": "project_branch_checked_out",
+        "context": context,
+        "from": current,
+        "to": branch,
+    })
+
+
+def _integration_restore_branch(
+    project_dir: Path,
+    task_id: str,
+    config: dict[str, Any],
+) -> str:
+    """Where ``project_dir`` should be restored after a task integration."""
+    task = get_task(project_dir, task_id) or {}
+    branch = str(task.get("integration_branch") or "").strip()
+    return branch or _v5_root_branch(project_dir, config)
+
+
+def _commit_integration_agent_changes(
+    *,
+    project_dir: Path,
+    task_id: str,
+    worktree_path: Path,
+    result: LeadResult,
+    on_event: Any = None,
+) -> None:
+    """Runner-owned commit for integration-agent edits."""
+    if result.verdict == "catastrophic":
+        return
+    from otto.v5_branching import commit_integration_worktree
+
+    ok, detail = commit_integration_worktree(
+        worktree_path=worktree_path,
+        task_id=task_id,
+    )
+    _emit(on_event, {
+        "event": "integration_commit" if ok else "integration_commit_failed",
+        "task_id": task_id,
+        "worktree": str(worktree_path),
+        "detail": detail,
+    })
+    if not ok:
+        logger.warning("integration commit failed for %s: %s", task_id, detail)
+        set_verdict(project_dir, task_id, "merge_blocked", cost_usd=result.cost_usd)
+        result.verdict = "merge_blocked"
+
+
 async def run_v5_pipeline(
     *,
     project_dir: Path,
@@ -165,6 +287,14 @@ async def run_v5_pipeline(
             ensure_initial_commit(project_dir)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ensure_initial_commit failed: %s", exc)
+
+        root_branch = _v5_root_branch(project_dir, config)
+        _checkout_v5_branch_clean(
+            project_dir=project_dir,
+            branch=root_branch,
+            context="v5_pipeline_start",
+            on_event=on_event,
+        )
 
         # Clean up stale dev-server processes bound to this project's
         # declared ports. Each "port already in use" error inside an agent
@@ -297,6 +427,12 @@ async def run_v5_pipeline(
                 except OSError as exc:
                     logger.warning("could not copy spec for root integration: %s", exc)
             _emit(on_event, {"event": "integration_start", "task_id": ROOT_TASK_ID})
+            _checkout_v5_branch_clean(
+                project_dir=project_dir,
+                branch=root_branch,
+                context="root_integration_start",
+                on_event=on_event,
+            )
             integration_result = await run_lead(
                 task_id=ROOT_TASK_ID,
                 intent=intent,
@@ -306,6 +442,13 @@ async def run_v5_pipeline(
                 config=config,
                 kind="integration",
                 child_summaries=child_summaries,
+            )
+            _commit_integration_agent_changes(
+                project_dir=project_dir,
+                task_id=ROOT_TASK_ID,
+                worktree_path=project_dir,
+                result=integration_result,
+                on_event=on_event,
             )
             result.integration_results[ROOT_TASK_ID] = integration_result
             _emit(on_event, {
@@ -477,7 +620,7 @@ async def _process_children(
                         reason = (
                             "Clean-state preflight failed for your scaffold. "
                             "The runner copied your output to a temp dir, ran "
-                            "`npm ci` + `npm run build` + `py_compile`, and got "
+                            "`script_valid`, `npm ci`, `npm run build`, and `py_compile`, and got "
                             "these errors:\n\n"
                             + "\n".join(f"  - {m}" for m in blocking_messages)
                             + "\n\nFix the underlying bug — don't lean on in-session "
@@ -711,6 +854,20 @@ async def _process_children(
                                     # while the work isn't on the parent
                                     # branch.
                                     set_verdict(project_dir, tid, "merge_blocked")
+                            except MergeWorktreeDirtyError as exc:
+                                detail = str(exc)
+                                _emit(on_event, {
+                                    "event": "subtree_propagation_blocked",
+                                    "task_id": tid,
+                                    "source": source,
+                                    "target": target,
+                                    "detail": detail,
+                                })
+                                logger.warning(
+                                    "subtree integration propagation dirty for %s: %s",
+                                    tid, detail,
+                                )
+                                set_verdict(project_dir, tid, "merge_blocked")
                             except Exception as exc:  # noqa: BLE001
                                 logger.warning(
                                     "subtree propagation crashed for %s: %s",
@@ -866,11 +1023,15 @@ async def _merge_child_branch(
         result.verdict = "merge_blocked"
         return
 
-    ok, detail = merge_child_into_integration(
-        project_dir=project_dir,
-        child_task_id=child_task_id,
-        parent_integration_branch=parent_integration_branch,
-    )
+    try:
+        ok, detail = merge_child_into_integration(
+            project_dir=project_dir,
+            child_task_id=child_task_id,
+            parent_integration_branch=parent_integration_branch,
+        )
+    except MergeWorktreeDirtyError as exc:
+        ok = False
+        detail = str(exc)
     if not ok:
         logger.warning("merge_child_into_integration(%s) failed: %s", child_task_id, detail)
         _emit(on_event, {
@@ -999,6 +1160,91 @@ async def _run_lead_with_fallback(
     return result_b
 
 
+def _preflight_issue_payload(issue: Any) -> dict[str, Any]:
+    return {
+        "kind": getattr(issue, "kind", "unknown"),
+        "severity": getattr(issue, "severity", "warn"),
+        "message": getattr(issue, "message", ""),
+        "task_id": getattr(issue, "task_id", None),
+    }
+
+
+def _run_integration_smoke_preflight(
+    *,
+    worktree_path: Path,
+    task_id: str,
+    phase: str,
+    on_event: Any = None,
+) -> dict[str, Any]:
+    """Run clean-deploy smoke for an integration worktree and serialize it."""
+    payload: dict[str, Any] = {
+        "check": "smoke_clean_deploy",
+        "phase": phase,
+        "task_id": task_id,
+        "cwd": str(worktree_path),
+        "passed": True,
+        "issues": [],
+        "error": None,
+    }
+    try:
+        logger.info(
+            "preflight: running %s integration clean-deploy check in %s",
+            phase,
+            worktree_path,
+        )
+        smoke_issues = smoke_clean_deploy(
+            worktree_path,
+            timeout_s=90,
+            port_wait_s=12,
+            logger_fn=lambda m: logger.info("preflight: %s", m),
+        )
+        payload["issues"] = [_preflight_issue_payload(issue) for issue in smoke_issues]
+        payload["passed"] = not smoke_issues
+        for issue in smoke_issues:
+            issue_payload = _preflight_issue_payload(issue)
+            log_fn = (
+                logger.error
+                if issue_payload["severity"] in ("error", "block")
+                else logger.warning
+            )
+            log_fn(
+                "preflight %s [%s]: %s",
+                issue_payload["kind"],
+                issue_payload["severity"],
+                issue_payload["message"],
+            )
+            _emit(on_event, {
+                "event": "preflight_issue",
+                "phase": phase,
+                "worktree": str(worktree_path),
+                "kind": issue_payload["kind"],
+                "severity": issue_payload["severity"],
+                "message": issue_payload["message"],
+            })
+    except Exception as exc:  # noqa: BLE001 - report to agent, do not crash runner
+        payload["passed"] = False
+        payload["error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning("integration %s smoke check raised: %s", phase, exc)
+        _emit(on_event, {
+            "event": "preflight_issue",
+            "phase": phase,
+            "worktree": str(worktree_path),
+            "kind": "clean_deploy_exception",
+            "severity": "warn",
+            "message": payload["error"],
+        })
+    return payload
+
+
+def _integration_smoke_blocks(payload: dict[str, Any]) -> bool:
+    issues = payload.get("issues") or []
+    return any(
+        isinstance(issue, dict)
+        and issue.get("severity") in ("error", "block")
+        for issue in issues
+    )
+
+
 async def _run_integration(
     *,
     project_dir: Path,
@@ -1013,30 +1259,6 @@ async def _run_integration(
     integration_session_id = _new_session_id()
     integration_session_dir = _paths.session_dir(project_dir, integration_session_id)
     integration_session_dir.mkdir(parents=True, exist_ok=True)
-
-    # Pre-integration smoke check: try to start declared services for a
-    # few seconds. If ports are busy or services can't bind, surface the
-    # issue early so the integration agent gets a clear signal instead of
-    # spending 20-30 min iterating on start failures.
-    try:
-        logger.info("preflight: running pre-integration clean-deploy check")
-        smoke_issues = smoke_clean_deploy(
-            project_dir,
-            timeout_s=90,
-            port_wait_s=12,
-            logger_fn=lambda m: logger.info("preflight: %s", m),
-        )
-        for issue in smoke_issues:
-            log_fn = logger.error if issue.severity in ("error", "block") else logger.warning
-            log_fn("preflight %s [%s]: %s", issue.kind, issue.severity, issue.message)
-            _emit(on_event, {
-                "event": "preflight_issue",
-                "kind": issue.kind,
-                "severity": issue.severity,
-                "message": issue.message,
-            })
-    except Exception as exc:  # noqa: BLE001 — best-effort, never block integration
-        logger.warning("pre-integration smoke check raised: %s", exc)
 
     # The integration Lead's verify call needs spec.json (same shape as build
     # children get via _run_child). Find any earlier session that has it and
@@ -1131,6 +1353,13 @@ async def _run_integration(
         logger.warning("integration worktree setup failed: %s", exc)
 
     parent_integration_branch = own_integration_branch
+    integration_cwd = integration_worktree or project_dir
+    preflight_result = _run_integration_smoke_preflight(
+        worktree_path=integration_cwd,
+        task_id=task_id,
+        phase="pre_agent",
+        on_event=on_event,
+    )
 
     _emit(on_event, {"event": "integration_start", "task_id": task_id})
     result = await run_lead(
@@ -1142,9 +1371,71 @@ async def _run_integration(
         config=config,
         kind="integration",
         child_summaries=summaries,
+        preflight_result=preflight_result,
     )
+    _commit_integration_agent_changes(
+        project_dir=project_dir,
+        task_id=task_id,
+        worktree_path=integration_cwd,
+        result=result,
+        on_event=on_event,
+    )
+    post_preflight_result = _run_integration_smoke_preflight(
+        worktree_path=integration_cwd,
+        task_id=task_id,
+        phase="post_agent",
+        on_event=on_event,
+    )
+    if result.verify_result is None:
+        result.verify_result = {}
+    if isinstance(result.verify_result, dict):
+        result.verify_result["pre_integration_preflight"] = preflight_result
+        result.verify_result["post_integration_preflight"] = post_preflight_result
+    if result.verdict != "catastrophic" and _integration_smoke_blocks(post_preflight_result):
+        result.verdict = "merge_blocked"
+        result.failure_reason = (
+            "Post-agent smoke_clean_deploy still has blocking issues: "
+            + "; ".join(
+                str(issue.get("message") or issue.get("kind"))
+                for issue in post_preflight_result.get("issues", [])
+                if isinstance(issue, dict)
+                and issue.get("severity") in ("error", "block")
+            )
+        )
+        if isinstance(result.verify_result, dict):
+            result.verify_result["verdict"] = "merge_blocked"
+            result.verify_result["summary"] = result.failure_reason
+        set_verdict(project_dir, task_id, "merge_blocked", cost_usd=result.cost_usd)
+        _emit(on_event, {
+            "event": "integration_smoke_failed",
+            "task_id": task_id,
+            "verdict": "merge_blocked",
+            "worktree": str(integration_cwd),
+        })
     integration_results[task_id] = result
     _emit(on_event, {"event": "integration_done", "task_id": task_id, "verdict": result.verdict})
+    restore_branch = _integration_restore_branch(project_dir, task_id, config)
+    try:
+        _checkout_v5_branch_clean(
+            project_dir=project_dir,
+            branch=restore_branch,
+            context=f"integration_return:{task_id}",
+            on_event=on_event,
+        )
+    except (MergeWorktreeDirtyError, RuntimeError) as exc:
+        detail = str(exc)
+        logger.warning(
+            "could not restore project_dir after integration %s to %s: %s",
+            task_id, restore_branch, detail,
+        )
+        _emit(on_event, {
+            "event": "integration_restore_failed",
+            "task_id": task_id,
+            "target": restore_branch,
+            "detail": detail,
+        })
+        set_verdict(project_dir, task_id, "merge_blocked", cost_usd=result.cost_usd)
+        result.verdict = "merge_blocked"
     return result
 
 

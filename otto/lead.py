@@ -35,7 +35,6 @@ from typing import Any, Literal
 from otto.queue.task_graph import (
     add_cost as graph_add_cost,
     record_task,
-    set_decomposition,
     set_verdict,
 )
 
@@ -76,6 +75,7 @@ async def run_lead(
     config: dict[str, Any],
     kind: LeadKind = "plan_or_inline",
     child_summaries: list[dict[str, Any]] | None = None,
+    preflight_result: dict[str, Any] | None = None,
 ) -> LeadResult:
     """Run one Lead session for one task. The single v5 build primitive.
 
@@ -89,6 +89,8 @@ async def run_lead(
         kind: ``plan_or_inline`` (uses lead.md) or ``integration`` (uses
               lead-integration.md after children resolve).
         child_summaries: only for kind=integration; child verdicts to inform.
+        preflight_result: only for kind=integration; structured runner
+            smoke_clean_deploy result for the merged integration worktree.
     """
     started = time.monotonic()
     record_task(
@@ -100,6 +102,7 @@ async def run_lead(
 
     result = LeadResult(task_id=task_id)
     failure_reason = ""
+    worktree = project_dir
 
     try:
         # Build SDK options with our custom MCP server attached.
@@ -150,6 +153,7 @@ async def run_lead(
             session_dir=session_dir,
             integration_branch=integration_branch,
             child_summaries=child_summaries or [],
+            preflight_result=preflight_result,
             tier=tier,
         )
 
@@ -235,6 +239,49 @@ async def run_lead(
                 "after running tests."
             )
 
+        if (
+            result.verify_called
+            and isinstance(result.verify_result, dict)
+            and result.verdict in ("pass", "partial", "unverified", "merge_blocked")
+        ):
+            try:
+                from otto.v5_verification_plan import validate_lead_verdict
+
+                runner_outcome = validate_lead_verdict(
+                    project_dir=project_dir,
+                    worktree_dir=worktree,
+                    session_dir=session_dir,
+                    agent_verdict=result.verify_result,
+                    initial_verdict=result.verdict,
+                )
+                if runner_outcome.final_verdict in (
+                    "pass",
+                    "partial",
+                    "unverified",
+                    "merge_blocked",
+                ):
+                    result.verdict = runner_outcome.final_verdict  # type: ignore[assignment]
+                if runner_outcome.runner_checks_summary:
+                    result.verify_result["runner_checks"] = runner_outcome.runner_checks_summary
+                    existing_summary = str(result.verify_result.get("summary") or "").strip()
+                    failed = [
+                        c for c in runner_outcome.runner_checks_summary
+                        if c.get("status") == "fail"
+                    ]
+                    skipped = [
+                        c for c in runner_outcome.runner_checks_summary
+                        if c.get("status") == "skipped"
+                    ]
+                    suffix = (
+                        f"Runner checks: {len(failed)} failed, "
+                        f"{len(skipped)} skipped. See verification_plan.json."
+                    )
+                    result.verify_result["summary"] = (
+                        f"{existing_summary}\n\n{suffix}" if existing_summary else suffix
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("runner verification plan failed: %s", exc)
+
     except Exception as exc:  # noqa: BLE001 — best-effort
         logger.exception("Lead session crashed for task %s", task_id)
         result.verdict = "catastrophic"
@@ -309,6 +356,7 @@ def _render_prompt(
     session_dir: Path,
     integration_branch: str | None,
     child_summaries: list[dict[str, Any]],
+    preflight_result: dict[str, Any] | None = None,
     tier: str = "auto",
 ) -> str:
     """Render the Lead's prompt by interpolating into the template."""
@@ -357,11 +405,23 @@ def _render_prompt(
 
         summary_text = "\n".join(_fmt_child(s) for s in child_summaries) \
             or "  (no children)"
+        rendered_preflight = preflight_result or {
+            "check": "smoke_clean_deploy",
+            "passed": None,
+            "issues": [],
+            "note": "not run",
+        }
+        preflight_text = json.dumps(
+            rendered_preflight,
+            indent=2,
+            sort_keys=True,
+        )
         return _interpolate_prompt(template, {
             "task_id": task_id,
             "intent": intent,
             "integration_branch": str(integration_branch or "main"),
             "child_summaries": summary_text,
+            "preflight_result": preflight_text,
             "journeys_path": str(journeys_path),
             "session_dir": str(session_dir),
         })
@@ -487,8 +547,6 @@ def _rescue_verdict_from_messages(session_dir: Path) -> dict[str, Any] | None:
     agents sometimes inline the JSON in their final message instead. Parse
     the message stream as a fallback so we don't lose work to a missing file.
     """
-    import re
-
     messages_paths = [
         session_dir / "lead" / "messages.jsonl",
         session_dir / "integration" / "lead" / "messages.jsonl",

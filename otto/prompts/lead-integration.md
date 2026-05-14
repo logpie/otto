@@ -16,6 +16,11 @@ Your input:
 - INTEGRATION BRANCH: {integration_branch}
 - CHILDREN'S VERDICTS:
 {child_summaries}
+- PRE-INTEGRATION PREFLIGHT (`smoke_clean_deploy` run by the runner
+  in your CWD before this session):
+```json
+{preflight_result}
+```
 - BEHAVIOR JOURNEYS (read-only): see {journeys_path}
 - SESSION_DIR: {session_dir} — write your verdict.json here.
 
@@ -55,10 +60,36 @@ re-implementing anything:
 1. `git merge <build_branch>` (named in `recovery_hint`).
 2. If conflicts, resolve by hand — usually trivial (package-lock drift,
    shared config files).
-3. Commit.
+3. Inspect `git status --short`.
+4. Stage only legitimate product paths with explicit pathspecs. Use
+   only the paths that actually exist in this product, such as
+   `frontend/`, `backend/`, `api/`, `client/`, `server/`, `web/`,
+   `src/`, `app/`, `apps/`, `packages/`, `lib/`, `public/`,
+   `scripts/`, `tests/`, `docs/`, `spec/`, `CHARTER.md`,
+   `decisions.md`, `package.json`, `package-lock.json`,
+   `pyproject.toml`, `requirements.txt`, `uv.lock`, `start.sh`, and
+   `.gitignore`.
+5. Never stage runtime or Otto orchestration state: `.worktrees/`,
+   `otto_logs/`, `uploads/`, `*.db`, `*.db.bak`, `*.sqlite`,
+   `*.log`, `node_modules/`, `.venv/`, `dist/`, or `build/`.
+6. Never use `git add -A` or `git add .`. Before committing, run
+   `git diff --cached --name-only` and verify every staged path is
+   intentional product code/config or an intentional removal of a
+   runtime artifact from git tracking.
+7. Commit with an `integration:` message.
 
 Re-implementation is a last resort. Most merge conflicts are
 mechanical, not semantic.
+
+## Step 0c — Repair preflight failures
+
+The runner already ran `smoke_clean_deploy` in this integration
+worktree before handing control to you. If the structured preflight
+payload says `"passed": false`, treat those issues as your first repair
+target before broad exploration. Fix the integrated state, then run
+your own verification. The runner will run `smoke_clean_deploy` once
+more after your session returns; if the same class of clean-deploy
+failure remains, the runner will mark this integration `merge_blocked`.
 
 ## Step 1 — Inspect the integrated state.
 
@@ -275,6 +306,11 @@ Your final message should include the verdict.json contents EXACTLY.
   code + their own tests. You run end-to-end against the merged whole.
 - Cross-subsystem edits in the integration session ARE allowed —
   you're the arbiter. The discipline against them is for child agents.
+- You may edit shared files to fix cross-subsystem issues, but you
+  MUST commit those edits yourself before yielding. Use a commit
+  message tagged `integration:`, run `git status --short` before and
+  after the commit to verify a clean product state, and never use
+  `git add -A` or `git add .`.
 - If audit fails for environment reasons (port conflict, browser
   unavailable), the verdict is `unverified`. That's correct; don't
   fake `pass`.

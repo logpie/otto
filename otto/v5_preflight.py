@@ -219,6 +219,16 @@ def check_scaffold_compiles(
     # Map primitive failure kinds to the preflight-visible kind names
     # (preserved for back-compat with existing event consumers).
     kind = result.failure_kind or "internal_error"
+    if kind == "script_valid_failed":
+        return [
+            PreflightIssue(
+                kind="script_valid_failed",
+                severity="block",
+                message=result.failure_message
+                or "root shell script validation failed",
+                task_id=architect_task_id,
+            )
+        ]
     if kind in ("build_failed", "install_failed", "py_compile_failed"):
         return [
             PreflightIssue(
@@ -303,7 +313,15 @@ def smoke_clean_deploy(
     message = result.failure_message or "clean-deploy failed"
 
     # Map primitive failure kinds to preflight event names.
-    if kind == "port_busy":
+    if kind == "script_valid_failed":
+        issues.append(
+            PreflightIssue(
+                kind="clean_deploy_script_valid_failed",
+                severity="block",
+                message=message,
+            )
+        )
+    elif kind == "port_busy":
         issues.append(
             PreflightIssue(
                 kind="clean_deploy_port_busy",
