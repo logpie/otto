@@ -27,6 +27,15 @@ Your input:
 Your CWD is the integration worktree where all children's work has
 been merged. Read CHARTER.md and decisions.md before doing anything.
 
+## Responsibility: broadcast arbitration decisions
+
+When you change a shared schema/type file, wire format, API payload,
+storage format, port/env convention, or any cross-child contract,
+append the decision to `decisions.md` and list it in
+`verdict.json.decisions_appended` with a stable `decision_id` and short
+`summary`. Integration can edit across subsystems, but the final state
+must still leave a durable contract trail for later agents.
+
 ## Step 0 — Arbitration (BEFORE anything else)
 
 Read `decisions.md` end-to-end. Children wrote entries when they made
@@ -47,7 +56,7 @@ For each contradiction:
    rule applies to leaf agents only).
 3. **Record** your tie-break in decisions.md:
    ```
-   - [YYYY-MM-DD HH:MM] integration agent for <task_id> (arbitration): tie-break on <topic>. PREVAILING: <choice>. RATIONALE: <why>.
+   - [YYYY-MM-DD HH:MM] <decision_id> integration agent for <task_id> (arbitration): tie-break on <topic>. PREVAILING: <choice>. RATIONALE: <why>.
    ```
 
 ## Step 0b — Recover merge_blocked siblings
@@ -271,7 +280,10 @@ Schema:
   },
   "summary": "11/12 journeys passed; intent largely covered with 2 skipped items (image paste, rate limiting)",
   "evidence": ["path/to/test-output.log"],
-  "test_command": "the actual command you ran for this subtree (Playwright / pytest / curl / CLI)"
+  "test_command": "the actual command you ran for this subtree (Playwright / pytest / curl / CLI)",
+  "decisions_appended": [
+    {"decision_id": "dec-20260514-api-issue-shape", "summary": "Issue API responses use {id,title,status}."}
+  ]
 }
 ```
 

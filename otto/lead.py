@@ -253,6 +253,8 @@ async def run_lead(
                     session_dir=session_dir,
                     agent_verdict=result.verify_result,
                     initial_verdict=result.verdict,
+                    node_kind=("integration" if is_integration else "leaf"),
+                    matrix_scope=_verification_matrix_scope(config),
                 )
                 if runner_outcome.final_verdict in (
                     "pass",
@@ -425,6 +427,20 @@ def _render_prompt(
             "journeys_path": str(journeys_path),
             "session_dir": str(session_dir),
         })
+
+
+def _verification_matrix_scope(config: dict[str, Any]) -> str:
+    """Return the v5 runner verification matrix policy.
+
+    Backward compatible default is ``leaf`` which preserves the historical full
+    matrix at every node. New v6 runs can opt into ``integration_only`` under
+    ``verification_plan.matrix_scope``.
+    """
+    plan = config.get("verification_plan") if isinstance(config, dict) else None
+    value = plan.get("matrix_scope") if isinstance(plan, dict) else None
+    if value in {"leaf", "integration_only"}:
+        return str(value)
+    return "leaf"
 
 
 def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]:

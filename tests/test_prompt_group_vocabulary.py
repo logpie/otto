@@ -194,3 +194,11 @@ def test_compile_spec_browser_journeys_are_agent_browser_first() -> None:
     assert '"command": ["pytest", "tests/browser/test_shell.py"]' not in text
     assert "`npm run test:browser -- tests/browser/<feature>.spec.ts`" in text
     assert "typically a Playwright" not in text
+
+
+def test_lead_prompt_contains_v6_dag_quality_rules() -> None:
+    text = (PROMPTS_DIR / "lead.md").read_text(encoding="utf-8")
+    assert "critical path\n  longer than 2 build stages" in text
+    assert "Single-chain\n  decomposition is a smell" in text
+    assert "Do NOT emit a tests-only final child" in text
+    assert "Feature leaves own their own tests" in text

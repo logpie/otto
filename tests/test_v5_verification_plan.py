@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,24 @@ from otto.v5_verification_plan import validate_lead_verdict
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _init_git_repo(repo: Path) -> None:
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@e.st")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "baseline")
 
 
 def _spec() -> dict[str, Any]:
@@ -221,6 +240,49 @@ def test_route_resolves_failure_downgrades_pass(tmp_path: Path) -> None:
     assert outcome.final_verdict == "partial"
 
 
+def test_leaf_integration_only_scope_skips_unrelated_full_matrix(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    _passing_project(tmp_path, session)
+    _write_contract(tmp_path, session, ia=_ia(route_path="/missing-route"))
+
+    outcome = validate_lead_verdict(
+        project_dir=tmp_path,
+        worktree_dir=tmp_path,
+        session_dir=session,
+        agent_verdict=_verdict(),
+        initial_verdict="pass",
+        node_kind="leaf",
+        matrix_scope="integration_only",
+    )
+
+    checks = _checks_by_kind(outcome.verification_plan)
+    assert "route_resolves" not in checks
+    assert checks["local_scope_check"][0]["status"] == "pass"
+    assert outcome.verification_plan["full_matrix"] is False
+    assert outcome.final_verdict == "pass"
+
+
+def test_integration_node_runs_full_matrix_when_leaf_scope_skips(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    _passing_project(tmp_path, session)
+    _write_contract(tmp_path, session, ia=_ia(route_path="/missing-route"))
+
+    outcome = validate_lead_verdict(
+        project_dir=tmp_path,
+        worktree_dir=tmp_path,
+        session_dir=session,
+        agent_verdict=_verdict(),
+        initial_verdict="pass",
+        node_kind="integration",
+        matrix_scope="integration_only",
+    )
+
+    route_checks = _checks_by_kind(outcome.verification_plan)["route_resolves"]
+    assert route_checks[0]["status"] == "fail"
+    assert outcome.verification_plan["full_matrix"] is True
+    assert outcome.final_verdict == "partial"
+
+
 def test_check_matrix_page_resolves(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
@@ -385,6 +447,77 @@ def test_verdict_consistency_failure(tmp_path: Path) -> None:
     )
 
     assert _checks_by_kind(outcome.verification_plan)["verdict_consistency"][0]["status"] == "fail"
+
+
+def test_decisions_appended_legacy_missing_field_is_accepted(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    _passing_project(tmp_path, session)
+
+    outcome = validate_lead_verdict(
+        project_dir=tmp_path,
+        worktree_dir=tmp_path,
+        session_dir=session,
+        agent_verdict=json.loads(json.dumps(_verdict())),
+        initial_verdict="pass",
+    )
+
+    assert outcome.final_verdict == "pass"
+    assert _checks_by_kind(outcome.verification_plan)["decisions_broadcast"][0]["status"] == "pass"
+
+
+def test_shared_schema_change_without_decision_downgrades(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    _passing_project(tmp_path, session)
+    _write(tmp_path / "shared" / "types.ts", "export type Issue = { id: string };\n")
+    _init_git_repo(tmp_path)
+    _write(
+        tmp_path / "shared" / "types.ts",
+        "export type Issue = { id: string; status: string };\n",
+    )
+
+    outcome = validate_lead_verdict(
+        project_dir=tmp_path,
+        worktree_dir=tmp_path,
+        session_dir=session,
+        agent_verdict=_verdict(),
+        initial_verdict="pass",
+    )
+
+    check = _checks_by_kind(outcome.verification_plan)["decisions_broadcast"][0]
+    assert check["status"] == "fail"
+    assert check["refs"]["touched_paths"] == ["shared/types.ts"]
+    assert outcome.final_verdict == "partial"
+
+
+def test_shared_schema_change_with_matching_decision_passes(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    _passing_project(tmp_path, session)
+    _write(tmp_path / "shared" / "types.ts", "export type Issue = { id: string };\n")
+    _write(
+        tmp_path / "decisions.md",
+        "# Decisions\n\n- [2026-05-14 10:00] dec-issue-shape api child: Issue includes status. RATIONALE: UI filters need it.\n",
+    )
+    _init_git_repo(tmp_path)
+    _write(
+        tmp_path / "shared" / "types.ts",
+        "export type Issue = { id: string; status: string };\n",
+    )
+    verdict = _verdict(decisions_appended=[
+        {"decision_id": "dec-issue-shape", "summary": "Issue includes status."}
+    ])
+    roundtripped = json.loads(json.dumps(verdict))
+
+    outcome = validate_lead_verdict(
+        project_dir=tmp_path,
+        worktree_dir=tmp_path,
+        session_dir=session,
+        agent_verdict=roundtripped,
+        initial_verdict="pass",
+    )
+
+    check = _checks_by_kind(outcome.verification_plan)["decisions_broadcast"][0]
+    assert check["status"] == "pass"
+    assert outcome.final_verdict == "pass"
 
 
 def test_missing_passed_journey_downgrades_pass(tmp_path: Path) -> None:

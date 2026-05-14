@@ -30,6 +30,17 @@ Read `CHARTER.md` and `decisions.md` at the repo root if they exist.
   sibling agents and arbitrations made by parent agents. Read it for
   context, write to it when you make a boundary-relevant choice.
 
+## Responsibility: broadcast boundary decisions
+
+If your work creates or changes a cross-subsystem contract, record it
+in `decisions.md` as part of the work, not as an afterthought. This
+includes shared schema/type files, wire formats, API payloads, storage
+formats, port/env conventions, and any choice sibling agents must
+follow. Also list each appended decision in verdict.json under
+`decisions_appended` with a stable `decision_id` and short `summary`.
+If you changed shared schema/type/wire files and did not append a
+matching decision entry, the runner may downgrade your verdict.
+
 ## Step 1 — Decide.
 
 Is this ONE coherent unit of work, or MULTIPLE strategic areas?
@@ -315,6 +326,19 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
   by Otto's merge drivers or arbitrated by the integration agent —
   they are NOT a reason to default to a linear chain.
 
+  Critical-path rule: if your proposed child DAG has a critical path
+  longer than 2 build stages (a dependency chain more than 2 children
+  deep), restructure shared contracts/scaffolds so leaves can fan out,
+  or inline the dependent chain into one child. Single-chain
+  decomposition is a smell; it pays all the coordination cost without
+  parallelism.
+
+  Do NOT emit a tests-only final child that depends on all other
+  siblings. Feature leaves own their own tests. Otto's automatic
+  integration session is the cross-stack verifier after children
+  finish, so a final "test everything" child duplicates that phase and
+  hides which feature actually owns a failed check.
+
 ## Step 2 — Execute (only if you called begin_inline).
 
 You write everything yourself. Use Read/Write/Edit/Bash freely.
@@ -443,7 +467,10 @@ Schema:
   },
   "summary": "one-line honest summary",
   "evidence": ["path/to/test.log", "path/to/screenshot.png"],
-  "test_command": "what you ran"
+  "test_command": "what you ran",
+  "decisions_appended": [
+    {"decision_id": "dec-20260514-api-issue-shape", "summary": "Issue API responses use {id,title,status}."}
+  ]
 }
 ```
 
@@ -480,10 +507,11 @@ this task later.
 
 If your work touched a cross-subsystem boundary (a wire format detail,
 a shared schema, a port/path convention), append a single-line entry
-to `decisions.md` at the repo root. Format:
+to `decisions.md` at the repo root and include its id in
+`verdict.json.decisions_appended`. Format:
 
 ```
-- [YYYY-MM-DD HH:MM] <writer>: <decision>. RATIONALE: <why>.
+- [YYYY-MM-DD HH:MM] <decision_id> <writer>: <decision>. RATIONALE: <why>.
 ```
 
 decisions.md is union-merged, so concurrent appends from sibling
