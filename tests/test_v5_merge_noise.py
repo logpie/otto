@@ -116,11 +116,13 @@ def test_merge_blocks_on_unignored_source_conflict(tmp_path: Path) -> None:
     child = "v5-conflict"
     _git(repo, "checkout", "-q", "-b", child_branch_name(child), "HEAD")
     (repo / "src.py").write_text("a = 2\n")
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "child")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "child")
 
     _git(repo, "checkout", "-q", integration)
     (repo / "src.py").write_text("a = 3\n")
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "integ")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "integ")
 
     ok, detail = merge_child_into_integration(
         project_dir=repo,
@@ -139,7 +141,8 @@ def test_commit_worktree_seeds_default_gitignore(tmp_path: Path) -> None:
     _git(repo, "config", "user.email", "t@e.st")
     _git(repo, "config", "user.name", "t")
     (repo / "README.md").write_text("hi\n")
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "init")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
     # No .gitignore initially.
     assert not (repo / ".gitignore").exists()
 
@@ -164,7 +167,8 @@ def test_commit_worktree_untracks_now_ignored_files(tmp_path: Path) -> None:
     (repo / "test-results").mkdir()
     (repo / "test-results" / "results.json").write_text("old\n")
     (repo / "README.md").write_text("hi\n")
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "init w/ artifact")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init w/ artifact")
 
     # Now run commit_worktree — should seed gitignore AND untrack the artifact.
     (repo / "feature.txt").write_text("y\n")

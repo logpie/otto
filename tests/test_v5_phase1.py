@@ -11,7 +11,6 @@ computation rules.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -32,7 +31,6 @@ from otto.queue.subtask import (
     enqueue_subtask,
     read_pending,
     take_ready,
-    v5_pending_path,
 )
 from otto.spec_compile_flat import FlatSpec, lint_journey, lint_spec
 

@@ -14,10 +14,13 @@ Your input:
 - PROJECT STATE: examine your CWD via Read/Glob.
 - INTEGRATION BRANCH: {integration_branch}
 - SESSION_DIR: {session_dir} — write your verdict.json here when done.
+- CONTEXT SLICE: {context_slice_note}
 
 ## Read first, always
 
-Read `CHARTER.md` and `decisions.md` at the repo root if they exist.
+Read the CONTEXT SLICE path first when one is provided, then read
+`decisions.md` at the repo root if it exists. When no scoped slice is
+provided, read `CHARTER.md` and `decisions.md` at the repo root if they exist.
 - CHARTER.md = the architect's slow-changing design doc (stack, conventions,
   inter-subsystem contracts). Binding. If it has an **"Agent operating
   notes"** section, that's your project-local README — read it before
@@ -195,6 +198,11 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
        linked from `nav_surfaces[]`. Align `action_surfaces[].id` with
        the primary action IDs from `spec/spec.json`
        (`core_entities[].primary_actions[].id`).
+
+       The IA JSON block is your contract. Prose sections explain
+       rationale only — they MUST NOT restate what JSON already says.
+       Target total CHARTER ≤ 500 lines. Keep the JSON complete; trim
+       rationale, examples, and narrative before you trim contract data.
 
        Required shape:
        ```json

@@ -179,3 +179,12 @@ def test_architect_prompt_requires_pages_from_product_overview() -> None:
     assert "product_overview.top_level_pages[].id" in prompt
     assert "product_overview.primary_navigation.sidebar[]" in prompt
     assert "MUST have a matching" in prompt
+
+
+def test_architect_prompt_caps_charter_prose_without_trimming_ia_contract() -> None:
+    prompt = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
+
+    assert "The IA JSON block is your contract" in prompt
+    assert "Target total CHARTER ≤ 500 lines" in prompt
+    assert "trim contract data" in prompt
+    assert "CONTEXT SLICE" in prompt

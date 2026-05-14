@@ -15,7 +15,6 @@ import json
 from pathlib import Path
 
 from otto.v5_capability_inventory import (
-    CoherenceFinding,
     build_inventory,
     check_coherence,
     inject_into_charter,
@@ -211,6 +210,33 @@ def test_coherence_no_operating_notes_returns_empty(tmp_path: Path) -> None:
     inv = build_inventory(tmp_path)
     findings = check_coherence(tmp_path, inv)
     assert findings == []
+
+
+def test_coherence_warns_when_charter_prose_exceeds_line_cap(tmp_path: Path) -> None:
+    ia = {
+        "routes": [{"id": "home", "path": "/", "key_text": "Home"}],
+        "action_surfaces": [],
+        "api_endpoints": [],
+        "ws_events": [],
+        "data_contracts": [],
+    }
+    prose = "\n".join(f"- rationale line {idx}" for idx in range(501))
+    _write(
+        tmp_path / "CHARTER.md",
+        "# CHARTER\n\n"
+        "## Information Architecture Contract\n\n"
+        "```json\n"
+        + json.dumps(ia, indent=2)
+        + "\n```\n\n"
+        "## Rationale\n\n"
+        + prose
+        + "\n",
+    )
+    inv = build_inventory(tmp_path)
+
+    findings = check_coherence(tmp_path, inv, project_kind="cli")
+
+    assert any(f.kind == "charter_prose_over_line_cap" for f in findings)
 
 
 def test_coherence_existing_paths_pass(tmp_path: Path) -> None:

@@ -76,6 +76,7 @@ async def run_lead(
     kind: LeadKind = "plan_or_inline",
     child_summaries: list[dict[str, Any]] | None = None,
     preflight_result: dict[str, Any] | None = None,
+    context_slice_note: str = "",
 ) -> LeadResult:
     """Run one Lead session for one task. The single v5 build primitive.
 
@@ -91,6 +92,8 @@ async def run_lead(
         child_summaries: only for kind=integration; child verdicts to inform.
         preflight_result: only for kind=integration; structured runner
             smoke_clean_deploy result for the merged integration worktree.
+        context_slice_note: optional runner-authored note pointing a child at
+            scoped session artifacts. Empty means use full repo context.
     """
     started = time.monotonic()
     record_task(
@@ -155,6 +158,7 @@ async def run_lead(
             child_summaries=child_summaries or [],
             preflight_result=preflight_result,
             tier=tier,
+            context_slice_note=context_slice_note,
         )
 
         # Save the rendered prompt for observability.
@@ -360,6 +364,7 @@ def _render_prompt(
     child_summaries: list[dict[str, Any]],
     preflight_result: dict[str, Any] | None = None,
     tier: str = "auto",
+    context_slice_note: str = "",
 ) -> str:
     """Render the Lead's prompt by interpolating into the template."""
     template_name = "lead.md" if kind == "plan_or_inline" else "lead-integration.md"
@@ -383,6 +388,10 @@ def _render_prompt(
             "journeys_path": str(journeys_path),
             "integration_branch": str(integration_branch or "main"),
             "session_dir": str(session_dir),
+            "context_slice_note": (
+                context_slice_note
+                or "No scoped context slice for this Lead; use repo-root CHARTER.md and decisions.md."
+            ),
         }) + tier_hint
     else:
         def _fmt_child(s: dict[str, Any]) -> str:

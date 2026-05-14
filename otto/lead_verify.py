@@ -25,7 +25,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import time
@@ -89,7 +88,6 @@ async def run_verify_for_lead(
     test_outcome = await _run_native_tests(
         project_dir=verify_dir, log_dir=log_dir, timeout_s=timeout_s,
     )
-    test_evidence_path = log_dir / "test-output.log"
     if test_outcome["log_path"]:
         evidence.append(str(test_outcome["log_path"]))
 

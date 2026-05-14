@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from pathlib import Path
 from typing import Callable, Optional
 
 logger = logging.getLogger("otto.v5_merge_drivers")
@@ -52,7 +51,8 @@ def merge_package_json(ours: str, theirs: str, base: Optional[str]) -> Optional[
     if "scripts" in t or "scripts" in o:
         o_s = (o.get("scripts") or {})
         t_s = (t.get("scripts") or {})
-        scripts = dict(t_s); scripts.update(o_s)
+        scripts = dict(t_s)
+        scripts.update(o_s)
         if scripts:
             merged["scripts"] = scripts
 
@@ -170,7 +170,8 @@ def merge_tsconfig_json(ours: str, theirs: str, base: Optional[str]) -> Optional
 
     def _deep_merge(a, b):
         if isinstance(a, dict) and isinstance(b, dict):
-            out = dict(b); out.update(a)  # ours wins
+            out = dict(b)
+            out.update(a)  # ours wins
             for k in set(a) & set(b):
                 out[k] = _deep_merge(a[k], b[k])
             return out

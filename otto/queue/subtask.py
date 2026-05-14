@@ -76,6 +76,8 @@ def enqueue_subtask(
     parent_session_dir: Path,
     intent: str,
     depends_on: list[str] | None = None,
+    owned_paths: list[str] | None = None,
+    action_ids: list[str] | None = None,
     parent_integration_branch: str | None = None,
 ) -> str:
     """Persist an agent-emitted subtask and return its task_id.
@@ -100,6 +102,8 @@ def enqueue_subtask(
         "parent_session_dir": str(parent_session_dir),
         "intent": intent,
         "depends_on": list(depends_on or []),
+        "owned_paths": list(owned_paths or []),
+        "action_ids": list(action_ids or []),
         "integration_branch": integration_branch,
         "review_state": "approved",  # autopilot default; Phase 3 may set "pending_review"
         "enqueued_at": _now_iso(),

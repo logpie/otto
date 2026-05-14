@@ -968,6 +968,43 @@ async def _run_child(
     except Exception as exc:  # noqa: BLE001
         logger.warning("worktree setup for child %s failed: %s", tid, exc)
 
+    context_slice_note = ""
+    if _context_slicing_enabled(config):
+        try:
+            from otto.v5_context_slicer import write_context_slice_for_child
+
+            full_charter_path = (child_worktree or project_dir) / "CHARTER.md"
+            if not full_charter_path.exists():
+                full_charter_path = project_dir / "CHARTER.md"
+            slice_result = write_context_slice_for_child(
+                project_dir=project_dir,
+                child_session_dir=child_session_dir,
+                child_scope=_child_scope_from_entry(tid, entry),
+                parent_spec_path=parent_spec,
+                full_charter_path=full_charter_path,
+                child_spec_path=child_spec_path,
+            )
+            context_slice_note = slice_result.context_note
+            _emit(on_event, {
+                "event": "context_slice",
+                "task_id": tid,
+                "fallback_to_full": slice_result.audit.get("fallback_to_full"),
+                "included_entities": slice_result.audit.get("included_entities", []),
+                "excluded_entities": slice_result.audit.get("excluded_entities", []),
+                "log_path": str(child_session_dir / "context_slice.json"),
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("context slicing failed for child %s: %s", tid, exc)
+            log_path = _write_context_slice_failure_log(
+                child_session_dir=child_session_dir,
+                child_id=tid,
+                reason=f"{type(exc).__name__}: {exc}",
+            )
+            context_slice_note = (
+                "Context slicing was requested, but Otto fell back to full "
+                f"context after a slicing error. Audit log: `{log_path}`."
+            )
+
     # Augment intent with retry context if this is a re-dispatch after a
     # runner-side check (e.g., scaffold preflight) invalidated the agent's
     # prior verdict. The reason explains what failed; the agent is
@@ -995,6 +1032,7 @@ async def _run_child(
         integration_branch=parent_integration_branch,
         config=config,
         kind="plan_or_inline",
+        context_slice_note=context_slice_note,
         on_event=on_event,
     )
 
@@ -1084,6 +1122,7 @@ async def _run_lead_with_fallback(
     config: dict[str, Any],
     kind: str = "plan_or_inline",
     child_summaries: list[dict[str, Any]] | None = None,
+    context_slice_note: str = "",
     on_event: Any = None,
 ) -> LeadResult:
     """Run a Lead with task-level provider fallback.
@@ -1121,6 +1160,7 @@ async def _run_lead_with_fallback(
         config=config,
         kind=kind,  # type: ignore[arg-type]
         child_summaries=child_summaries,
+        context_slice_note=context_slice_note,
     )
     duration_a = _time.monotonic() - started
     append_attempt(
@@ -1169,6 +1209,7 @@ async def _run_lead_with_fallback(
         config=fallback_config,
         kind=kind,  # type: ignore[arg-type]
         child_summaries=child_summaries,
+        context_slice_note=context_slice_note,
     )
     append_attempt(
         session_dir / "summary.json",
@@ -1607,6 +1648,59 @@ def _emit(on_event: Any, payload: dict[str, Any]) -> None:
         on_event(payload)
     except Exception:  # noqa: BLE001 — observability is best-effort
         pass
+
+
+def _context_slicing_enabled(config: dict[str, Any]) -> bool:
+    """Return whether child context slicing is explicitly enabled.
+
+    Default is full context. `--full-context` sets `v5_context_slicing=False`
+    as a safe escape hatch even if config enables slicing later.
+    """
+    if not isinstance(config, dict):
+        return False
+    if config.get("v5_context_slicing") is False:
+        return False
+    if config.get("v5_full_context") is True:
+        return False
+    slicing = config.get("context_slicing")
+    if isinstance(slicing, dict):
+        return bool(slicing.get("enabled"))
+    if isinstance(slicing, bool):
+        return slicing
+    return bool(config.get("v5_context_slicing"))
+
+
+def _child_scope_from_entry(child_id: str, entry: dict[str, Any]) -> dict[str, Any]:
+    """Build the slicer's child scope payload from queue metadata."""
+    return {
+        "child_id": child_id,
+        "task_intent": str(entry.get("intent") or ""),
+        "owned_paths": list(entry.get("owned_paths") or []),
+        "action_ids": list(entry.get("action_ids") or []),
+    }
+
+
+def _write_context_slice_failure_log(
+    *,
+    child_session_dir: Path,
+    child_id: str,
+    reason: str,
+) -> Path:
+    path = child_session_dir / "context_slice.json"
+    payload = {
+        "schema_version": 1,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "child_id": child_id,
+        "included_entities": [],
+        "excluded_entities": [],
+        "included_intent_claims_n": 0,
+        "excluded_intent_claims_n": 0,
+        "fallback_to_full": True,
+        "fallback_reason": reason,
+        "artifacts": {},
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def _write_toolchain_preflight_log(

@@ -25,14 +25,12 @@ from otto.lead import LeadResult
 from otto.queue.subtask import enqueue_subtask
 from otto.queue.task_graph import (
     aggregate_verdict,
-    children_of,
     get_task,
     record_task,
     set_decomposition,
     set_verdict,
 )
 from otto.v5_runner import (
-    V5RunResult,
     _build_child_summaries,
     _is_descendant_of,
     _process_children,

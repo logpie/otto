@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -13,13 +11,10 @@ import pytest
 from otto.lead_verify import (
     _detect_browser_runner,
     _detect_test_command,
-    _filter_journeys,
-    _unverified,
     run_verify_for_lead,
 )
 from otto.v5_branching import (
     child_branch_name,
-    child_worktree_path,
     commit_worktree,
     ensure_branch_exists,
     integration_branch_name,

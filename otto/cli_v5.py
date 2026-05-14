@@ -86,6 +86,16 @@ def register_v5_command(main: click.Group) -> None:
         help="Disable v5 spec compile cache for this run.",
     )
     @click.option(
+        "--slice-context",
+        is_flag=True,
+        help="Opt in to conservative child context slicing. Default is full context.",
+    )
+    @click.option(
+        "--full-context",
+        is_flag=True,
+        help="Disable child context slicing even if project config enables it.",
+    )
+    @click.option(
         "--tier",
         type=click.Choice(["auto", "solo", "lead", "modular"]),
         default="auto", show_default=True,
@@ -103,6 +113,8 @@ def register_v5_command(main: click.Group) -> None:
         phase1_only: bool,
         review_first_decomp: bool,
         no_cache: bool,
+        slice_context: bool,
+        full_context: bool,
         tier: str,
     ) -> None:
         """Run a v5 Lead session against the intent.
@@ -145,6 +157,14 @@ def register_v5_command(main: click.Group) -> None:
 
         if no_cache:
             config["spec_compile_no_cache"] = True
+        if slice_context and full_context:
+            error_console.print("[error]choose only one of --slice-context or --full-context[/error]")
+            sys.exit(2)
+        if slice_context:
+            config["v5_context_slicing"] = True
+        if full_context:
+            config["v5_context_slicing"] = False
+            config["v5_full_context"] = True
 
         if phase1_only:
             _run_phase1_only(project_dir, intent, config)

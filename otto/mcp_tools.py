@@ -1,7 +1,7 @@
 """In-process MCP server holding Otto's custom tools for v5 Leads.
 
 Tools (all in-process, no IPC):
-    submit_subtask(intent, depends_on=[]) -> {task_id}
+    submit_subtask(intent, depends_on=[], owned_paths=[], action_ids=[]) -> {task_id}
         Emit a child task to the project's queue. Returns task_id immediately.
         Lead's calling task is recorded as parent_task_id.
 
@@ -176,7 +176,6 @@ def create_otto_mcp_server(
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
     from otto.queue.task_graph import (
-        add_cost,
         record_task,
         set_decomposition,
     )
@@ -191,11 +190,15 @@ def create_otto_mcp_server(
             "Use this when this Lead's intent contains MULTIPLE strategic areas. "
             "Each call produces one child task with its own Lead. The CALLING "
             "Lead's task_id is automatically recorded as parent_task_id; you do "
-            "NOT pass it. If a child must run after another, pass depends_on=[task_id, ...]."
+            "NOT pass it. If a child must run after another, pass depends_on=[task_id, ...]. "
+            "When known, pass owned_paths=[...] and action_ids=[...] so Otto can "
+            "safely scope child context."
         ),
         {
             "intent": str,
             "depends_on": list[str],
+            "owned_paths": list[str],
+            "action_ids": list[str],
         },
     )
     async def submit_subtask(args: dict[str, Any]) -> dict[str, Any]:
@@ -204,6 +207,8 @@ def create_otto_mcp_server(
         # comma-joined string, a single task id, or a JSON literal like "[]".
         # Coerce all shapes to a clean list of plausible task ids.
         depends_on = _coerce_id_list(args.get("depends_on"))
+        owned_paths = _coerce_id_list(args.get("owned_paths"))
+        action_ids = _coerce_id_list(args.get("action_ids"))
         if not intent:
             return _err("submit_subtask: 'intent' is required and must be non-empty.")
 
@@ -238,6 +243,8 @@ def create_otto_mcp_server(
                 parent_session_dir=session_dir,
                 intent=intent,
                 depends_on=depends_on,
+                owned_paths=owned_paths,
+                action_ids=action_ids,
                 parent_integration_branch=None,
             )
         except Exception as exc:  # noqa: BLE001 — best-effort: report to Lead
@@ -250,6 +257,8 @@ def create_otto_mcp_server(
             intent=intent,
             parent_task_id=task_id,
             depends_on=depends_on,
+            owned_paths=owned_paths,
+            action_ids=action_ids,
         )
         # Mark this Lead's decomposition as 'emit' once the first subtask lands.
         set_decomposition(project_dir, task_id, "emit")

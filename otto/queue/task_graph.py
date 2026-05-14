@@ -138,6 +138,8 @@ def record_task(
     parent_task_id: str | None = None,
     integration_branch: str | None = None,
     depends_on: list[str] | None = None,
+    owned_paths: list[str] | None = None,
+    action_ids: list[str] | None = None,
     decomposition: Decomposition = "unknown",
 ) -> None:
     """Atomically register a task in the graph (or update if it exists).
@@ -163,6 +165,16 @@ def record_task(
             "cost_usd": existing.get("cost_usd", 0.0),
             "child_task_ids": existing.get("child_task_ids", []),
             "depends_on": list(depends_on or existing.get("depends_on", []) or []),
+            "owned_paths": list(
+                owned_paths
+                if owned_paths is not None
+                else existing.get("owned_paths", []) or []
+            ),
+            "action_ids": list(
+                action_ids
+                if action_ids is not None
+                else existing.get("action_ids", []) or []
+            ),
         }
         graph["tasks"][task_id] = entry
         if parent_task_id and parent_task_id in graph["tasks"]:

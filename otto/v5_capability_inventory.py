@@ -566,6 +566,7 @@ _KNOWN_SURFACE_KINDS = frozenset({
     "settings",
     "global",
 })
+CHARTER_PROSE_TARGET_LINES = 500
 
 
 def _extract_operating_notes_block(charter_text: str) -> str | None:
@@ -615,6 +616,19 @@ def parse_information_architecture_contract(source: str | Path) -> dict[str, Any
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _charter_prose_line_count(charter_text: str) -> int:
+    """Count CHARTER lines excluding the IA JSON contract body.
+
+    The v6 cap is aimed at prose duplication, not contract data. The IA
+    section remains the source of truth even when it is large.
+    """
+    total = len(charter_text.splitlines())
+    block = _extract_ia_block(charter_text)
+    if block is None:
+        return total
+    return max(total - len(block.splitlines()), 0)
 
 
 def _latest_spec_payload(project_dir: Path) -> dict[str, Any] | None:
@@ -1001,6 +1015,17 @@ def check_coherence(
             project_dir, spec=spec_payload, project_kind=project_kind
         ))
         return findings
+
+    prose_lines = _charter_prose_line_count(text)
+    if prose_lines > CHARTER_PROSE_TARGET_LINES:
+        findings.append(CoherenceFinding(
+            kind="charter_prose_over_line_cap",
+            reference="CHARTER.md",
+            detail=(
+                f"CHARTER prose is {prose_lines} lines excluding the IA JSON "
+                f"contract; target is <= {CHARTER_PROSE_TARGET_LINES} lines"
+            ),
+        ))
 
     notes = _extract_operating_notes_block(text)
     if notes is not None:
