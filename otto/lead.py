@@ -306,6 +306,10 @@ async def run_lead(
             _write_summary(session_dir, result)
         except Exception as exc:  # noqa: BLE001
             logger.warning("summary.json write failed: %s", exc)
+        try:
+            _write_skipped_report(session_dir, result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("skipped_report.md write failed: %s", exc)
 
     return result
 
@@ -729,3 +733,46 @@ def _write_summary(session_dir: Path, result: LeadResult) -> None:
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     summary_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _format_skipped_item(item: Any) -> str:
+    if isinstance(item, dict):
+        feature = str(item.get("feature") or item.get("id") or item.get("name") or "").strip()
+        reason = str(item.get("reason") or item.get("gap") or item.get("detail") or "").strip()
+        if feature and reason:
+            return f"{feature}: {reason}"
+        if feature:
+            return feature
+        if reason:
+            return reason
+        return json.dumps(item, sort_keys=True)
+    return str(item).strip()
+
+
+def _write_skipped_report(session_dir: Path, result: LeadResult) -> Path | None:
+    """Append operator-visible action items for skipped intent coverage."""
+    verify_result = result.verify_result if isinstance(result.verify_result, dict) else {}
+    coverage = verify_result.get("intent_coverage") if isinstance(verify_result, dict) else None
+    if not isinstance(coverage, dict):
+        return None
+    skipped = coverage.get("skipped") or []
+    if not isinstance(skipped, list) or not skipped:
+        return None
+
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    path = session_dir / "skipped_report.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"## {timestamp} task={result.task_id} verdict={result.verdict}",
+        "",
+        "Manual follow-up required for skipped intent items:",
+        "",
+    ]
+    for item in skipped:
+        label = _format_skipped_item(item)
+        if label:
+            lines.append(f"- {label}")
+    lines.append("")
+    with path.open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return path

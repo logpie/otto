@@ -1,5 +1,37 @@
 # Otto redesign — research
 
+## v6 bugfix batch research (2026-05-14)
+
+Scope: fix P1/P2/P3 issues from the v6b audit in the `cc-i2p-2`
+worktree. No live Otto runs; validation is focused unit/regression tests plus
+the requested v5/spec_compile/runner/branching suite.
+
+Relevant current paths:
+
+- `otto/v5_runner.py` owns child dispatch, nested scheduling, subtree/root
+  integration, toolchain preflight propagation, and integration summaries.
+- `otto/queue/subtask.py` already skips graph-terminal tasks across recursive
+  schedulers, but `_process_children()` still has only per-loop in-flight
+  accounting and no shared lease.
+- `otto/lead.py` passes `verification_plan.matrix_scope` into
+  `validate_lead_verdict()`, so matrix scope is mostly present; this batch
+  needs an explicit runner-level regression proving leaf vs integration call
+  wiring.
+- `otto/v5_clean_verify.py` already treats busy declared ports as a clean
+  verification failure; `otto/v5_preflight.py` still maps
+  `clean_deploy_port_busy` to a warning, making the integration path too soft.
+- `otto/v5_capability_inventory.py` counts CHARTER prose excluding the IA JSON,
+  but the target remains 500 lines and the warning lacks the requested split.
+- `otto/prompts/lead.md` is the right place to tighten root decomposition,
+  CHARTER prose cap language, and deprecation-warning expectations.
+
+Open constraints:
+
+- The Codex MCP peer tool required by the project-level `codex-gate` workflow
+  is not available in this session, and the user explicitly requested one
+  workspace-write dispatch with no extra Codex calls. I will document that in
+  the plan and rely on local tests.
+
 ## Dispatch 3 v6 perf-quality research (2026-05-14)
 
 Scope: implement Batches 5 and 6 from `plan-v6-perf-quality.md` on the

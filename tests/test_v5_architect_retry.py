@@ -29,7 +29,11 @@ from otto.queue.task_graph import (
     set_verdict,
 )
 from otto.v5_preflight import PreflightIssue
-from otto.v5_runner import MAX_ARCHITECT_RETRIES, _process_children
+from otto.v5_runner import (
+    MAX_ARCHITECT_RETRIES,
+    _link_shared_install_dirs,
+    _process_children,
+)
 
 
 def _seed_architect(project_dir: Path, task_id: str = "v5-arch") -> None:
@@ -270,3 +274,91 @@ async def test_architect_retry_cap_exhausted(tmp_path: Path) -> None:
     final = get_task(tmp_path, arch_tid)
     assert final is not None
     assert final.get("verdict") == "pass"
+
+
+@pytest.mark.asyncio
+async def test_toolchain_preflight_runs_after_architect_and_children_inherit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Architect preflight should install once, propagate, then leaves inherit."""
+    record_task(tmp_path, task_id="root", intent="root build", parent_task_id=None)
+    arch_tid = enqueue_subtask(
+        project_dir=tmp_path,
+        parent_task_id="root",
+        parent_session_dir=tmp_path / "session",
+        intent="Architect frontend scaffold.",
+    )
+    feature_tid = enqueue_subtask(
+        project_dir=tmp_path,
+        parent_task_id="root",
+        parent_session_dir=tmp_path / "session",
+        intent="Build dashboard page.",
+        depends_on=[arch_tid],
+    )
+    record_task(tmp_path, task_id=arch_tid, intent="Architect frontend scaffold.", parent_task_id="root")
+    record_task(
+        tmp_path,
+        task_id=feature_tid,
+        intent="Build dashboard page.",
+        parent_task_id="root",
+        depends_on=[arch_tid],
+    )
+
+    inherited: list[bool] = []
+
+    async def fake_run_child(**kwargs: Any) -> LeadResult:
+        tid = kwargs["entry"]["task_id"]
+        if tid == arch_tid:
+            arch_worktree = tmp_path / ".worktrees" / arch_tid / "frontend"
+            arch_worktree.mkdir(parents=True)
+            (arch_worktree / "package.json").write_text('{"scripts":{"build":"vite build"}}\n')
+            set_verdict(tmp_path, tid, "pass")
+            return LeadResult(task_id=tid, verdict="pass", cost_usd=0.1)
+
+        child_worktree = tmp_path / ".worktrees" / feature_tid
+        child_worktree.mkdir(parents=True)
+        linked = _link_shared_install_dirs(tmp_path, child_worktree, feature_tid)
+        inherited.append(
+            linked == 1
+            and (child_worktree / "frontend" / "node_modules").is_symlink()
+        )
+        set_verdict(tmp_path, tid, "pass")
+        return LeadResult(task_id=tid, verdict="pass", cost_usd=0.1)
+
+    def fake_toolchain(worktree_dir: Path, **_kwargs: Any):
+        from otto.v5_clean_verify import ToolchainPreflightResult
+
+        node_modules = worktree_dir / "frontend" / "node_modules"
+        node_modules.mkdir(parents=True)
+        return ToolchainPreflightResult(
+            passed=True,
+            worktree=str(worktree_dir),
+            _written_at="2026-05-14T00:00:00Z",
+            manifest_counts={"package_json": 1, "pyproject": 0},
+        )
+
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr("otto.v5_runner._run_child", fake_run_child)
+    monkeypatch.setattr("otto.v5_runner.check_scaffold_compiles", lambda *_a, **_k: [])
+    monkeypatch.setattr("otto.v5_clean_verify.preflight_shared_toolchains", fake_toolchain)
+
+    await _process_children(
+        project_dir=tmp_path,
+        parent_task_id="root",
+        config={},
+        max_parallel=3,
+        tree_budget_usd=10.0,
+        child_results={},
+        integration_results={},
+        on_event=events.append,
+    )
+
+    assert inherited == [True]
+    propagated = tmp_path / "frontend" / "node_modules"
+    assert propagated.is_symlink()
+    assert any(e.get("event") == "toolchain_preflight_done" for e in events)
+    assert any(
+        e.get("event") == "install_dirs_propagated" and e.get("count") == 1
+        for e in events
+    )

@@ -566,7 +566,7 @@ _KNOWN_SURFACE_KINDS = frozenset({
     "settings",
     "global",
 })
-CHARTER_PROSE_TARGET_LINES = 500
+CHARTER_PROSE_TARGET_LINES = 300
 
 
 def _extract_operating_notes_block(charter_text: str) -> str | None:
@@ -618,17 +618,28 @@ def parse_information_architecture_contract(source: str | Path) -> dict[str, Any
     return payload if isinstance(payload, dict) else None
 
 
-def _charter_prose_line_count(charter_text: str) -> int:
-    """Count CHARTER lines excluding the IA JSON contract body.
+def _charter_line_counts(charter_text: str) -> dict[str, int]:
+    """Count CHARTER total, prose, and IA JSON lines.
 
     The v6 cap is aimed at prose duplication, not contract data. The IA
     section remains the source of truth even when it is large.
     """
     total = len(charter_text.splitlines())
+    ia_json_lines = 0
     block = _extract_ia_block(charter_text)
-    if block is None:
-        return total
-    return max(total - len(block.splitlines()), 0)
+    if block is not None:
+        fenced = _FENCED_JSON.search(block)
+        ia_json_lines = len((fenced.group(0) if fenced else block).splitlines())
+    return {
+        "total": total,
+        "ia_json": ia_json_lines,
+        "prose": max(total - ia_json_lines, 0),
+    }
+
+
+def _charter_prose_line_count(charter_text: str) -> int:
+    """Count CHARTER lines excluding the IA JSON contract body."""
+    return _charter_line_counts(charter_text)["prose"]
 
 
 def _latest_spec_payload(project_dir: Path) -> dict[str, Any] | None:
@@ -1016,14 +1027,17 @@ def check_coherence(
         ))
         return findings
 
-    prose_lines = _charter_prose_line_count(text)
+    line_counts = _charter_line_counts(text)
+    prose_lines = line_counts["prose"]
     if prose_lines > CHARTER_PROSE_TARGET_LINES:
         findings.append(CoherenceFinding(
             kind="charter_prose_over_line_cap",
             reference="CHARTER.md",
             detail=(
-                f"CHARTER prose is {prose_lines} lines excluding the IA JSON "
-                f"contract; target is <= {CHARTER_PROSE_TARGET_LINES} lines"
+                f"CHARTER has {line_counts['total']} total lines: "
+                f"{prose_lines} prose lines and {line_counts['ia_json']} IA JSON/fence "
+                f"lines. Prose target is <= {CHARTER_PROSE_TARGET_LINES} lines; "
+                "IA JSON is uncapped."
             ),
         ))
 

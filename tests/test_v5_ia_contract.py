@@ -185,6 +185,32 @@ def test_architect_prompt_caps_charter_prose_without_trimming_ia_contract() -> N
     prompt = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
 
     assert "The IA JSON block is your contract" in prompt
-    assert "Target total CHARTER ≤ 500 lines" in prompt
+    assert "The IA JSON block is uncapped" in prompt
+    assert "should be ≤300 lines" in prompt
     assert "trim contract data" in prompt
     assert "CONTEXT SLICE" in prompt
+
+
+def test_coherence_warning_reports_prose_ia_split(tmp_path: Path) -> None:
+    ia = _ia()
+    prose = "\n".join(f"- prose line {index}" for index in range(305))
+    text = (
+        "# CHARTER\n\n"
+        "## Information Architecture Contract\n\n"
+        "```json\n"
+        + json.dumps(ia, indent=2)
+        + "\n```\n\n"
+        "## Agent operating notes\n\n"
+        + prose
+        + "\n"
+    )
+    (tmp_path / "CHARTER.md").write_text(text, encoding="utf-8")
+    inv = build_inventory(tmp_path)
+
+    findings = check_coherence(tmp_path, inv, spec=_spec())
+
+    cap = next(f for f in findings if f.kind == "charter_prose_over_line_cap")
+    assert "prose lines" in cap.detail
+    assert "IA JSON/fence lines" in cap.detail
+    assert "Prose target is <= 300 lines" in cap.detail
+    assert "IA JSON is uncapped" in cap.detail

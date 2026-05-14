@@ -325,7 +325,7 @@ def smoke_clean_deploy(
         issues.append(
             PreflightIssue(
                 kind="clean_deploy_port_busy",
-                severity="warn",
+                severity="block",
                 message=message,
             )
         )

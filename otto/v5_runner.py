@@ -78,6 +78,47 @@ ROOT_TASK_ID = "root"
 MAX_ARCHITECT_RETRIES = 2
 
 
+class _DispatchLease:
+    """Shared per-run child dispatch capacity.
+
+    ``_process_children`` can be entered recursively, and tests can exercise
+    two scheduler loops concurrently. Local ``in_flight`` dicts are not enough
+    in that shape: every loop sees its own capacity. This lease is the single
+    in-process source of truth for active child runs.
+    """
+
+    def __init__(self, max_parallel: int) -> None:
+        self.max_parallel = max(1, int(max_parallel or 1))
+        self._active: set[str] = set()
+        self._condition = asyncio.Condition()
+
+    async def active_task_ids(self) -> set[str]:
+        async with self._condition:
+            return set(self._active)
+
+    async def try_acquire(self, task_id: str) -> bool:
+        async with self._condition:
+            if task_id in self._active:
+                return False
+            if len(self._active) >= self.max_parallel:
+                return False
+            self._active.add(task_id)
+            return True
+
+    async def release(self, task_id: str) -> None:
+        async with self._condition:
+            if task_id in self._active:
+                self._active.remove(task_id)
+                self._condition.notify_all()
+
+    async def wait_for_change(self, timeout_s: float = 0.25) -> None:
+        async with self._condition:
+            try:
+                await asyncio.wait_for(self._condition.wait(), timeout=timeout_s)
+            except asyncio.TimeoutError:
+                return
+
+
 # ---------------------------------------------------------------------------
 # Auditor (pluggable, opt-in)
 # ---------------------------------------------------------------------------
@@ -409,7 +450,7 @@ async def run_v5_pipeline(
             )
             # ---- Phase E: Run root integration ----
             child_summaries = _build_child_summaries(
-                project_dir, ROOT_TASK_ID, result.child_results
+                project_dir, ROOT_TASK_ID, result.child_results, result.integration_results
             )
             integration_session_dir = root_session_dir / "integration"
             integration_session_dir.mkdir(parents=True, exist_ok=True)
@@ -434,6 +475,12 @@ async def run_v5_pipeline(
                 context="root_integration_start",
                 on_event=on_event,
             )
+            preflight_result = _run_integration_smoke_preflight(
+                worktree_path=project_dir,
+                task_id=ROOT_TASK_ID,
+                phase="pre_agent",
+                on_event=on_event,
+            )
             integration_result = await run_lead(
                 task_id=ROOT_TASK_ID,
                 intent=intent,
@@ -443,6 +490,7 @@ async def run_v5_pipeline(
                 config=config,
                 kind="integration",
                 child_summaries=child_summaries,
+                preflight_result=preflight_result,
             )
             _commit_integration_agent_changes(
                 project_dir=project_dir,
@@ -451,6 +499,46 @@ async def run_v5_pipeline(
                 result=integration_result,
                 on_event=on_event,
             )
+            post_preflight_result = _run_integration_smoke_preflight(
+                worktree_path=project_dir,
+                task_id=ROOT_TASK_ID,
+                phase="post_agent",
+                on_event=on_event,
+            )
+            if integration_result.verify_result is None:
+                integration_result.verify_result = {}
+            if isinstance(integration_result.verify_result, dict):
+                integration_result.verify_result["pre_integration_preflight"] = preflight_result
+                integration_result.verify_result["post_integration_preflight"] = post_preflight_result
+            if (
+                integration_result.verdict != "catastrophic"
+                and _integration_smoke_blocks(post_preflight_result)
+            ):
+                integration_result.verdict = "merge_blocked"
+                integration_result.failure_reason = (
+                    "Post-agent smoke_clean_deploy still has blocking issues: "
+                    + "; ".join(
+                        str(issue.get("message") or issue.get("kind"))
+                        for issue in post_preflight_result.get("issues", [])
+                        if isinstance(issue, dict)
+                        and issue.get("severity") in ("error", "block")
+                    )
+                )
+                if isinstance(integration_result.verify_result, dict):
+                    integration_result.verify_result["verdict"] = "merge_blocked"
+                    integration_result.verify_result["summary"] = integration_result.failure_reason
+                set_verdict(
+                    project_dir,
+                    ROOT_TASK_ID,
+                    "merge_blocked",
+                    cost_usd=integration_result.cost_usd,
+                )
+                _emit(on_event, {
+                    "event": "integration_smoke_failed",
+                    "task_id": ROOT_TASK_ID,
+                    "verdict": "merge_blocked",
+                    "worktree": str(project_dir),
+                })
             result.integration_results[ROOT_TASK_ID] = integration_result
             _emit(on_event, {
                 "event": "integration_done",
@@ -505,6 +593,7 @@ async def _process_children(
     child_results: dict[str, LeadResult],
     integration_results: dict[str, LeadResult],
     on_event: Any = None,
+    dispatch_lease: _DispatchLease | None = None,
 ) -> None:
     """Process the v5_pending queue for ``parent_task_id``'s subtree.
 
@@ -517,8 +606,9 @@ async def _process_children(
     completed: set[str] = set()
     in_flight: dict[str, asyncio.Task[Any]] = {}
     preflight_seen: set[str] = set()  # issue kinds already emitted, dedupe
-    scaffold_compile_done: bool = False  # gate; reset on retry so check
-    # fires again after an architect re-attempt
+    architect_preflight_done: set[tuple[str, int]] = set()
+    if dispatch_lease is None:
+        dispatch_lease = _DispatchLease(max_parallel)
 
     while True:
         # Check tree budget cap.
@@ -532,6 +622,9 @@ async def _process_children(
             # Wait for in-flight to drain, then exit.
             if in_flight:
                 await asyncio.gather(*in_flight.values(), return_exceptions=True)
+                for leased_tid in list(in_flight):
+                    await dispatch_lease.release(leased_tid)
+                in_flight.clear()
             break
 
         # Pre-flight: deterministic checks on the task graph.
@@ -557,7 +650,7 @@ async def _process_children(
         ready = take_ready(
             project_dir,
             completed_task_ids=completed,
-            in_flight_task_ids=set(in_flight.keys()),
+            in_flight_task_ids=set(in_flight.keys()) | await dispatch_lease.active_task_ids(),
         )
         # Filter to descendants of parent_task_id.
         ready = [r for r in ready if _is_descendant_of(project_dir, r["task_id"], parent_task_id)]
@@ -576,214 +669,231 @@ async def _process_children(
         # transitions to verdict=pass, before feature children dispatch.
         # Catches "architect said pass but scaffold doesn't compile" —
         # otherwise discovered 20+ min later when features try to build on it.
-        if not scaffold_compile_done:
-            tasks = (graph.get("tasks") or {})
-            architect_tid: str | None = None
-            for tid, t in tasks.items():
-                if (
-                    (t.get("intent") or "").lstrip().lower().startswith("architect")
-                    and t.get("verdict") == "pass"
-                    and not (t.get("depends_on") or [])
-                ):
-                    architect_tid = tid
-                    break
-            if architect_tid is not None:
-                scaffold_compile_done = True
-                logger.info("preflight: running scaffold compile check after architect-pass (task=%s)", architect_tid)
-                compile_issues = check_scaffold_compiles(
-                    project_dir, architect_task_id=architect_tid
-                )
-                blocking_messages: list[str] = []
-                for issue in compile_issues:
-                    key = f"{issue.kind}:scaffold:{get_retry_count(project_dir, architect_tid)}"
-                    if key in preflight_seen:
-                        continue
-                    preflight_seen.add(key)
-                    log_fn = logger.error if issue.severity in ("error", "block") else logger.warning
-                    log_fn("preflight %s [%s]: %s", issue.kind, issue.severity, issue.message)
+        retry_architect = False
+        tasks = (graph.get("tasks") or {})
+        for architect_tid, architect_task in tasks.items():
+            if not (
+                (architect_task.get("intent") or "").lstrip().lower().startswith("architect")
+                and architect_task.get("verdict") == "pass"
+                and not (architect_task.get("depends_on") or [])
+            ):
+                continue
+            retry_count = get_retry_count(project_dir, architect_tid)
+            preflight_key = (architect_tid, retry_count)
+            if preflight_key in architect_preflight_done:
+                continue
+            architect_preflight_done.add(preflight_key)
+            logger.info("preflight: running scaffold compile check after architect-pass (task=%s)", architect_tid)
+            compile_issues = check_scaffold_compiles(
+                project_dir, architect_task_id=architect_tid
+            )
+            blocking_messages: list[str] = []
+            for issue in compile_issues:
+                key = f"{issue.kind}:scaffold:{architect_tid}:{retry_count}"
+                if key in preflight_seen:
+                    continue
+                preflight_seen.add(key)
+                log_fn = logger.error if issue.severity in ("error", "block") else logger.warning
+                log_fn("preflight %s [%s]: %s", issue.kind, issue.severity, issue.message)
+                _emit(on_event, {
+                    "event": "preflight_issue",
+                    "kind": issue.kind,
+                    "severity": issue.severity,
+                    "message": issue.message,
+                })
+                if issue.severity == "block":
+                    blocking_messages.append(f"[{issue.kind}] {issue.message}")
+
+            # Architect retry on blocking compile failure: scaffold
+            # doesn't actually compile from a clean state. The
+            # architect declared pass based on its in-session state
+            # (where node_modules was populated). Invalidate the
+            # verdict, surface the failure, and re-dispatch.
+            if blocking_messages:
+                current_retries = get_retry_count(project_dir, architect_tid)
+                if current_retries < MAX_ARCHITECT_RETRIES:
+                    reason = (
+                        "Clean-state preflight failed for your scaffold. "
+                        "The runner copied your output to a temp dir, ran "
+                        "`script_valid`, `npm ci`, `npm run build`, and `py_compile`, and got "
+                        "these errors:\n\n"
+                        + "\n".join(f"  - {m}" for m in blocking_messages)
+                        + "\n\nFix the underlying bug — don't lean on in-session "
+                        "state (your existing node_modules, venv) that won't "
+                        "survive handoff. Re-emit your scaffold."
+                    )
+                    new_count = clear_verdict_for_retry(
+                        project_dir, architect_tid, reason
+                    )
+                    completed.discard(architect_tid)
+                    child_results.pop(architect_tid, None)
+                    logger.warning(
+                        "architect %s scaffold preflight failed (attempt %d/%d): re-dispatching",
+                        architect_tid,
+                        new_count,
+                        MAX_ARCHITECT_RETRIES,
+                    )
                     _emit(on_event, {
-                        "event": "preflight_issue",
-                        "kind": issue.kind,
-                        "severity": issue.severity,
-                        "message": issue.message,
+                        "event": "architect_retry",
+                        "task_id": architect_tid,
+                        "retry_count": new_count,
+                        "max_retries": MAX_ARCHITECT_RETRIES,
+                        "reason_tail": blocking_messages[-1][:200],
                     })
-                    if issue.severity == "block":
-                        blocking_messages.append(f"[{issue.kind}] {issue.message}")
+                    # The architect is now eligible for re-dispatch, but
+                    # the `ready` list computed at the top of this loop
+                    # iteration is stale (the architect wasn't in it).
+                    # Re-enter the loop so take_ready picks it up.
+                    retry_architect = True
+                    break
+                logger.error(
+                    "architect %s scaffold preflight failed after %d retries; "
+                    "descendants will remain blocked",
+                    architect_tid,
+                    MAX_ARCHITECT_RETRIES,
+                )
+                _emit(on_event, {
+                    "event": "architect_retry_exhausted",
+                    "task_id": architect_tid,
+                    "retry_count": current_retries,
+                })
+                continue
 
-                # Architect retry on blocking compile failure: scaffold
-                # doesn't actually compile from a clean state. The
-                # architect declared pass based on its in-session state
-                # (where node_modules was populated). Invalidate the
-                # verdict, surface the failure, and re-dispatch.
-                if blocking_messages:
-                    current_retries = get_retry_count(project_dir, architect_tid)
-                    if current_retries < MAX_ARCHITECT_RETRIES:
-                        reason = (
-                            "Clean-state preflight failed for your scaffold. "
-                            "The runner copied your output to a temp dir, ran "
-                            "`script_valid`, `npm ci`, `npm run build`, and `py_compile`, and got "
-                            "these errors:\n\n"
-                            + "\n".join(f"  - {m}" for m in blocking_messages)
-                            + "\n\nFix the underlying bug — don't lean on in-session "
-                            "state (your existing node_modules, venv) that won't "
-                            "survive handoff. Re-emit your scaffold."
-                        )
-                        new_count = clear_verdict_for_retry(
-                            project_dir, architect_tid, reason
-                        )
-                        completed.discard(architect_tid)
-                        child_results.pop(architect_tid, None)
-                        scaffold_compile_done = False
+            # Architect passed AND scaffold preflight is clean.
+            # Run shared toolchain preflight in the architect
+            # worktree so ignored install dirs exist there before
+            # propagation. This is non-blocking optimization state:
+            # clean scaffold verification above remains the
+            # correctness gate, while this preflight logs exactly
+            # what dependency bootstrap commands ran.
+            arch_worktree = project_dir / ".worktrees" / architect_tid
+            try:
+                from otto.v5_clean_verify import preflight_shared_toolchains
+
+                toolchain_started = time.monotonic()
+                toolchain_result = preflight_shared_toolchains(
+                    arch_worktree,
+                    timeout_s=300,
+                    logger_fn=lambda m: logger.info("preflight: %s", m),
+                )
+                toolchain_duration_s = round(time.monotonic() - toolchain_started, 3)
+                toolchain_payload = toolchain_result.to_jsonable()
+                toolchain_payload["duration_s"] = toolchain_duration_s
+                log_path = _write_toolchain_preflight_log(
+                    project_dir=project_dir,
+                    architect_task_id=architect_tid,
+                    retry_count=retry_count,
+                    result=toolchain_payload,
+                )
+                logger.info(
+                    "preflight: toolchain preflight completed for architect %s in %.3fs "
+                    "(passed=%s, commands=%d)",
+                    architect_tid,
+                    toolchain_duration_s,
+                    toolchain_result.passed,
+                    len(toolchain_result.commands),
+                )
+                _emit(on_event, {
+                    "event": "toolchain_preflight_done",
+                    "architect_task_id": architect_tid,
+                    "passed": toolchain_result.passed,
+                    "command_count": len(toolchain_result.commands),
+                    "duration_s": toolchain_duration_s,
+                    "log_path": str(log_path),
+                })
+                if not toolchain_result.passed:
+                    logger.warning(
+                        "toolchain preflight had failures for architect %s: %s",
+                        architect_tid,
+                        "; ".join(toolchain_result.failure_messages[:3]),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("toolchain preflight failed: %s", exc)
+
+            # Propagate its node_modules/.venv into project_dir so
+            # feature children's worktrees can symlink instead of
+            # re-running `npm install` / `uv sync`.
+            try:
+                n = _propagate_install_dirs_from_architect(
+                    project_dir, arch_worktree
+                )
+                logger.info(
+                    "preflight: architect %s install-dir propagation complete (count=%d)",
+                    architect_tid,
+                    n,
+                )
+                _emit(on_event, {
+                    "event": "install_dirs_propagated",
+                    "architect_task_id": architect_tid,
+                    "count": n,
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "propagate install dirs from architect failed: %s", exc
+                )
+
+            # Source-of-truth fix (Part A): build the capability
+            # inventory from the actual scaffold + inject it into
+            # CHARTER as a managed "Detected Infrastructure" block.
+            # This gives feature children a deterministic source
+            # for operational facts (scripts, deps, configs) that
+            # the architect can't unintentionally contradict in
+            # prose.
+            inv = None
+            try:
+                from otto.v5_capability_inventory import (
+                    build_inventory, render_inventory, inject_into_charter,
+                    check_coherence,
+                )
+                inv = build_inventory(project_dir)
+                rendered = render_inventory(inv)
+                if inject_into_charter(project_dir, rendered):
+                    logger.info(
+                        "Detected Infrastructure section injected into CHARTER.md "
+                        "(%d package.jsons, %d pyprojects, %d configs)",
+                        len(inv.package_jsons),
+                        len(inv.pyprojects),
+                        len(inv.known_configs),
+                    )
+                    _emit(on_event, {
+                        "event": "capability_inventory_injected",
+                        "package_json_count": len(inv.package_jsons),
+                        "pyproject_count": len(inv.pyprojects),
+                        "known_config_count": len(inv.known_configs),
+                    })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("capability inventory injection failed: %s", exc)
+
+            # Source-of-truth fix (Part B): coherence gate
+            # (warning-only). For each backticked reference in the
+            # architect's "Agent operating notes" section, verify
+            # the path/script/command actually resolves against the
+            # scaffold. Emit warnings; don't block dispatch.
+            try:
+                if inv is not None:
+                    findings = check_coherence(project_dir, inv)
+                    for f in findings:
                         logger.warning(
-                            "architect %s scaffold preflight failed (attempt %d/%d): re-dispatching",
-                            architect_tid,
-                            new_count,
-                            MAX_ARCHITECT_RETRIES,
+                            "coherence: %s — %s (in CHARTER operating notes)",
+                            f.kind, f.detail,
                         )
                         _emit(on_event, {
-                            "event": "architect_retry",
-                            "task_id": architect_tid,
-                            "retry_count": new_count,
-                            "max_retries": MAX_ARCHITECT_RETRIES,
-                            "reason_tail": blocking_messages[-1][:200],
+                            "event": "coherence_finding",
+                            "kind": f.kind,
+                            "reference": f.reference,
+                            "detail": f.detail,
                         })
-                        # The architect is now eligible for re-dispatch, but
-                        # the `ready` list computed at the top of this loop
-                        # iteration is stale (the architect wasn't in it).
-                        # Re-enter the loop so take_ready picks it up.
-                        continue
-                    else:
-                        logger.error(
-                            "architect %s scaffold preflight failed after %d retries; "
-                            "descendants will remain blocked",
-                            architect_tid,
-                            MAX_ARCHITECT_RETRIES,
-                        )
-                        _emit(on_event, {
-                            "event": "architect_retry_exhausted",
-                            "task_id": architect_tid,
-                            "retry_count": current_retries,
-                        })
-                else:
-                    # Architect passed AND scaffold preflight is clean.
-                    # Run shared toolchain preflight in the architect
-                    # worktree so ignored install dirs exist there before
-                    # propagation. This is non-blocking optimization state:
-                    # clean scaffold verification above remains the
-                    # correctness gate, while this preflight logs exactly
-                    # what dependency bootstrap commands ran.
-                    arch_worktree = project_dir / ".worktrees" / architect_tid
-                    try:
-                        from otto.v5_clean_verify import preflight_shared_toolchains
-
-                        toolchain_result = preflight_shared_toolchains(
-                            arch_worktree,
-                            timeout_s=300,
-                            logger_fn=lambda m: logger.info("preflight: %s", m),
-                        )
-                        log_path = _write_toolchain_preflight_log(
-                            project_dir=project_dir,
-                            architect_task_id=architect_tid,
-                            retry_count=get_retry_count(project_dir, architect_tid),
-                            result=toolchain_result.to_jsonable(),
-                        )
-                        _emit(on_event, {
-                            "event": "toolchain_preflight_done",
-                            "architect_task_id": architect_tid,
-                            "passed": toolchain_result.passed,
-                            "command_count": len(toolchain_result.commands),
-                            "log_path": str(log_path),
-                        })
-                        if not toolchain_result.passed:
-                            logger.warning(
-                                "toolchain preflight had failures for architect %s: %s",
-                                architect_tid,
-                                "; ".join(toolchain_result.failure_messages[:3]),
-                            )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("toolchain preflight failed: %s", exc)
-
-                    # Propagate its node_modules/.venv into project_dir so
-                    # feature children's worktrees can symlink instead of
-                    # re-running `npm install` / `uv sync`.
-                    try:
-                        n = _propagate_install_dirs_from_architect(
-                            project_dir, arch_worktree
-                        )
-                        if n > 0:
-                            logger.info(
-                                "propagated %d install dir(s) from architect %s",
-                                n, architect_tid,
-                            )
-                            _emit(on_event, {
-                                "event": "install_dirs_propagated",
-                                "architect_task_id": architect_tid,
-                                "count": n,
-                            })
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "propagate install dirs from architect failed: %s", exc
-                        )
-
-                    # Source-of-truth fix (Part A): build the capability
-                    # inventory from the actual scaffold + inject it into
-                    # CHARTER as a managed "Detected Infrastructure" block.
-                    # This gives feature children a deterministic source
-                    # for operational facts (scripts, deps, configs) that
-                    # the architect can't unintentionally contradict in
-                    # prose.
-                    inv = None
-                    try:
-                        from otto.v5_capability_inventory import (
-                            build_inventory, render_inventory, inject_into_charter,
-                            check_coherence,
-                        )
-                        inv = build_inventory(project_dir)
-                        rendered = render_inventory(inv)
-                        if inject_into_charter(project_dir, rendered):
-                            logger.info(
-                                "Detected Infrastructure section injected into CHARTER.md "
-                                "(%d package.jsons, %d pyprojects, %d configs)",
-                                len(inv.package_jsons),
-                                len(inv.pyprojects),
-                                len(inv.known_configs),
-                            )
-                            _emit(on_event, {
-                                "event": "capability_inventory_injected",
-                                "package_json_count": len(inv.package_jsons),
-                                "pyproject_count": len(inv.pyprojects),
-                                "known_config_count": len(inv.known_configs),
-                            })
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("capability inventory injection failed: %s", exc)
-
-                    # Source-of-truth fix (Part B): coherence gate
-                    # (warning-only). For each backticked reference in the
-                    # architect's "Agent operating notes" section, verify
-                    # the path/script/command actually resolves against the
-                    # scaffold. Emit warnings; don't block dispatch.
-                    try:
-                        if inv is not None:
-                            findings = check_coherence(project_dir, inv)
-                            for f in findings:
-                                logger.warning(
-                                    "coherence: %s — %s (in CHARTER operating notes)",
-                                    f.kind, f.detail,
-                                )
-                                _emit(on_event, {
-                                    "event": "coherence_finding",
-                                    "kind": f.kind,
-                                    "reference": f.reference,
-                                    "detail": f.detail,
-                                })
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("coherence check raised: %s", exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("coherence check raised: %s", exc)
+        if retry_architect:
+            continue
 
         # Spawn ready tasks up to max_parallel.
+        spawned_any = False
         for entry in ready:
-            if len(in_flight) >= max_parallel:
-                break
             tid = entry["task_id"]
+            if not await dispatch_lease.try_acquire(tid):
+                continue
             in_flight[tid] = asyncio.create_task(
                 _run_child(
                     project_dir=project_dir,
@@ -792,11 +902,15 @@ async def _process_children(
                     on_event=on_event,
                 )
             )
+            spawned_any = True
             _emit(on_event, {"event": "child_dispatch", "task_id": tid})
 
         # If nothing in flight and nothing ready, we're done.
         if not in_flight and not ready:
             break
+        if not in_flight and ready and not spawned_any:
+            await dispatch_lease.wait_for_change()
+            continue
 
         # Wait for at least one to complete.
         if in_flight:
@@ -807,8 +921,11 @@ async def _process_children(
                 # Find which task this future belongs to.
                 tid = next(t for t, f in in_flight.items() if f is fut)
                 in_flight.pop(tid, None)
+                released = False
                 try:
                     result: LeadResult = fut.result()
+                    await dispatch_lease.release(tid)
+                    released = True
                     child_results[tid] = result
                     completed.add(tid)
                     _emit(on_event, {
@@ -828,6 +945,7 @@ async def _process_children(
                             child_results=child_results,
                             integration_results=integration_results,
                             on_event=on_event,
+                            dispatch_lease=dispatch_lease,
                         )
                         # Run this child's integration Lead.
                         integ_result = await _run_integration(
@@ -897,6 +1015,8 @@ async def _process_children(
                                 )
 
                 except Exception as exc:  # noqa: BLE001
+                    if not released:
+                        await dispatch_lease.release(tid)
                     logger.exception("child task wrapper crashed: %s", tid)
                     set_verdict(project_dir, tid, "catastrophic")
                     completed.add(tid)
@@ -959,7 +1079,18 @@ async def _run_child(
             # project_dir/{node_modules,.venv} — but real projects put them
             # in subdirs (frontend/node_modules, api/.venv), so the symlink
             # never fired. Glob for them now.
-            _link_shared_install_dirs(project_dir, child_worktree, tid)
+            linked_install_dirs = _link_shared_install_dirs(project_dir, child_worktree, tid)
+            if linked_install_dirs:
+                logger.info(
+                    "linked %d shared install dir(s) into child %s",
+                    linked_install_dirs,
+                    tid,
+                )
+                _emit(on_event, {
+                    "event": "install_dirs_linked",
+                    "task_id": tid,
+                    "count": linked_install_dirs,
+                })
             _emit(on_event, {
                 "event": "worktree_created",
                 "task_id": tid,
@@ -1344,7 +1475,7 @@ async def _run_integration(
             logger.warning("could not copy spec for integration session: %s", exc)
 
     # Provide child summaries to the integration Lead's prompt.
-    summaries = _build_child_summaries(project_dir, task_id, child_results)
+    summaries = _build_child_summaries(project_dir, task_id, child_results, integration_results)
 
     # The integration Lead must run in a worktree that holds the merged
     # children's work — a worktree checked out to THIS task's integration
@@ -1506,6 +1637,7 @@ def _build_child_summaries(
     project_dir: Path,
     parent_task_id: str,
     child_results: dict[str, LeadResult],
+    integration_results: dict[str, LeadResult] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the child summary list passed to integration Lead's prompt.
 
@@ -1515,6 +1647,7 @@ def _build_child_summaries(
     only the mechanical merge failed.
     """
     from otto.v5_branching import child_branch_name
+    integration_results = integration_results or {}
     out: list[dict[str, Any]] = []
     for cid in children_of(project_dir, parent_task_id):
         entry = get_task(project_dir, cid) or {}
@@ -1540,6 +1673,15 @@ def _build_child_summaries(
             "summary": (result.final_text if result else "")[:200],
             "cost_usd": result.cost_usd if result else float(entry.get("cost_usd", 0.0)),
         }
+        if verdict == "pending_children":
+            reconstructed = _reconstruct_decomposed_child_summary(
+                project_dir=project_dir,
+                task_id=cid,
+                child_results=child_results,
+                integration_results=integration_results,
+            )
+            if reconstructed is not None:
+                record.update(reconstructed)
         # Surface the build branch for merge_blocked children so the
         # integration Lead can recover their work via git rather than
         # dispatching the build agent to rewrite it.
@@ -1554,6 +1696,151 @@ def _build_child_summaries(
             )
         out.append(record)
     return out
+
+
+_SUMMARY_VERDICT_SEVERITY = {
+    "pass": 0,
+    "pending_children": 1,
+    "partial": 2,
+    "unverified": 3,
+    "merge_blocked": 4,
+    "catastrophic": 5,
+}
+
+
+def _coverage_from_result(result: LeadResult | None) -> dict[str, Any] | None:
+    payload = result.verify_result if result is not None else None
+    if not isinstance(payload, dict):
+        return None
+    coverage = payload.get("intent_coverage")
+    return coverage if isinstance(coverage, dict) else None
+
+
+def _merge_intent_coverage(items: list[dict[str, Any] | None]) -> dict[str, Any]:
+    merged: dict[str, Any] = {"built": [], "partial": [], "skipped": []}
+    for coverage in items:
+        if not isinstance(coverage, dict):
+            continue
+        for key in ("built", "partial", "skipped"):
+            values = coverage.get(key) or []
+            if isinstance(values, list):
+                merged[key].extend(values)
+    return merged
+
+
+def _summary_record_from_result(
+    task_id: str,
+    result: LeadResult,
+    *,
+    source: str,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "verdict": result.verdict,
+        "summary": (result.final_text or "")[:200],
+        "cost_usd": result.cost_usd,
+        "reconstructed_from": source,
+    }
+    coverage = _coverage_from_result(result)
+    if coverage is not None:
+        record["intent_coverage"] = coverage
+    if result.agent_session_id:
+        record["agent_session_id"] = result.agent_session_id
+    record["source_task_id"] = task_id
+    return record
+
+
+def _reconstruct_decomposed_child_summary(
+    *,
+    project_dir: Path,
+    task_id: str,
+    child_results: dict[str, LeadResult],
+    integration_results: dict[str, LeadResult],
+) -> dict[str, Any] | None:
+    """Replace a stale planning verdict with resolved subtree integration.
+
+    A parent Lead that decomposed has ``verdict=pending_children`` from its
+    planning session. Once its own integration session runs, that integration
+    verdict is the relevant summary for the parent/root integrator. If the
+    integration is not present yet, preserve pending semantics for back-compat.
+    """
+    integration_result = integration_results.get(task_id)
+    if integration_result is not None:
+        return _summary_record_from_result(
+            task_id,
+            integration_result,
+            source="subtree_integration",
+        )
+
+    descendant_records: list[dict[str, Any]] = []
+    for child_id in children_of(project_dir, task_id):
+        child_entry = get_task(project_dir, child_id) or {}
+        child_result = integration_results.get(child_id) or child_results.get(child_id)
+        child_verdict = (
+            child_result.verdict
+            if child_result is not None
+            else child_entry.get("verdict")
+        )
+        if child_verdict == "pending_children":
+            nested = _reconstruct_decomposed_child_summary(
+                project_dir=project_dir,
+                task_id=child_id,
+                child_results=child_results,
+                integration_results=integration_results,
+            )
+            if nested is None:
+                return None
+            nested = dict(nested)
+            nested["task_id"] = child_id
+            descendant_records.append(nested)
+            continue
+        if child_result is not None:
+            record = _summary_record_from_result(
+                child_id,
+                child_result,
+                source="descendant_result",
+            )
+        elif child_verdict:
+            record = {
+                "verdict": child_verdict,
+                "summary": "",
+                "cost_usd": float(child_entry.get("cost_usd", 0.0)),
+                "reconstructed_from": "descendant_graph",
+                "source_task_id": child_id,
+            }
+        else:
+            return None
+        record["task_id"] = child_id
+        descendant_records.append(record)
+
+    if not descendant_records:
+        return None
+
+    worst = max(
+        (str(record.get("verdict") or "pending_children") for record in descendant_records),
+        key=lambda verdict: _SUMMARY_VERDICT_SEVERITY.get(verdict, 0),
+    )
+    cost = sum(float(record.get("cost_usd") or 0.0) for record in descendant_records)
+    coverage = _merge_intent_coverage([
+        record.get("intent_coverage") if isinstance(record.get("intent_coverage"), dict) else None
+        for record in descendant_records
+    ])
+    summary = (
+        "Reconstructed from resolved descendant verdicts: "
+        + ", ".join(
+            f"{record.get('task_id')}={record.get('verdict')}"
+            for record in descendant_records
+        )
+    )
+    reconstructed: dict[str, Any] = {
+        "verdict": worst,
+        "summary": summary[:200],
+        "cost_usd": cost,
+        "reconstructed_from": "descendant_verdicts",
+        "descendant_summaries": descendant_records,
+    }
+    if any(coverage.values()):
+        reconstructed["intent_coverage"] = coverage
+    return reconstructed
 
 
 def _is_descendant_of(project_dir: Path, candidate_id: str, ancestor_id: str) -> bool:

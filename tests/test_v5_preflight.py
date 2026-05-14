@@ -11,6 +11,7 @@ from otto.v5_preflight import (
     check_scaffold_compiles,
     filter_blocked_descendants,
     run_preflight,
+    smoke_clean_deploy,
 )
 
 
@@ -203,5 +204,37 @@ def test_check_scaffold_compiles_maps_script_valid_failure_to_block(
             severity="block",
             message="start.sh uses bash-4-only expansion",
             task_id="v5-arch",
+        )
+    ]
+
+
+def test_smoke_clean_deploy_maps_port_busy_to_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from otto.v5_clean_verify import CleanVerifyResult
+
+    (tmp_path / "start.sh").write_text("#!/usr/bin/env bash\necho ok\n")
+
+    def fake_verify_from_clean(*_args, **_kwargs) -> CleanVerifyResult:
+        return CleanVerifyResult(
+            passed=False,
+            scope="subtree",
+            failure_kind="port_busy",
+            failure_message="Declared ports [18080] already bound",
+        )
+
+    monkeypatch.setattr(
+        "otto.v5_clean_verify.verify_from_clean",
+        fake_verify_from_clean,
+    )
+
+    issues = smoke_clean_deploy(tmp_path)
+
+    assert issues == [
+        PreflightIssue(
+            kind="clean_deploy_port_busy",
+            severity="block",
+            message="Declared ports [18080] already bound",
         )
     ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from types import SimpleNamespace
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ import pytest
 from otto.queue.task_graph import read_graph
 from otto.spec_compile_flat import FlatSpec
 from otto.v5_runner import run_v5_pipeline
-from otto.v5_verification_plan import validate_lead_verdict
+from otto.v5_verification_plan import RunnerVerificationOutcome, validate_lead_verdict
 
 
 def _write(path: Path, text: str) -> None:
@@ -281,6 +282,95 @@ def test_integration_node_runs_full_matrix_when_leaf_scope_skips(tmp_path: Path)
     assert route_checks[0]["status"] == "fail"
     assert outcome.verification_plan["full_matrix"] is True
     assert outcome.final_verdict == "partial"
+
+
+def test_deprecation_warnings_downgrade_passing_verdict(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    _passing_project(tmp_path, session)
+    _write_contract(tmp_path, session)
+
+    verdict = _verdict()
+    verdict["test_output"] = (
+        "tests passed\n"
+        "DeprecationWarning: websockets.legacy is deprecated\n"
+    )
+
+    outcome = validate_lead_verdict(
+        project_dir=tmp_path,
+        worktree_dir=tmp_path,
+        session_dir=session,
+        agent_verdict=verdict,
+        initial_verdict="pass",
+    )
+
+    checks = _checks_by_kind(outcome.verification_plan)
+    assert checks["deprecation_warnings"][0]["status"] == "fail"
+    assert outcome.final_verdict == "partial"
+
+
+@pytest.mark.asyncio
+async def test_run_lead_passes_matrix_scope_to_runner_verifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from otto import lead as lead_mod
+
+    captured: list[tuple[str, str]] = []
+
+    def fake_validate(**kwargs: Any) -> RunnerVerificationOutcome:
+        captured.append((kwargs["node_kind"], kwargs["matrix_scope"]))
+        return RunnerVerificationOutcome(
+            final_verdict=kwargs["initial_verdict"],
+            verification_plan={"checks": []},
+            runner_checks_summary=[],
+            journey_failures=[],
+        )
+
+    async def fake_agent(
+        _prompt: str,
+        _options: Any,
+        *,
+        log_dir: Path,
+        phase_name: str,
+        phase_label: str,
+        timeout: int,
+        project_dir: Path,
+    ) -> tuple[str, float, str, dict[str, Any]]:
+        del phase_name, phase_label, timeout, project_dir
+        session_dir = log_dir.parent
+        _write(session_dir / "verdict.json", json.dumps(_verdict()))
+        return "done", 0.0, "agent-session", {}
+
+    monkeypatch.setattr("otto.agent.make_agent_options", lambda *_a, **_k: SimpleNamespace())
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_agent)
+    monkeypatch.setattr("otto.mcp_tools.create_otto_mcp_server", lambda **_k: object())
+    monkeypatch.setattr("otto.v5_verification_plan.validate_lead_verdict", fake_validate)
+
+    config = {"verification_plan": {"matrix_scope": "integration_only"}}
+    await lead_mod.run_lead(
+        task_id="leaf",
+        intent="leaf",
+        project_dir=tmp_path,
+        session_dir=tmp_path / "leaf-session",
+        integration_branch="main",
+        config=config,
+        kind="plan_or_inline",
+    )
+    await lead_mod.run_lead(
+        task_id="root",
+        intent="integrate",
+        project_dir=tmp_path,
+        session_dir=tmp_path / "integration-session",
+        integration_branch=None,
+        config=config,
+        kind="integration",
+        child_summaries=[],
+    )
+
+    assert captured == [
+        ("leaf", "integration_only"),
+        ("integration", "integration_only"),
+    ]
 
 
 def test_check_matrix_page_resolves(tmp_path: Path) -> None:

@@ -201,8 +201,10 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
 
        The IA JSON block is your contract. Prose sections explain
        rationale only — they MUST NOT restate what JSON already says.
-       Target total CHARTER ≤ 500 lines. Keep the JSON complete; trim
-       rationale, examples, and narrative before you trim contract data.
+       The IA JSON block is uncapped because it is machine-read
+       contract data. CHARTER prose outside that fenced IA JSON block
+       should be ≤300 lines. Keep the JSON complete; trim rationale,
+       examples, and narrative before you trim contract data.
 
        Required shape:
        ```json
@@ -341,6 +343,20 @@ Is this ONE coherent unit of work, or MULTIPLE strategic areas?
   decomposition is a smell; it pays all the coordination cost without
   parallelism.
 
+  Child sizing rule: target leaf child size is one coherent
+  feature/action slice, normally 5-10 minutes of wall time. If a
+  proposed child owns both scaffold/contracts and multiple product
+  features, split it: architect owns scaffold/contracts first; leaves
+  own feature/action implementation after the architect. If a proposed
+  child mentions more than two primary actions, more than one
+  subsystem, frontend plus backend plus tests, or vague umbrella
+  wording such as "build the app UI" / "complete the full product",
+  do not emit it as a leaf. Break it into explicit leaves with
+  `owned_paths` and `action_ids`. If you intentionally keep a child
+  you expect to exceed 15 minutes, state why it is indivisible: which
+  files/contracts force serialization, what would conflict if split,
+  and why the architect cannot pre-scaffold more of it.
+
   Do NOT emit a tests-only final child that depends on all other
   siblings. Feature leaves own their own tests. Otto's automatic
   integration session is the cross-stack verifier after children
@@ -429,7 +445,12 @@ does the live cross-stack verification.
 
 **Run**: run your tests via Bash (`npm test`, `pytest`,
 `vitest run`, etc.).
-**Iterate**: if tests fail, read the output, fix, run again. Stop
+Treat test warnings as part of the result: deprecation warnings
+(`DeprecationWarning`, deprecated APIs, framework deprecations such as
+websockets changes, AsyncMock misuse warnings) are not a clean pass.
+Fix them before declaring `pass`, or downgrade to `partial` and list
+the warning under `intent_coverage.partial`.
+**Iterate**: if tests fail or warnings remain, read the output, fix, run again. Stop
 when confident OR when you've iterated on the same test 3+ times
 without progress — at that point ship `partial` with the gap noted
 in `intent_coverage`. The integration agent's live test will catch

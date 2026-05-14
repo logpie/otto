@@ -206,6 +206,94 @@ async def test_root_integration_starts_on_main_even_after_prior_worktree_state(
 
 
 @pytest.mark.asyncio
+async def test_root_integration_receives_clean_deploy_preflight_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from otto import v5_runner
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    lead_kwargs: list[dict[str, Any]] = []
+
+    async def fake_compile_flat_spec(**kwargs: Any) -> FlatSpec:
+        del kwargs
+        return FlatSpec(intent="build a thing", behavior_journeys=[])
+
+    async def fake_process_children(**kwargs: Any) -> None:
+        project_dir = kwargs["project_dir"]
+        child_results = kwargs["child_results"]
+        record_task(
+            project_dir,
+            task_id="v5-child",
+            intent="child",
+            parent_task_id="root",
+            integration_branch="main",
+        )
+        set_verdict(project_dir, "v5-child", "pass")
+        child_results["v5-child"] = LeadResult(
+            task_id="v5-child",
+            verdict="pass",
+            cost_usd=0.1,
+            decomposition="inline",
+        )
+
+    async def fake_run_lead(**kwargs: Any) -> LeadResult:
+        lead_kwargs.append(kwargs)
+        if kwargs.get("kind") == "integration":
+            return LeadResult(
+                task_id=kwargs["task_id"],
+                verdict="pass",
+                cost_usd=0.2,
+                decomposition="inline",
+                verify_called=True,
+                verify_result={"verdict": "pass", "summary": "ok"},
+            )
+        return LeadResult(
+            task_id=kwargs["task_id"],
+            verdict="pending_children",
+            cost_usd=0.3,
+            decomposition="emit",
+            emitted_subtask_ids=["v5-child"],
+        )
+
+    smoke_results = [
+        [
+            PreflightIssue(
+                kind="clean_deploy_start_failed",
+                severity="block",
+                message="root start failed",
+            )
+        ],
+        [],
+    ]
+
+    def fake_smoke(path: Path, *_args: Any, **_kwargs: Any) -> list[PreflightIssue]:
+        assert path == repo
+        return smoke_results.pop(0)
+
+    monkeypatch.setattr(v5_runner, "compile_flat_spec", fake_compile_flat_spec)
+    monkeypatch.setattr(v5_runner, "_process_children", fake_process_children)
+    monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", fake_smoke)
+
+    result = await v5_runner.run_v5_pipeline(
+        project_dir=repo,
+        intent="build a thing",
+        config={"default_branch": "main"},
+    )
+
+    assert result.verdict == "pass"
+    integration_calls = [call for call in lead_kwargs if call.get("kind") == "integration"]
+    assert len(integration_calls) == 1
+    payload = integration_calls[0]["preflight_result"]
+    assert payload["check"] == "smoke_clean_deploy"
+    assert payload["task_id"] == "root"
+    assert payload["passed"] is False
+    assert payload["issues"][0]["message"] == "root start failed"
+
+
+@pytest.mark.asyncio
 async def test_runner_commits_integration_product_files_and_excludes_runtime_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

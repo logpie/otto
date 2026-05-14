@@ -28,6 +28,7 @@ CHECK_KINDS = (
     "local_scope_check",
     "no_stub_text",
     "verdict_consistency",
+    "deprecation_warnings",
     "decisions_broadcast",
 )
 
@@ -139,6 +140,12 @@ def validate_lead_verdict(
 
     checks.extend(_check_no_stub_text(worktree_dir))
     checks.extend(_check_verdict_consistency(agent_verdict))
+    checks.extend(_check_deprecation_warnings(
+        project_dir=project_dir,
+        worktree_dir=worktree_dir,
+        session_dir=session_dir,
+        agent_verdict=agent_verdict,
+    ))
     checks.extend(_check_decisions_broadcast(worktree_dir, agent_verdict))
 
     journey_failures = _missing_passed_journeys(spec, agent_verdict) if spec and full_matrix else []
@@ -614,6 +621,116 @@ def _check_verdict_consistency(agent_verdict: dict[str, Any]) -> list[dict[str, 
         passed,
         "built claims do not contradict partial/skipped claims" if passed else "built claims overlap partial/skipped claims",
         refs={"contradictions": contradictions[:20]},
+    )]
+
+
+_DEPRECATION_RE = re.compile(
+    r"\b(?:DeprecationWarning|PendingDeprecationWarning)\b|"
+    r"(?:\bdeprecated\b.*\bwarning\b|\bwarning\b.*\bdeprecated\b)",
+    re.IGNORECASE,
+)
+
+
+def _iter_agent_verdict_strings(value: Any) -> list[str]:
+    out: list[str] = []
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            out.extend(_iter_agent_verdict_strings(item))
+    elif isinstance(value, list):
+        for item in value:
+            out.extend(_iter_agent_verdict_strings(item))
+    return out
+
+
+def _iter_evidence_path_strings(value: Any) -> list[str]:
+    out: list[str] = []
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, dict):
+        for key in ("path", "file", "log", "output_path", "artifact"):
+            candidate = value.get(key)
+            if isinstance(candidate, str):
+                out.append(candidate)
+    elif isinstance(value, list):
+        for item in value:
+            out.extend(_iter_evidence_path_strings(item))
+    return out
+
+
+def _deprecation_lines(text: str) -> list[str]:
+    hits: list[str] = []
+    for line in text.splitlines():
+        normalized = line.strip()
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if (
+            "no deprecation" in lowered
+            or "without deprecation" in lowered
+            or "0 deprecation" in lowered
+        ):
+            continue
+        if _DEPRECATION_RE.search(normalized):
+            hits.append(normalized[:240])
+    return hits
+
+
+def _resolve_evidence_path(raw: str, roots: list[Path]) -> Path | None:
+    if not raw.strip():
+        return None
+    path = Path(raw)
+    candidates = [path] if path.is_absolute() else [root / path for root in roots]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _check_deprecation_warnings(
+    *,
+    project_dir: Path,
+    worktree_dir: Path,
+    session_dir: Path,
+    agent_verdict: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Fail a passing verdict that leaves deprecation warnings unresolved."""
+    hits: list[str] = []
+    for text in _iter_agent_verdict_strings(agent_verdict):
+        hits.extend(_deprecation_lines(text))
+
+    evidence_roots = [session_dir, worktree_dir, project_dir]
+    for raw_path in _iter_evidence_path_strings(agent_verdict.get("evidence") or []):
+        resolved = _resolve_evidence_path(raw_path, evidence_roots)
+        if resolved is None:
+            continue
+        text = _read_text(resolved)
+        if not text:
+            continue
+        for line in _deprecation_lines(text):
+            hits.append(f"{resolved.name}: {line}")
+
+    # Dedupe without losing order.
+    seen: set[str] = set()
+    unique_hits: list[str] = []
+    for hit in hits:
+        if hit in seen:
+            continue
+        seen.add(hit)
+        unique_hits.append(hit)
+
+    passed = not unique_hits
+    return [_check(
+        "deprecation_warnings",
+        "test_output_deprecations",
+        passed,
+        (
+            "no deprecation warnings found in verdict output or evidence logs"
+            if passed
+            else "deprecation warnings found in passing test output; fix them or downgrade"
+        ),
+        refs={"warnings": unique_hits[:20]},
     )]
 
 
