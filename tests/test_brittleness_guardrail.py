@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OTTO_ROOT = REPO_ROOT / "otto"
@@ -82,6 +84,28 @@ CONTROL_FLOW_NAMES = {
     "classif",
     "environment_failure",
 }
+FORBIDDEN_REPAIR_PROMPT_STRINGS = {
+    "Failure kind:",
+    "Raw issue JSON",
+    "Likely paths:",
+    "PRE-FLIGHT REPAIR ONLY",
+    "narrowest relevant check",
+    "and stop",
+}
+FULL_PACKET_REPAIR_CONTEXT_STRINGS = {
+    "repair_packet",
+    "Repair packet",
+    "latest_oracle_result",
+    "attempt_history",
+    "acceptance_oracle",
+}
+SYMPTOM_CAP_STRINGS = {
+    "max_attempts_per_kind",
+    "kind_attempt_cap",
+    "total_attempt_cap",
+    "repeated_fingerprint",
+    "_attempts_by_kind",
+}
 BAD_DEPENDENCY_VERDICTS = {"catastrophic", "merge_blocked", "unverified"}
 DEPENDENCY_CONTEXT = {"dependency", "dependencies", "ready", "done", "completed", "terminal"}
 IDENTITY_CONTEXT = {"branch", "worktree", "identity", "cwd", "project_dir", "base_ref"}
@@ -158,6 +182,14 @@ def _constant_string_set(node: ast.AST) -> set[str]:
     ):
         return _constant_string_set(node.args[0])
     return set()
+
+
+def _constant_strings(node: ast.AST) -> list[tuple[str, ast.AST]]:
+    strings: list[tuple[str, ast.AST]] = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            strings.append((child.value, child))
+    return strings
 
 
 def _is_true_constant(node: ast.AST) -> bool:
@@ -396,7 +428,73 @@ def _scan_file(path: Path) -> list[Violation]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     visitor = GuardrailVisitor(_rel(path))
     visitor.visit(tree)
+    visitor.violations.extend(_repair_prompt_packet_violations(tree, _rel(path)))
+    visitor.violations.extend(_repair_symptom_cap_violations(tree, _rel(path)))
     return visitor.violations
+
+
+def _repair_prompt_packet_violations(tree: ast.AST, rel_path: str) -> list[Violation]:
+    violations: list[Violation] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        name = node.name
+        normalized = name.lower()
+        if not (normalized.startswith("_run_") and "repair" in normalized and "agent" in normalized):
+            continue
+        strings = _constant_strings(node)
+        combined = "\n".join(value for value, _node in strings)
+        forbidden = [needle for needle in FORBIDDEN_REPAIR_PROMPT_STRINGS if needle in combined]
+        if not forbidden:
+            continue
+        if any(marker in combined for marker in FULL_PACKET_REPAIR_CONTEXT_STRINGS):
+            continue
+        first_node = next(
+            (string_node for value, string_node in strings if any(needle in value for needle in forbidden)),
+            node,
+        )
+        violations.append(Violation(
+            rel_path=rel_path,
+            symbol=name,
+            rule="repair_prompt_without_full_packet",
+            line=getattr(first_node, "lineno", getattr(node, "lineno", 1)),
+            detail=(
+                "repair-agent prompt uses forbidden narrow failure framing "
+                "without full repair-packet context"
+            ),
+        ))
+    return violations
+
+
+def _repair_symptom_cap_violations(tree: ast.AST, rel_path: str) -> list[Violation]:
+    violations: list[Violation] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in SYMPTOM_CAP_STRINGS:
+            violations.append(Violation(
+                rel_path=rel_path,
+                symbol="<module>",
+                rule="repair_symptom_cap",
+                line=getattr(node, "lineno", 1),
+                detail=f"repair loop references symptom/per-kind cap {node.id!r}",
+            ))
+        elif isinstance(node, ast.arg) and node.arg in SYMPTOM_CAP_STRINGS:
+            violations.append(Violation(
+                rel_path=rel_path,
+                symbol="<module>",
+                rule="repair_symptom_cap",
+                line=getattr(node, "lineno", 1),
+                detail=f"repair loop exposes symptom/per-kind cap {node.arg!r}",
+            ))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value in SYMPTOM_CAP_STRINGS:
+                violations.append(Violation(
+                    rel_path=rel_path,
+                    symbol="<module>",
+                    rule="repair_symptom_cap",
+                    line=getattr(node, "lineno", 1),
+                    detail=f"repair loop emits symptom/per-kind cap reason {node.value!r}",
+                ))
+    return violations
 
 
 def test_brittleness_guardrail_has_reasoned_allowlist() -> None:
@@ -429,3 +527,8 @@ def test_otto_brittleness_guardrail() -> None:
             "with a concrete reason and doc/commit reference.",
         ]
         raise AssertionError("\n".join(rendered))
+
+
+@pytest.mark.skip(reason="Step 2 verdict de-brittling lands in a separate unit.")
+def test_verdict_text_scan_guardrail_step2_placeholder() -> None:
+    """Placeholder for the Step 2 unstructured verdict-text scan guardrail."""

@@ -29,12 +29,15 @@ delegate to this primitive and map results back to their existing
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -77,6 +80,118 @@ class CleanVerifyResult:
     # Optional debug info — preserved temp dir path, listening ports, etc.
     temp_dir: Path | None = None
     listening_ports: list[int] = field(default_factory=list)
+
+
+@dataclass
+class CleanOracleIssue:
+    """Typed, serializable issue emitted by the clean-deploy oracle."""
+
+    kind: str
+    severity: Literal["warn", "error", "block"]
+    message: str
+    step_id: str
+    paths: list[str] = field(default_factory=list)
+    ports: list[int] = field(default_factory=list)
+    command_identity: str = ""
+    return_code: int | None = None
+
+    def to_jsonable(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class CleanOracleStepResult:
+    """One step in the clean verifier DAG."""
+
+    id: str
+    status: str
+    return_code: int | None
+    command_identity: str
+    command: list[str] = field(default_factory=list)
+    cwd: str = ""
+    env: dict[str, str] = field(default_factory=dict)
+    started_at: str = ""
+    duration_s: float = 0.0
+    artifact_paths: list[str] = field(default_factory=list)
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    reason: str = ""
+
+    def to_jsonable(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class CleanOracleResult:
+    """Serializable clean-deploy oracle result used by repair packets."""
+
+    passed: bool
+    scope: Scope
+    issues: list[CleanOracleIssue] = field(default_factory=list)
+    steps: list[CleanOracleStepResult] = field(default_factory=list)
+    artifact_path_refs: list[str] = field(default_factory=list)
+    command: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    digest: str = ""
+    _written_at: str = ""
+
+    @classmethod
+    def from_parts(
+        cls,
+        *,
+        passed: bool,
+        scope: Scope,
+        issues: list[CleanOracleIssue],
+        steps: list[CleanOracleStepResult],
+        artifact_path_refs: list[str],
+        command: list[str],
+        env: dict[str, str],
+        project_dir: Path,
+        temp_dir: Path | None = None,
+    ) -> "CleanOracleResult":
+        result = cls(
+            passed=passed,
+            scope=scope,
+            issues=issues,
+            steps=steps,
+            artifact_path_refs=artifact_path_refs,
+            command=command,
+            env=env,
+            _written_at=_iso_now(),
+        )
+        result.digest = _clean_oracle_digest(
+            result,
+            project_dir=project_dir,
+            temp_dir=temp_dir,
+        )
+        return result
+
+    def to_jsonable(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "scope": self.scope,
+            "issues": [issue.to_jsonable() for issue in self.issues],
+            "steps": [step.to_jsonable() for step in self.steps],
+            "artifact_path_refs": list(self.artifact_path_refs),
+            "command": list(self.command),
+            "env": dict(self.env),
+            "digest": self.digest,
+            "_written_at": self._written_at,
+        }
+
+
+@dataclass(frozen=True)
+class CleanVerifyOracleCommand:
+    """Resolved in-worktree clean verifier command for repair packets."""
+
+    command: list[str]
+    env: dict[str, str]
+    verify_scope: Scope
+    repair_packet_path: str = ""
+
+    @property
+    def command_identity(self) -> str:
+        return _command_identity(self.command)
 
 
 @dataclass
@@ -338,6 +453,669 @@ def _scaffold_verify(
 
 def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _command_identity(command: list[str]) -> str:
+    """Stable command identity for digesting; paths collapse to basenames."""
+    parts: list[str] = []
+    for index, item in enumerate(command):
+        text = str(item)
+        if "otto-clean-" in text:
+            parts.append("<temp-root>")
+        elif Path(text).is_absolute():
+            parts.append(Path(text).name)
+        else:
+            parts.append(text)
+    return " ".join(parts)
+
+
+def _normalize_path_for_digest(path: str, *, project_dir: Path, temp_dir: Path | None) -> str:
+    raw = str(path)
+    try:
+        p = Path(raw)
+    except TypeError:
+        return raw
+    candidates = [project_dir.resolve(strict=False)]
+    if temp_dir is not None:
+        candidates.append(temp_dir.resolve(strict=False))
+    if p.is_absolute():
+        resolved = p.resolve(strict=False)
+        for root in candidates:
+            try:
+                return resolved.relative_to(root).as_posix()
+            except ValueError:
+                continue
+        return Path(resolved.name).as_posix()
+    return raw.replace("\\", "/")
+
+
+def _normalize_text_for_digest(
+    text: str,
+    *,
+    project_dir: Path,
+    temp_dir: Path | None,
+) -> str:
+    normalized = text
+    roots = [project_dir.resolve(strict=False)]
+    if temp_dir is not None:
+        roots.append(temp_dir.resolve(strict=False))
+    for root in roots:
+        normalized = normalized.replace(str(root), "<root>")
+    normalized = re.sub(r"/(?:private/)?tmp/otto-clean-[^ \n'\":)]+", "<temp-root>", normalized)
+    normalized = re.sub(r"\b\d+(?:\.\d+)?s\b", "<duration>", normalized)
+    return normalized
+
+
+def _clean_oracle_digest(
+    result: CleanOracleResult,
+    *,
+    project_dir: Path,
+    temp_dir: Path | None,
+) -> str:
+    canonical = {
+        "issues": sorted(
+            (
+                {
+                    "kind": issue.kind,
+                    "severity": issue.severity,
+                    "message": _normalize_text_for_digest(
+                        issue.message,
+                        project_dir=project_dir,
+                        temp_dir=temp_dir,
+                    ),
+                    "step_id": issue.step_id,
+                    "paths": sorted(
+                        _normalize_path_for_digest(
+                            path,
+                            project_dir=project_dir,
+                            temp_dir=temp_dir,
+                        )
+                        for path in issue.paths
+                    ),
+                    "ports": sorted(int(port) for port in issue.ports),
+                    "command_identity": issue.command_identity,
+                    "return_code": issue.return_code,
+                }
+                for issue in result.issues
+            ),
+            key=lambda item: json.dumps(item, sort_keys=True),
+        ),
+        "steps": sorted(
+            (
+                {
+                    "id": step.id,
+                    "status": step.status,
+                    "return_code": step.return_code,
+                    "command_identity": step.command_identity,
+                }
+                for step in result.steps
+            ),
+            key=lambda item: str(item["id"]),
+        ),
+        "artifact_path_refs": sorted(
+            _normalize_path_for_digest(path, project_dir=project_dir, temp_dir=temp_dir)
+            for path in result.artifact_path_refs
+        ),
+        "command_identities": sorted({step.command_identity for step in result.steps if step.command_identity}),
+    }
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_clean_verify_oracle_command(
+    *,
+    worktree_path: Path,
+    verify_scope: Scope,
+    repair_packet_path: Path | None = None,
+) -> CleanVerifyOracleCommand:
+    """Return the resolved CLI command stored in repair packets.
+
+    Prefer the linked worktree's own venv Python so ``python -m otto.cli``
+    loads Otto from the same checkout and avoids the linked-worktree venv guard.
+    Tests and sparse fixtures without a venv fall back to the current
+    interpreter.
+    """
+    worktree = Path(worktree_path)
+    python = worktree / ".venv" / "bin" / "python"
+    repo_python = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
+    if python.exists():
+        executable = str(python)
+    elif repo_python.exists():
+        executable = str(repo_python)
+    else:
+        executable = str(Path(sys.executable).resolve())
+    command = [
+        executable,
+        "-m",
+        "otto.cli",
+        "clean-verify",
+        "--json",
+        "--verify-scope",
+        verify_scope,
+    ]
+    env = dict(os.environ)
+    repo_root = Path(__file__).resolve().parents[1]
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(repo_root)
+        if not existing_pythonpath
+        else str(repo_root) + os.pathsep + existing_pythonpath
+    )
+    env["OTTO_CLEAN_VERIFY_WORKTREE"] = str(worktree.resolve(strict=False))
+    repair_packet = ""
+    if repair_packet_path is not None:
+        repair_packet = str(Path(repair_packet_path).resolve(strict=False))
+        command.extend(["--repair-packet", repair_packet])
+        env["OTTO_REPAIR_PACKET_PATH"] = repair_packet
+    return CleanVerifyOracleCommand(
+        command=command,
+        env=env,
+        verify_scope=verify_scope,
+        repair_packet_path=repair_packet,
+    )
+
+
+def _oracle_step(
+    *,
+    step_id: str,
+    status: str,
+    return_code: int | None,
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str] | None = None,
+    started_at: str = "",
+    duration_s: float = 0.0,
+    stdout_tail: str = "",
+    stderr_tail: str = "",
+    reason: str = "",
+) -> CleanOracleStepResult:
+    return CleanOracleStepResult(
+        id=step_id,
+        status=status,
+        return_code=return_code,
+        command_identity=_command_identity(command),
+        command=[str(part) for part in command],
+        cwd=str(cwd),
+        env=dict(env or {}),
+        started_at=started_at,
+        duration_s=round(duration_s, 3),
+        stdout_tail=stdout_tail[-800:],
+        stderr_tail=stderr_tail[-800:],
+        reason=reason,
+    )
+
+
+def _issue_from_step(
+    *,
+    kind: str,
+    message: str,
+    step: CleanOracleStepResult,
+    ports: list[int] | None = None,
+    paths: list[str] | None = None,
+) -> CleanOracleIssue:
+    return CleanOracleIssue(
+        kind=kind,
+        severity="block",
+        message=message,
+        step_id=step.id,
+        paths=list(paths or []),
+        ports=list(ports or []),
+        command_identity=step.command_identity,
+        return_code=step.return_code,
+    )
+
+
+def _run_oracle_command(
+    *,
+    step_id: str,
+    kind_failed: str,
+    command: list[str],
+    cwd: Path,
+    timeout_s: int,
+    env: dict[str, str] | None = None,
+    message_prefix: str,
+) -> tuple[CleanOracleStepResult, CleanOracleIssue | None]:
+    started_at = _iso_now()
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        duration = time.monotonic() - started
+        stdout_tail = cast(str, exc.stdout)[-800:] if isinstance(exc.stdout, str) else ""
+        stderr_tail = cast(str, exc.stderr)[-800:] if isinstance(exc.stderr, str) else ""
+        step = _oracle_step(
+            step_id=step_id,
+            status="failed",
+            return_code=None,
+            command=command,
+            cwd=cwd,
+            env=env,
+            started_at=started_at,
+            duration_s=duration,
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+            reason=f"timed out after {timeout_s}s",
+        )
+        return step, _issue_from_step(
+            kind=kind_failed,
+            message=f"{message_prefix} timed out after {timeout_s}s",
+            step=step,
+        )
+    duration = time.monotonic() - started
+    status = "passed" if proc.returncode == 0 else "failed"
+    step = _oracle_step(
+        step_id=step_id,
+        status=status,
+        return_code=proc.returncode,
+        command=command,
+        cwd=cwd,
+        env=env,
+        started_at=started_at,
+        duration_s=duration,
+        stdout_tail=proc.stdout or "",
+        stderr_tail=proc.stderr or "",
+    )
+    if proc.returncode == 0:
+        return step, None
+    tail = (proc.stderr or proc.stdout or "")[-400:]
+    return step, _issue_from_step(
+        kind=kind_failed,
+        message=f"{message_prefix} failed: exit {proc.returncode}. Tail: {tail!r}",
+        step=step,
+    )
+
+
+def _package_has_build(package_json: Path) -> bool:
+    try:
+        raw = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        try:
+            return '"build"' in package_json.read_text(encoding="utf-8")
+        except OSError:
+            return False
+    scripts = raw.get("scripts") if isinstance(raw, dict) else None
+    return isinstance(scripts, dict) and "build" in scripts
+
+
+def _first_failed_step_id(steps: list[CleanOracleStepResult]) -> str | None:
+    for step in steps:
+        if step.status == "failed":
+            return step.id
+    return None
+
+
+def verify_from_clean_oracle(
+    project_dir: Path,
+    *,
+    scope: Scope = "subtree",
+    timeout_s: int = 120,
+    port_wait_s: int = 12,
+    preserve_temp: bool = False,
+    logger_fn: Any = None,
+) -> CleanOracleResult:
+    """Clean-state verifier with packet-grade step DAG evidence.
+
+    Independent install/build/compile branches continue after sibling failures;
+    dependent steps are recorded as ``skipped_due_to:<upstream-step>`` instead
+    of producing synthetic cascade issues.
+    """
+
+    def log(msg: str) -> None:
+        if logger_fn:
+            logger_fn(msg)
+
+    project = Path(project_dir)
+    command_spec = build_clean_verify_oracle_command(
+        worktree_path=project,
+        verify_scope=scope,
+    )
+    steps: list[CleanOracleStepResult] = []
+    issues: list[CleanOracleIssue] = []
+    artifact_refs: list[str] = []
+    declared_ports: list[int] = []
+    port_block_step_id: str | None = None
+
+    if scope in ("subtree", "full"):
+        declared_ports = _parse_declared_ports(project)
+        busy = _check_ports_free(declared_ports)
+        step = _oracle_step(
+            step_id="precheck_ports",
+            status="failed" if busy else "passed",
+            return_code=1 if busy else 0,
+            command=["check_ports_free", *[str(port) for port in declared_ports]],
+            cwd=project,
+            env={"PATH": os.environ.get("PATH", "")},
+            reason=("declared ports busy" if busy else ""),
+        )
+        steps.append(step)
+        if busy:
+            port_block_step_id = step.id
+            issues.append(_issue_from_step(
+                kind="port_busy",
+                message=(
+                    f"Declared ports {busy} already bound (likely zombies "
+                    "from prior runs). Cannot run clean-deploy."
+                ),
+                step=step,
+                ports=busy,
+            ))
+
+    temp_root = Path(tempfile.mkdtemp(prefix="otto-clean-"))
+    artifact_refs.append(str(temp_root))
+    try:
+        copy_started = time.monotonic()
+        copied, copy_err = _copy_project_clean(project, temp_root)
+        copy_step = _oracle_step(
+            step_id="copy",
+            status="passed" if copied else "failed",
+            return_code=0 if copied else 1,
+            command=["copy_project_clean", str(project), str(temp_root)],
+            cwd=project,
+            env={},
+            started_at=_iso_now(),
+            duration_s=time.monotonic() - copy_started,
+            reason=copy_err or "",
+        )
+        steps.append(copy_step)
+        if not copied:
+            issues.append(_issue_from_step(
+                kind="copy_failed",
+                message=copy_err or "copy to clean temp dir failed",
+                step=copy_step,
+            ))
+            for skipped_id in ("script_valid", "scaffold", "start"):
+                steps.append(_oracle_step(
+                    step_id=skipped_id,
+                    status="skipped_due_to:copy",
+                    return_code=None,
+                    command=[skipped_id],
+                    cwd=temp_root,
+                ))
+            return CleanOracleResult.from_parts(
+                passed=False,
+                scope=scope,
+                issues=issues,
+                steps=steps,
+                artifact_path_refs=artifact_refs,
+                command=command_spec.command,
+                env=command_spec.env,
+                project_dir=project,
+                temp_dir=temp_root,
+            )
+
+        script_started = time.monotonic()
+        script_ok, script_kind, script_message, _script_steps = _script_valid(
+            temp_root,
+            timeout_s=timeout_s,
+            log=log,
+        )
+        script_step = _oracle_step(
+            step_id="script_valid",
+            status="passed" if script_ok else "failed",
+            return_code=0 if script_ok else 1,
+            command=["script_valid", str(temp_root)],
+            cwd=temp_root,
+            env={"PATH": os.environ.get("PATH", "")},
+            started_at=_iso_now(),
+            duration_s=time.monotonic() - script_started,
+            reason=script_message or "",
+        )
+        steps.append(script_step)
+        if not script_ok:
+            issues.append(_issue_from_step(
+                kind=script_kind or "script_valid_failed",
+                message=script_message or "script validation failed",
+                step=script_step,
+            ))
+
+        package_jsons, pyprojects = _find_manifests(temp_root)
+        package_jsons = sorted(package_jsons)
+        pyprojects = sorted(pyprojects)
+        npm_path = shutil.which("npm")
+        if package_jsons and not npm_path:
+            step = _oracle_step(
+                step_id="npm_available",
+                status="failed",
+                return_code=1,
+                command=["npm", "--version"],
+                cwd=temp_root,
+                env={"PATH": os.environ.get("PATH", "")},
+                reason="npm not on PATH",
+            )
+            steps.append(step)
+            issues.append(_issue_from_step(kind="no_npm", message="npm not on PATH", step=step))
+        for pkg in package_jsons:
+            rel_parent = pkg.parent.relative_to(temp_root).as_posix() or "."
+            step_suffix = "root" if pkg.parent == temp_root else pkg.parent.name
+            install_id = f"npm_install:{step_suffix}"
+            build_id = f"npm_build:{step_suffix}"
+            if not npm_path:
+                steps.append(_oracle_step(
+                    step_id=install_id,
+                    status="skipped_due_to:npm_available",
+                    return_code=None,
+                    command=["npm", "install"],
+                    cwd=pkg.parent,
+                ))
+                steps.append(_oracle_step(
+                    step_id=build_id,
+                    status=f"skipped_due_to:{install_id}",
+                    return_code=None,
+                    command=["npm", "run", "build", "--silent"],
+                    cwd=pkg.parent,
+                ))
+                continue
+            has_lockfile = (pkg.parent / "package-lock.json").exists()
+            install_cmd = (
+                [npm_path, "ci", "--no-audit", "--no-fund"]
+                if has_lockfile
+                else [npm_path, "install", "--no-audit", "--no-fund"]
+            )
+            log(f"verify_from_clean: {install_cmd[1]} in {rel_parent}")
+            install_step, install_issue = _run_oracle_command(
+                step_id=install_id,
+                kind_failed="install_failed",
+                command=install_cmd,
+                cwd=pkg.parent,
+                timeout_s=timeout_s * 3,
+                env=None,
+                message_prefix=f"{install_cmd[1]} in {rel_parent}",
+            )
+            steps.append(install_step)
+            if install_issue is not None:
+                issues.append(install_issue)
+                steps.append(_oracle_step(
+                    step_id=build_id,
+                    status=f"skipped_due_to:{install_id}",
+                    return_code=None,
+                    command=[npm_path, "run", "build", "--silent"],
+                    cwd=pkg.parent,
+                ))
+                continue
+            if not _package_has_build(pkg):
+                steps.append(_oracle_step(
+                    step_id=build_id,
+                    status="skipped",
+                    return_code=None,
+                    command=[npm_path, "run", "build", "--silent"],
+                    cwd=pkg.parent,
+                    reason="package has no build script",
+                ))
+                continue
+            log(f"verify_from_clean: npm run build in {rel_parent}")
+            build_step, build_issue = _run_oracle_command(
+                step_id=build_id,
+                kind_failed="build_failed",
+                command=[npm_path, "run", "build", "--silent"],
+                cwd=pkg.parent,
+                timeout_s=timeout_s,
+                env=None,
+                message_prefix=f"npm run build in {rel_parent}",
+            )
+            steps.append(build_step)
+            if build_issue is not None:
+                issues.append(build_issue)
+
+        python_path = shutil.which("python3") or shutil.which("python")
+        if pyprojects and not python_path:
+            step = _oracle_step(
+                step_id="python_available",
+                status="failed",
+                return_code=1,
+                command=["python3", "--version"],
+                cwd=temp_root,
+                env={"PATH": os.environ.get("PATH", "")},
+                reason="python not on PATH",
+            )
+            steps.append(step)
+            issues.append(_issue_from_step(kind="no_python", message="python not on PATH", step=step))
+        for pyp in pyprojects:
+            step_suffix = "root" if pyp.parent == temp_root else pyp.parent.name
+            step_id = f"py_compile:{step_suffix}"
+            if not python_path:
+                steps.append(_oracle_step(
+                    step_id=step_id,
+                    status="skipped_due_to:python_available",
+                    return_code=None,
+                    command=["python3", "-m", "py_compile"],
+                    cwd=pyp.parent,
+                ))
+                continue
+            py_files = sorted(
+                p for p in pyp.parent.rglob("*.py")
+                if ".venv" not in p.parts
+                and "__pycache__" not in p.parts
+                and ".worktrees" not in p.parts
+            )
+            if not py_files:
+                steps.append(_oracle_step(
+                    step_id=step_id,
+                    status="skipped",
+                    return_code=None,
+                    command=[python_path, "-m", "py_compile"],
+                    cwd=pyp.parent,
+                    reason="no Python files",
+                ))
+                continue
+            rel_files = [p.relative_to(pyp.parent).as_posix() for p in py_files]
+            log(f"verify_from_clean: py_compile in {pyp.parent.name} ({len(py_files)} files)")
+            compile_step, compile_issue = _run_oracle_command(
+                step_id=step_id,
+                kind_failed="py_compile_failed",
+                command=[python_path, "-m", "py_compile", *rel_files],
+                cwd=pyp.parent,
+                timeout_s=timeout_s,
+                env=None,
+                message_prefix=f"py_compile in {pyp.parent.name}",
+            )
+            steps.append(compile_step)
+            if compile_issue is not None:
+                compile_issue.paths = rel_files
+                issues.append(compile_issue)
+
+        if scope in ("subtree", "full"):
+            start_sh = temp_root / "start.sh"
+            upstream = port_block_step_id or _first_failed_step_id(
+                [step for step in steps if step.id != "precheck_ports"]
+            )
+            if not start_sh.exists():
+                steps.append(_oracle_step(
+                    step_id="start",
+                    status="skipped",
+                    return_code=None,
+                    command=["bash", "start.sh"],
+                    cwd=temp_root,
+                    reason="no start.sh",
+                ))
+            elif upstream:
+                steps.append(_oracle_step(
+                    step_id="start",
+                    status=f"skipped_due_to:{upstream}",
+                    return_code=None,
+                    command=["bash", "start.sh"],
+                    cwd=temp_root,
+                ))
+            else:
+                start_started = time.monotonic()
+                passed, kind, message, _start_steps, listening = _subtree_verify_start_sh(
+                    temp_root,
+                    declared_ports=declared_ports,
+                    timeout_s=timeout_s,
+                    port_wait_s=port_wait_s,
+                    log=log,
+                )
+                start_step = _oracle_step(
+                    step_id="start",
+                    status="passed" if passed else "failed",
+                    return_code=0 if passed else 1,
+                    command=["bash", "start.sh"],
+                    cwd=temp_root,
+                    env={"PATH": os.environ.get("PATH", "")},
+                    started_at=_iso_now(),
+                    duration_s=time.monotonic() - start_started,
+                    reason=message or "",
+                )
+                steps.append(start_step)
+                if not passed:
+                    issues.append(_issue_from_step(
+                        kind=kind or "start_failed",
+                        message=message or "start.sh failed",
+                        step=start_step,
+                        ports=declared_ports,
+                    ))
+                elif listening:
+                    start_step.artifact_paths.append(
+                        "listening_ports:" + ",".join(str(port) for port in listening)
+                    )
+
+        return CleanOracleResult.from_parts(
+            passed=not issues,
+            scope=scope,
+            issues=issues,
+            steps=steps,
+            artifact_path_refs=artifact_refs,
+            command=command_spec.command,
+            env=command_spec.env,
+            project_dir=project,
+            temp_dir=temp_root,
+        )
+    except Exception as exc:  # noqa: BLE001
+        step = _oracle_step(
+            step_id="internal",
+            status="failed",
+            return_code=1,
+            command=["verify_from_clean_oracle"],
+            cwd=project,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        steps.append(step)
+        issues.append(_issue_from_step(
+            kind="internal_error",
+            message=f"verify_from_clean_oracle raised: {type(exc).__name__}: {exc}",
+            step=step,
+        ))
+        return CleanOracleResult.from_parts(
+            passed=False,
+            scope=scope,
+            issues=issues,
+            steps=steps,
+            artifact_path_refs=artifact_refs,
+            command=command_spec.command,
+            env=command_spec.env,
+            project_dir=project,
+            temp_dir=temp_root,
+        )
+    finally:
+        if not preserve_temp:
+            shutil.rmtree(temp_root, ignore_errors=True)
+            log("verify_from_clean: temp dir cleaned up")
 
 
 def preflight_shared_toolchains(

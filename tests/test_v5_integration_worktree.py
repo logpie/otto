@@ -18,6 +18,7 @@ from otto.v5_branching import (
     merge_child_into_integration,
 )
 from otto.v5_preflight import PreflightIssue
+from otto.v5_preflight_repair import OracleRepairResult
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -375,15 +376,6 @@ async def test_root_integration_repairs_clean_deploy_preflight_before_payload(
 
     async def fake_run_lead(**kwargs: Any) -> LeadResult:
         lead_kwargs.append(kwargs)
-        if "preflight" in kwargs["task_id"]:
-            return LeadResult(
-                task_id=kwargs["task_id"],
-                verdict="pass",
-                cost_usd=0.05,
-                decomposition="inline",
-                verify_called=True,
-                verify_result={"verdict": "pass", "summary": "repaired"},
-            )
         if kwargs.get("kind") == "integration":
             return LeadResult(
                 task_id=kwargs["task_id"],
@@ -400,6 +392,11 @@ async def test_root_integration_repairs_clean_deploy_preflight_before_payload(
             decomposition="emit",
             emitted_subtask_ids=["v5-child"],
         )
+    repair_packets: list[Any] = []
+
+    async def fake_oracle_repair_agent(repair_packet: Any, **_kwargs: Any) -> OracleRepairResult:
+        repair_packets.append(repair_packet)
+        return OracleRepairResult(verdict="pass", summary="repaired", cost_usd=0.05)
 
     smoke_results = [
         [
@@ -420,6 +417,7 @@ async def test_root_integration_repairs_clean_deploy_preflight_before_payload(
     monkeypatch.setattr(v5_runner, "compile_flat_spec", fake_compile_flat_spec)
     monkeypatch.setattr(v5_runner, "_process_children", fake_process_children)
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
     monkeypatch.setattr(v5_runner, "smoke_clean_deploy", fake_smoke)
 
     result = await v5_runner.run_v5_pipeline(
@@ -429,9 +427,8 @@ async def test_root_integration_repairs_clean_deploy_preflight_before_payload(
     )
 
     assert result.verdict == "pass"
-    repair_calls = [call for call in lead_kwargs if "preflight" in call["task_id"]]
-    assert len(repair_calls) == 1
-    assert "root start failed" in repair_calls[0]["intent"]
+    assert len(repair_packets) == 1
+    assert "root start failed" in json.dumps(repair_packets[0].latest_oracle_result)
 
     integration_calls = [call for call in lead_kwargs if call.get("kind") == "integration"]
     assert len(integration_calls) == 1
@@ -545,20 +542,6 @@ async def test_integration_smoke_failure_runs_repair_on_resolved_worktree(
 
     async def fake_run_lead(**kwargs: Any) -> LeadResult:
         lead_kwargs.append(kwargs)
-        if "preflight" in kwargs["task_id"]:
-            worktree = (Path(kwargs["session_dir"]) / "worktree").resolve()
-            (worktree / "start.sh").write_text(
-                "#!/usr/bin/env bash\npython3 -m http.server ${PORT:-9000}\n",
-                encoding="utf-8",
-            )
-            return LeadResult(
-                task_id=kwargs["task_id"],
-                verdict="pass",
-                cost_usd=0.05,
-                decomposition="inline",
-                verify_called=True,
-                verify_result={"verdict": "pass", "summary": "fixed start.sh"},
-            )
         return LeadResult(
             task_id=kwargs["task_id"],
             verdict="pass",
@@ -567,9 +550,23 @@ async def test_integration_smoke_failure_runs_repair_on_resolved_worktree(
             verify_called=True,
             verify_result={"verdict": "pass", "summary": "fixed"},
         )
+    repair_packets: list[Any] = []
+
+    async def fake_oracle_repair_agent(repair_packet: Any, **kwargs: Any) -> OracleRepairResult:
+        packet = repair_packet
+        repair_packets.append(packet)
+        worktree = Path(packet.repair_unit["worktree"])
+        (worktree / "start.sh").write_text(
+            "#!/usr/bin/env bash\npython3 -m http.server ${PORT:-9000}\n",
+            encoding="utf-8",
+        )
+        ok, detail = await kwargs["commit_hook"](packet, packet.latest_oracle_result)
+        assert ok, detail
+        return OracleRepairResult(verdict="pass", summary="fixed start.sh", cost_usd=0.05)
 
     monkeypatch.setattr(v5_runner, "smoke_clean_deploy", fake_smoke)
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
 
     result = await v5_runner._run_integration(
         project_dir=repo,
@@ -587,10 +584,8 @@ async def test_integration_smoke_failure_runs_repair_on_resolved_worktree(
     assert smoke_calls[0] == smoke_calls[1] == smoke_calls[2]
     assert _git(smoke_calls[0], "branch", "--show-current").stdout.strip() == own_integration
 
-    repair_calls = [call for call in lead_kwargs if "preflight" in call["task_id"]]
-    assert len(repair_calls) == 1
-    assert repair_calls[0]["kind"] == "plan_or_inline"
-    assert "start.sh failed before repair" in repair_calls[0]["intent"]
+    assert len(repair_packets) == 1
+    assert "start.sh failed before repair" in json.dumps(repair_packets[0].latest_oracle_result)
     assert (
         _git(repo, "show", f"{own_integration}:start.sh").stdout
         == "#!/usr/bin/env bash\npython3 -m http.server ${PORT:-9000}\n"
@@ -647,10 +642,13 @@ async def test_integration_repeat_smoke_failure_downgrades_merge_blocked(
             verify_called=True,
             verify_result={"verdict": "pass", "summary": "claimed fixed"},
         )
+    async def fake_oracle_repair_agent(_repair_packet: Any, **_kwargs: Any) -> OracleRepairResult:
+        return OracleRepairResult(verdict="pass", summary="claimed fixed", cost_usd=0.1)
 
     events: list[dict[str, Any]] = []
     monkeypatch.setattr(v5_runner, "smoke_clean_deploy", fake_smoke)
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
 
     result = await v5_runner._run_integration(
         project_dir=repo,
@@ -662,7 +660,7 @@ async def test_integration_repeat_smoke_failure_downgrades_merge_blocked(
         on_event=events.append,
     )
 
-    assert len(smoke_calls) == 2
+    assert len(smoke_calls) >= 2
     assert result.verdict == "merge_blocked"
     assert "start.sh still fails" in result.failure_reason
     assert (get_task(repo, task_id) or {}).get("verdict") == "merge_blocked"

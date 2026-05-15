@@ -42,6 +42,7 @@ from typing import Any, cast
 
 from otto import paths as _paths
 from otto.lead import LeadKind, LeadResult, run_lead
+from otto.safe_slug import safe_slug
 from otto.v5_preflight import (
     check_scaffold_compiles,
     filter_blocked_descendants,
@@ -52,7 +53,11 @@ from otto.v5_preflight_repair import (
     AgentRepairRequest,
     AgentRepairResult,
     PreflightRepairController,
+    RepairBudget,
+    RepairPacket,
+    run_oracle_repair_agent,
 )
+from otto.v5_clean_verify import build_clean_verify_oracle_command
 from otto.queue.subtask import (
     read_pending,
     take_ready,
@@ -2343,12 +2348,20 @@ def _run_integration_smoke_preflight(
         payload["passed"] = False
         payload["error"] = f"{type(exc).__name__}: {exc}"
         logger.warning("integration %s smoke check raised: %s", phase, exc)
+        payload["issues"] = [
+            {
+                "kind": "oracle_infra_error",
+                "severity": "block",
+                "message": payload["error"],
+                "task_id": task_id,
+            }
+        ]
         _emit(on_event, {
             "event": "preflight_issue",
             "phase": phase,
             "worktree": str(worktree_path),
-            "kind": "clean_deploy_exception",
-            "severity": "warn",
+            "kind": "oracle_infra_error",
+            "severity": "block",
             "message": payload["error"],
         })
     return payload
@@ -2406,6 +2419,8 @@ async def _run_integration_smoke_preflight_with_repair(
 
 
 def _integration_smoke_blocks(payload: dict[str, Any]) -> bool:
+    if payload.get("error") and payload.get("passed") is False:
+        return True
     issues = payload.get("issues") or []
     return any(
         isinstance(issue, dict)
@@ -2460,9 +2475,7 @@ async def _run_preflight_repair_agent(
     integration_branch: str | None,
     on_event: Any = None,
 ) -> AgentRepairResult:
-    """Dispatch a focused build Lead to repair a preflight failure."""
-    from otto.safe_slug import safe_slug
-
+    """Compatibility adapter for legacy preflight repair callers."""
     repair_slug = safe_slug(
         f"{task_id}-preflight-{request.failure_kind}-{request.attempt_index}",
         max_len=48,
@@ -2476,25 +2489,79 @@ async def _run_preflight_repair_agent(
         except OSError:
             pass
 
-    scope_text = (
-        "\n".join(f"- {path}" for path in request.workspace_paths)
-        if request.workspace_paths
-        else "- No precise file path was detected; inspect the failure surface from context."
+    packet_dir = request.session_dir / "repair" / repair_slug
+    packet_path = packet_dir / "repair_packet.json"
+    oracle_command = build_clean_verify_oracle_command(
+        worktree_path=request.worktree_path,
+        verify_scope="subtree",
+        repair_packet_path=packet_path,
     )
-    git_status = _git_status_short(request.worktree_path)
-    intent = (
-        "PRE-FLIGHT REPAIR ONLY.\n\n"
-        f"Failure kind: {request.failure_kind}\n"
-        f"Failure message: {request.issue.get('message')}\n\n"
-        "Raw issue JSON:\n"
-        f"{json.dumps(request.issue, indent=2, sort_keys=True, default=str)}\n\n"
-        "Current git status:\n"
-        f"{git_status or '(clean)'}\n\n"
-        "Likely paths, if any:\n"
-        f"{scope_text}\n\n"
-        f"{request.instruction}\n\n"
-        "You may edit the directly relevant files needed to fix this failure. "
-        "Run the narrowest relevant check, write a canonical verdict.json, and stop."
+    latest_oracle_result = {
+        "passed": False,
+        "scope": "subtree",
+        "issues": [
+            {
+                "kind": str(request.issue.get("kind") or request.failure_kind),
+                "severity": str(request.issue.get("severity") or "block"),
+                "message": str(request.issue.get("message") or ""),
+                "step_id": str(request.issue.get("step_id") or "legacy_preflight"),
+                "paths": [str(path) for path in (request.issue.get("paths") or [])],
+                "ports": [int(port) for port in (request.issue.get("ports") or [])],
+                "command_identity": "legacy smoke_clean_deploy",
+                "return_code": None,
+            }
+        ],
+        "steps": [],
+        "artifact_path_refs": [],
+        "command": oracle_command.command,
+        "env": oracle_command.env,
+        "digest": "",
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    packet = RepairPacket(
+        repair_unit={
+            "id": repair_slug,
+            "worktree": str(request.worktree_path),
+            "branch": integration_branch or "",
+            "task_id": task_id,
+            "phase": "preflight",
+            "allowed_paths": [],
+            "scope_policy": "unrestricted",
+            "legacy_failure_kind": request.failure_kind,
+            "legacy_workspace_paths": list(request.workspace_paths),
+            "legacy_instruction": request.instruction,
+        },
+        acceptance_oracle={
+            "verify_scope": "subtree",
+            "command": oracle_command.command,
+            "env": oracle_command.env,
+            "timeout_s": int(config.get("preflight_repair_oracle_timeout_s") or 300),
+            "expected_artifact_paths": [],
+            "success_criteria": {
+                "clean_deploy": True,
+                "composite_gate": True,
+            },
+        },
+        latest_oracle_result=latest_oracle_result,
+        product_contract={
+            "config_path": str(request.worktree_path / "otto.yaml"),
+            "charter_path": str(request.worktree_path / "CHARTER.md"),
+        },
+        integration_context={
+            "integration_branch": integration_branch,
+            "legacy_issue": request.issue,
+        },
+        attempt_history=[],
+        current_state={
+            "git_status": _git_status_short(request.worktree_path),
+        },
+        budget=RepairBudget(
+            agent_turns=1,
+            oracle_invocations=2,
+            provider_max_turns=int(config.get("max_turns_per_call") or 1),
+            closeout_agent_turns=0,
+        ),
+        packet_dir=packet_dir,
     )
     _emit(on_event, {
         "event": "preflight_repair_agent_start",
@@ -2502,25 +2569,10 @@ async def _run_preflight_repair_agent(
         "failure_kind": request.failure_kind,
         "workspace_paths": list(request.workspace_paths),
         "session_dir": str(repair_session_dir),
+        "repair_packet": str(packet.packet_path),
     })
-    result = await _run_lead_with_fallback(
-        task_id=repair_slug,
-        intent=intent,
-        project_dir=project_dir,
-        session_dir=repair_session_dir,
-        integration_branch=integration_branch,
-        config=config,
-        kind="plan_or_inline",
-        context_slice_note=(
-            "This is a focused runner preflight repair. Stay within the "
-            "listed workspace paths unless the failure message proves a "
-            "directly adjacent file is required."
-        ),
-        on_event=on_event,
-    )
-    ok = result.verdict not in ("catastrophic", "merge_blocked")
-    commit_detail = ""
-    if ok:
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
         if request.failure_kind == "merge_conflict":
             from otto.v5_branching import commit_worktree
 
@@ -2542,22 +2594,26 @@ async def _run_preflight_repair_agent(
             "worktree": str(request.worktree_path),
             "detail": commit_detail,
         })
-        if not commit_ok:
-            ok = False
+        return commit_ok, commit_detail
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config=config,
+        commit_hook=commit_hook,
+    )
+    ok = result.verdict == "pass"
     _emit(on_event, {
         "event": "preflight_repair_agent_done",
         "task_id": task_id,
         "failure_kind": request.failure_kind,
         "verdict": result.verdict,
         "cost_usd": result.cost_usd,
+        "repair_packet": result.packet_path,
     })
-    summary = result.failure_reason or result.final_text[:300] or result.verdict
-    if commit_detail:
-        summary = f"{summary}; commit: {commit_detail}"
     return AgentRepairResult(
         ok=ok,
         cost_usd=result.cost_usd,
-        summary=summary,
+        summary=result.summary,
     )
 
 

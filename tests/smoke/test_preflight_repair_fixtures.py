@@ -285,7 +285,7 @@ async def test_script_valid_failure_uses_agent_default_and_continues(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_repeated_fingerprint_escalates_without_looping(tmp_path: Path) -> None:
+async def test_repeated_issue_exits_by_budget_without_looping(tmp_path: Path) -> None:
     session_dir = tmp_path / "session"
     worktree = tmp_path / "repo"
     session_dir.mkdir()
@@ -305,8 +305,8 @@ async def test_repeated_fingerprint_escalates_without_looping(tmp_path: Path) ->
 
     assert result.terminal_state == "escalated"
     events = _log_events(session_dir)
-    assert [event["event"] for event in events] == ["repair_attempt", "repair_escalated"]
-    assert events[-1]["reason"] == "repeated_fingerprint"
+    assert events[-1]["event"] == "repair_escalated"
+    assert events[-1]["reason"] == "budget_exhausted"
 
 
 @pytest.mark.asyncio
@@ -372,7 +372,7 @@ async def test_progressing_preflight_repairs_do_not_hit_old_total_cap(tmp_path: 
     )
 
     assert stuck.terminal_state == "escalated"
-    assert _log_events(no_progress_session)[-1]["reason"] == "repeated_fingerprint"
+    assert _log_events(no_progress_session)[-1]["reason"] == "budget_exhausted"
 
 
 def test_safe_slug_handles_270_char_curl_verification_label(tmp_path: Path) -> None:

@@ -24,6 +24,7 @@ from otto.v5_preflight import check_scaffold_compiles
 from otto.v5_preflight_repair import (
     AgentRepairRequest,
     AgentRepairResult,
+    OracleRepairResult,
     PreflightRepairController,
 )
 
@@ -340,20 +341,22 @@ async def test_child_merge_conflict_dispatches_agent_then_gates_on_smoke(
     session_dir.mkdir()
     repair_seen: list[Path] = []
 
-    async def fake_run_lead(**kwargs: Any) -> LeadResult:
-        if "preflight-merge_conflict" in kwargs["task_id"]:
-            worktree = (Path(kwargs["session_dir"]) / "worktree").resolve()
-            repair_seen.append(worktree)
-            packet = json.loads((repo / ".otto" / "merge-conflicts" / "latest.json").read_text())
-            assert packet["unmerged_paths"] == ["shared.txt"]
-            assert packet["conflicts"][0]["ours"] == "parent\n"
-            assert packet["conflicts"][0]["theirs"] == "child\n"
-            _git(worktree, "merge", "--no-ff", "--no-commit", parent_branch)
-            (worktree / "shared.txt").write_text("parent\nchild\n", encoding="utf-8")
-            _git(worktree, "add", "shared.txt")
-        return LeadResult(task_id=kwargs["task_id"], verdict="pass", cost_usd=0.1)
+    async def fake_oracle_repair_agent(repair_packet: Any, **kwargs: Any) -> OracleRepairResult:
+        packet = repair_packet
+        worktree = Path(packet.repair_unit["worktree"])
+        repair_seen.append(worktree)
+        conflict_packet = json.loads((repo / ".otto" / "merge-conflicts" / "latest.json").read_text())
+        assert conflict_packet["unmerged_paths"] == ["shared.txt"]
+        assert conflict_packet["conflicts"][0]["ours"] == "parent\n"
+        assert conflict_packet["conflicts"][0]["theirs"] == "child\n"
+        _git(worktree, "merge", "--no-ff", "--no-commit", parent_branch)
+        (worktree / "shared.txt").write_text("parent\nchild\n", encoding="utf-8")
+        _git(worktree, "add", "shared.txt")
+        ok, detail = await kwargs["commit_hook"](packet, packet.latest_oracle_result)
+        assert ok, detail
+        return OracleRepairResult(verdict="pass", summary="repaired", cost_usd=0.1)
 
-    monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
     monkeypatch.setattr(v5_runner, "smoke_clean_deploy", lambda *_args, **_kwargs: [])
 
     result = LeadResult(task_id="v5-child", verdict="pass", cost_usd=0.1)
