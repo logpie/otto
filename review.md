@@ -579,3 +579,33 @@ Verification:
   passed.
 - Final matrix: smoke 14 passed; v5 suite 302 passed, 2353 deselected.
 - Ruff on touched files passed.
+
+---
+
+## Implementation Gate — 2026-05-15 — field-test rig
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, diff review, focused
+tests, ruff, py_compile, and dry-run report generation were used instead.
+
+Findings during implementation review:
+- [IMPORTANT] `bench/` was ignored globally, so the new scenario files would
+  have been invisible to git. Added a narrow `.gitignore` exception for
+  `bench/field-tests/**` while keeping `bench/field-tests/runs/*` ignored.
+- [IMPORTANT] Boot-smoke cleanup now stores the process group id immediately
+  after launching `start.sh`, so cleanup can still kill child processes even if
+  the shell exits quickly.
+- [NOTE] No live Otto run was launched. Only dry-run report generation was
+  exercised.
+
+Verification:
+- `uv run pytest -q tests/test_run_field_tests.py` passed: 4 tests.
+- `uv run ruff check scripts/run_field_tests.py tests/test_run_field_tests.py`
+  passed.
+- `uv run python -m py_compile scripts/run_field_tests.py tests/test_run_field_tests.py`
+  passed.
+- `uv run python scripts/run_field_tests.py --dry-run --report-path /tmp/otto-field-test-dry-run.md`
+  passed and wrote the sample matrix without launching Otto.
+- `uv run python scripts/run_field_tests.py --dry-run --scenario 03-todo-fullstack --parallel 2 --report-path /tmp/otto-field-test-one-dry-run.md`
+  passed and verified scenario selection.
+- `git diff --check` passed.
