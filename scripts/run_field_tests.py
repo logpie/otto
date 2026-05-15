@@ -212,20 +212,29 @@ def discover_scenarios(root: Path = FIELD_TEST_ROOT) -> list[Scenario]:
     return scenarios
 
 
-def select_scenarios(scenarios: list[Scenario], query: str | None) -> list[Scenario]:
-    if not query:
+def select_scenarios(
+    scenarios: list[Scenario], queries: list[str] | None
+) -> list[Scenario]:
+    if not queries:
         return scenarios
-    matches = [
-        s for s in scenarios
-        if s.name == query or s.name.startswith(query) or query in s.name
-    ]
-    if not matches:
-        names = ", ".join(s.name for s in scenarios)
-        raise SystemExit(f"Unknown scenario {query!r}. Available: {names}")
-    if len(matches) > 1:
-        names = ", ".join(s.name for s in matches)
-        raise SystemExit(f"Scenario {query!r} is ambiguous: {names}")
-    return matches
+    selected: list[Scenario] = []
+    seen: set[str] = set()
+    for query in queries:
+        matches = [
+            s for s in scenarios
+            if s.name == query or s.name.startswith(query) or query in s.name
+        ]
+        if not matches:
+            names = ", ".join(s.name for s in scenarios)
+            raise SystemExit(f"Unknown scenario {query!r}. Available: {names}")
+        if len(matches) > 1:
+            names = ", ".join(s.name for s in matches)
+            raise SystemExit(f"Scenario {query!r} is ambiguous: {names}")
+        match = matches[0]
+        if match.name not in seen:
+            selected.append(match)
+            seen.add(match.name)
+    return selected
 
 
 def allocate_ports(count: int, *, base_port: int, stride: int) -> list[PortAllocation]:
@@ -848,7 +857,15 @@ def run_many(
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", help="Run one scenario by name or unique substring.")
+    parser.add_argument(
+        "--scenario",
+        action="append",
+        dest="scenarios",
+        help=(
+            "Run a scenario by name or unique substring. Pass multiple times to "
+            "select more than one scenario; omit to run all."
+        ),
+    )
     parser.add_argument("--parallel", type=int, default=1, help="Concurrent scenarios to run.")
     parser.add_argument("--dry-run", action="store_true", help="Write a preview report only.")
     parser.add_argument("--report-path", type=Path, help="Report output path.")
@@ -867,7 +884,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     scenarios = discover_scenarios()
-    selected = select_scenarios(scenarios, args.scenario)
+    selected = select_scenarios(scenarios, args.scenarios)
     if not selected:
         raise SystemExit(f"No scenarios found under {FIELD_TEST_ROOT}")
 

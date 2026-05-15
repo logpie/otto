@@ -1,5 +1,33 @@
 # Otto redesign — research
 
+## Leaf runtime invariant poisoning fix (2026-05-15)
+
+Scope: fix the v5 modular-path failure where a leaf prompt could contain a
+stale `SESSION_DIR` from the parent-authored child intent plus Otto's correct
+runtime session dir. The leaf then wrote `verdict.json` to the wrong session.
+
+Relevant current paths:
+
+- `otto/lead.py` renders both normal Lead and integration prompts, saves the
+  rendered prompt, and reads `verdict.json` after the agent run.
+- `otto/prompts/lead.md` currently renders `TASK ID`, `INTENT`, and
+  `SESSION_DIR` as sibling input bullets; multiline intent can therefore
+  inject runtime-looking lines directly into the rendered prompt.
+- `_read_agent_verdict()` already recovers canonical verdicts from the
+  canonical path, worktree-misplaced `verdict.json`, legacy verify output, and
+  final assistant prose, but not from Write tool inputs in `lead/messages.jsonl`.
+- Existing regression style is focused private-helper tests under
+  `tests/test_v5_*.py`, including `tests/test_v5_verdict_recovery.py` and
+  prompt-rendering tests in `tests/test_v5_integration_worktree.py`.
+
+Constraints and decisions:
+
+- Keep the fix in `otto/lead.py`; avoid prompt-template churn.
+- Sanitize runtime-looking line prefixes before interpolating agent-authored
+  child intent, then render a clearly delimited runtime block after the intent.
+- Reuse `_canonicalize_verdict_payload()` for rescued Write payloads, but only
+  accept canonical-shaped verdict objects rather than bare status claims.
+
 ## Field-test forced tier research (2026-05-15)
 
 Scope: update the v5 field-test rig so the next run exercises inline, flat

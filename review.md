@@ -5,6 +5,39 @@ implementation of `plan-parallel.md`.
 
 ---
 
+## Leaf Runtime Invariant Poisoning Fix — Implementation Gate (2026-05-15)
+
+Scope reviewed:
+- `otto/lead.py` prompt runtime block/sanitizer and verdict Write-tool rescue.
+- `tests/test_v5_leaf_runtime_invariants.py`.
+- Current `research.md` / `plan.md` entries.
+
+Local `codex-gate` checklist result: APPROVED. External Codex MCP gate remains
+unavailable in this session; no peer review tool was invoked.
+
+Diff review findings:
+- Adjusted sanitizer to apply only to child/integration prompts so root
+  user-authored intents are not unexpectedly altered.
+- No blocking findings after the adjustment.
+
+Validation:
+- Pre-fix check: reversed only the `otto/lead.py` patch and ran
+  `uv run --extra dev python -m pytest tests/test_v5_leaf_runtime_invariants.py -v`
+  — both tests failed against the old behavior, then passed after reapplying.
+- `uv run --extra dev python -m pytest tests/test_v5_leaf_runtime_invariants.py -v`
+  — 2 passed.
+- `uv run --extra dev python -m pytest tests/test_v5_verdict_recovery.py tests/test_v5_integration_worktree.py -q`
+  — 18 passed.
+- `uv run --extra dev python -m pytest tests/smoke -v` — 12 passed.
+- `uv run ruff check otto/lead.py tests/test_v5_leaf_runtime_invariants.py`
+  — passed.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error otto/lead.py tests/test_v5_leaf_runtime_invariants.py`
+  — 0 errors.
+- Strict `basedpyright` without `--level error` still exits nonzero on the
+  existing warning profile in `otto/lead.py` (0 errors, 144 warnings).
+
+---
+
 ## Field-Test Forced Tiers — Implementation Gate (2026-05-15)
 
 Scope reviewed:

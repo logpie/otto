@@ -3,6 +3,36 @@
 Source of truth: [`research.md`](research.md). Conversation transcript:
 [`docs/otto-redesign-conversation.md`](docs/otto-redesign-conversation.md).
 
+## Leaf Runtime Invariant Poisoning Fix (2026-05-15)
+
+Goal: prevent stale runtime hints inside child INTENT text from overriding the
+leaf's real runtime values, and recover valid verdict writes when the old prompt
+bug made an agent write to a discoverable wrong session path.
+
+Plan Gate: local `codex-gate` checklist APPROVED. External Codex MCP gate is
+not available in this session.
+
+Steps:
+
+1. Sanitize agent-submitted intent lines with runtime-looking prefixes such as
+   `SESSION_DIR`, `Session dir`, `TASK_ID`, parent/root session paths, and
+   worktree/project paths before prompt interpolation.
+   Verify: rendered leaf prompt has no stale root session path and exactly one
+   canonical `SESSION_DIR:` value for the leaf session.
+2. Render a delimited runtime block immediately after the intent block and make
+   it the sole concrete task/session source.
+   Verify: the required ignore sentence is present and task/session values come
+   from the canonical runtime block.
+3. Extend `_read_agent_verdict()` to inspect Write tool inputs in
+   `lead/messages.jsonl` for canonical-shaped verdict JSON, copy a valid payload
+   to `<leaf_session>/verdict.json`, and append a structured warning to the
+   narrative log.
+   Verify: a simulated root-session Write payload resolves to `pass`, creates
+   the leaf canonical verdict file, and emits a warning.
+4. Run focused tests, smoke tests, and changed-file lint/type checks.
+   Verify: requested pytest commands plus `ruff check` and basedpyright on the
+   changed Python surface.
+
 This plan supersedes the V21 detail-panel framing and the prior
 intent-to-product plan at `~/.claude/plans/plan-based-on-this-soft-cloud.md`.
 Per CLAUDE.md, **Codex Plan Gate review is mandatory** before
