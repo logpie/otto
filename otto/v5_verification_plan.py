@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import time
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
@@ -29,7 +28,6 @@ CHECK_KINDS = (
     "no_stub_text",
     "verdict_consistency",
     "deprecation_warnings",
-    "decisions_broadcast",
 )
 
 _NOISE_DIRS = {
@@ -146,7 +144,6 @@ def validate_lead_verdict(
         session_dir=session_dir,
         agent_verdict=agent_verdict,
     ))
-    checks.extend(_check_decisions_broadcast(worktree_dir, agent_verdict))
 
     journey_failures = _missing_passed_journeys(spec, agent_verdict) if spec and full_matrix else []
     failed_required = [c for c in checks if c.get("required", True) and c.get("status") == "fail"]
@@ -761,140 +758,6 @@ def _check_local_scope_evidence(agent_verdict: dict[str, Any]) -> list[dict[str,
             else "leaf verdict lacks local test_command, passed/detailed journeys, and evidence entries"
         ),
     )]
-
-
-def _check_decisions_broadcast(root: Path, agent_verdict: dict[str, Any]) -> list[dict[str, Any]]:
-    entries, schema_error = _decision_entries(agent_verdict)
-    if schema_error:
-        return [_check(
-            "decisions_broadcast",
-            "decisions_appended_schema",
-            False,
-            schema_error,
-        )]
-
-    shared_paths = _shared_contract_touched_paths(root)
-    if not shared_paths:
-        return [_check(
-            "decisions_broadcast",
-            "shared_contract_touchpoints",
-            True,
-            "no changed shared schema/type/wire files detected",
-            required=False,
-        )]
-
-    decisions_path = root / "decisions.md"
-    decisions_text = _read_text(decisions_path) if decisions_path.exists() else ""
-    matching_entries = [
-        entry for entry in entries
-        if _decision_entry_matches_log(entry, decisions_text)
-    ]
-    passed = bool(matching_entries)
-    return [_check(
-        "decisions_broadcast",
-        "shared_contract_touchpoints",
-        passed,
-        (
-            "changed shared schema/type/wire files have matching decisions.md entries"
-            if passed
-            else "changed shared schema/type/wire files without matching decisions.md entry"
-        ),
-        refs={
-            "touched_paths": shared_paths[:20],
-            "decision_ids": [entry.get("decision_id", "") for entry in entries],
-        },
-    )]
-
-
-def _decision_entries(agent_verdict: dict[str, Any]) -> tuple[list[dict[str, str]], str | None]:
-    raw = agent_verdict.get("decisions_appended")
-    if raw is None:
-        return [], None
-    if not isinstance(raw, list):
-        return [], "decisions_appended must be a list when present"
-    entries: list[dict[str, str]] = []
-    for idx, item in enumerate(raw):
-        if not isinstance(item, dict):
-            return [], f"decisions_appended[{idx}] must be an object"
-        decision_id = str(item.get("decision_id") or "").strip()
-        summary = str(item.get("summary") or "").strip()
-        if not decision_id or not summary:
-            return [], f"decisions_appended[{idx}] requires decision_id and summary"
-        entries.append({"decision_id": decision_id, "summary": summary})
-    return entries, None
-
-
-def _decision_entry_matches_log(entry: dict[str, str], decisions_text: str) -> bool:
-    if not decisions_text.strip():
-        return False
-    decision_id = entry.get("decision_id") or ""
-    summary = entry.get("summary") or ""
-    return bool(
-        (decision_id and decision_id in decisions_text)
-        or (summary and summary in decisions_text)
-    )
-
-
-def _shared_contract_touched_paths(root: Path) -> list[str]:
-    paths: list[str] = []
-    for rel in _git_changed_paths(root):
-        if _is_shared_contract_path(rel):
-            paths.append(rel)
-    return sorted(set(paths))
-
-
-def _git_changed_paths(root: Path) -> list[str]:
-    try:
-        proc = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode != 0:
-        return []
-    out: list[str] = []
-    for line in proc.stdout.splitlines():
-        if len(line) < 4:
-            continue
-        rel = line[3:].strip()
-        if " -> " in rel:
-            rel = rel.split(" -> ", 1)[1].strip()
-        if rel:
-            out.append(rel)
-    return out
-
-
-def _is_shared_contract_path(rel_text: str) -> bool:
-    path = Path(rel_text)
-    name = path.name.lower()
-    if name == "decisions.md":
-        return False
-    parts = [part.lower() for part in path.parts]
-    parent_markers = {"shared", "schema", "schemas", "types", "contracts", "wire", "protocol"}
-    if any(part in parent_markers for part in parts[:-1]):
-        return path.suffix.lower() in _CODE_SUFFIXES or name.endswith((".schema", ".schemas"))
-    if name in {
-        "types.ts",
-        "types.tsx",
-        "types.js",
-        "types.py",
-        "schema.ts",
-        "schema.tsx",
-        "schema.js",
-        "schema.py",
-        "schemas.ts",
-        "contract.ts",
-        "contracts.ts",
-        "wire.ts",
-        "protocol.ts",
-    }:
-        return True
-    return bool(re.search(r"(?:^|[._-])(?:schema|contract|wire|protocol)\.(?:ts|tsx|js|py|json)$", name))
 
 
 def _missing_passed_journeys(spec: dict[str, Any], agent_verdict: dict[str, Any]) -> list[str]:

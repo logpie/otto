@@ -124,45 +124,6 @@ class _DispatchLease:
                 return
 
 
-# ---------------------------------------------------------------------------
-# Auditor (pluggable, opt-in)
-# ---------------------------------------------------------------------------
-#
-# The architecture supports attaching an EXTERNAL AUDITOR agent to any node
-# in the task graph. The auditor is a separate agent session (fresh context,
-# new task_id pattern `audit-<task>`) that re-runs the tests and reviews the
-# original agent's claimed verdict adversarially.
-#
-# Activation: a config flag (`audit_nodes: ["root"]` in otto.yaml or
-# task_graph entry `audit_requested: true`) marks which nodes get audited.
-# After the marked node's session ends with a non-`pending_children`
-# verdict, the runner spawns the auditor.
-#
-# The auditor's verdict either confirms the original agent's claim or
-# contradicts it. On contradiction, the runner can:
-#   - downgrade the verdict to match the audit
-#   - feed the audit findings back to the original agent for re-iteration
-#     (configurable)
-#
-# Current state: scaffold only. `should_audit(task_id, config)` and
-# `_run_auditor(...)` are stubs. Users who want auditing can opt in by
-# flipping the config flag; the implementation will wire to the auditor.md
-# prompt and follow the standard `run_lead`-style session pattern.
-
-
-def should_audit(task_id: str, config: dict[str, Any]) -> bool:
-    """Whether to spawn an auditor for ``task_id`` after its main agent ends.
-
-    Default: no auditing. Opt-in via config:
-      - ``audit_nodes: ["root"]``  — list of task IDs to audit
-      - ``audit_all: true``        — audit every node (expensive)
-    """
-    if config.get("audit_all"):
-        return True
-    nodes = config.get("audit_nodes") or []
-    return task_id in nodes
-
-
 @dataclass
 class V5RunResult:
     """Top-level result of a v5 run."""
@@ -204,8 +165,12 @@ def _checkout_v5_branch_clean(
     branch: str,
     context: str,
     on_event: Any = None,
-) -> None:
-    """Checkout ``branch`` for v5 orchestration, refusing dirty worktrees."""
+) -> dict[str, Any] | None:
+    """Checkout ``branch`` for v5 orchestration.
+
+    Dirty/failed checkout states are returned as preflight payloads so the
+    repair loop can hand them to an agent. A clean checkout returns None.
+    """
     from otto.v5_branching import (
         assert_clean_before_checkout,
         git_current_branch,
@@ -219,21 +184,53 @@ def _checkout_v5_branch_clean(
         text=True,
     )
     if is_repo.returncode != 0:
-        return
+        return None
     current = git_current_branch(project_dir)
     if current == branch:
-        remaining = git_status_porcelain(project_dir)
-        if remaining:
-            raise RuntimeError(
-                f"already on {branch!r} during {context}, but worktree is dirty: "
-                + ", ".join(remaining[:10])
+        try:
+            remaining = git_status_porcelain(project_dir)
+        except RuntimeError as exc:
+            return _checkout_issue_payload(
+                project_dir=project_dir,
+                branch=branch,
+                current_branch=current,
+                context=context,
+                kind="checkout_status_failed_at_phase",
+                message=str(exc),
+                status_lines=[],
+                on_event=on_event,
             )
-        return
-    assert_clean_before_checkout(
-        project_dir=project_dir,
-        source_branch=current,
-        target_branch=branch,
-    )
+        if remaining:
+            return _checkout_issue_payload(
+                project_dir=project_dir,
+                branch=branch,
+                current_branch=current,
+                context=context,
+                kind="worktree_dirty_at_phase",
+                message=(
+                    f"already on {branch!r} during {context}, but worktree is dirty"
+                ),
+                status_lines=remaining,
+                on_event=on_event,
+            )
+        return None
+    try:
+        assert_clean_before_checkout(
+            project_dir=project_dir,
+            source_branch=current,
+            target_branch=branch,
+        )
+    except Exception as exc:  # noqa: BLE001 - repair agent decides the action.
+        return _checkout_issue_payload(
+            project_dir=project_dir,
+            branch=branch,
+            current_branch=current,
+            context=context,
+            kind="worktree_dirty_at_phase",
+            message=str(exc),
+            status_lines=getattr(exc, "dirty_status", ()),
+            on_event=on_event,
+        )
     cp = subprocess.run(
         ["git", "checkout", branch],
         cwd=str(project_dir),
@@ -242,21 +239,45 @@ def _checkout_v5_branch_clean(
     )
     if cp.returncode != 0:
         detail = (cp.stderr or cp.stdout or "").strip()
-        raise RuntimeError(
-            f"checkout {branch!r} failed during {context} from "
-            f"{current!r}: {detail}"
+        return _checkout_issue_payload(
+            project_dir=project_dir,
+            branch=branch,
+            current_branch=current,
+            context=context,
+            kind="checkout_failed_at_phase",
+            message=(
+                f"checkout {branch!r} failed during {context} from "
+                f"{current!r}: {detail}"
+            ),
+            status_lines=[],
+            on_event=on_event,
         )
     actual = git_current_branch(project_dir)
     if actual != branch:
-        raise RuntimeError(
-            f"checkout {branch!r} during {context} reported success but "
-            f"current branch is {actual!r}"
+        return _checkout_issue_payload(
+            project_dir=project_dir,
+            branch=branch,
+            current_branch=actual,
+            context=context,
+            kind="checkout_failed_at_phase",
+            message=(
+                f"checkout {branch!r} during {context} reported success but "
+                f"current branch is {actual!r}"
+            ),
+            status_lines=[],
+            on_event=on_event,
         )
     remaining = git_status_porcelain(project_dir)
     if remaining:
-        raise RuntimeError(
-            f"checkout {branch!r} during {context} left dirty worktree: "
-            + ", ".join(remaining[:10])
+        return _checkout_issue_payload(
+            project_dir=project_dir,
+            branch=branch,
+            current_branch=actual,
+            context=context,
+            kind="worktree_dirty_at_phase",
+            message=f"checkout {branch!r} during {context} left dirty worktree",
+            status_lines=remaining,
+            on_event=on_event,
         )
     _emit(on_event, {
         "event": "project_branch_checked_out",
@@ -264,6 +285,135 @@ def _checkout_v5_branch_clean(
         "from": current,
         "to": branch,
     })
+    return None
+
+
+def _checkout_issue_payload(
+    *,
+    project_dir: Path,
+    branch: str,
+    current_branch: str,
+    context: str,
+    kind: str,
+    message: str,
+    status_lines: Any,
+    on_event: Any = None,
+) -> dict[str, Any]:
+    lines = [str(line) for line in (status_lines or []) if str(line).strip()]
+    issue = {
+        "kind": kind,
+        "severity": "block",
+        "message": (
+            f"{message}\n"
+            f"phase={context}; current_branch={current_branch}; target_branch={branch}\n"
+            f"dirty_status:\n" + "\n".join(lines[:80])
+        ).strip(),
+        "phase": context,
+        "current_branch": current_branch,
+        "target_branch": branch,
+        "paths": [_status_path(line) for line in lines if _status_path(line)],
+        "diff_stat": _git_diff_stat(project_dir),
+    }
+    payload = {
+        "check": "git_checkout_clean",
+        "phase": context,
+        "cwd": str(project_dir),
+        "passed": False,
+        "issues": [issue],
+        "error": None,
+    }
+    _emit(on_event, {
+        "event": "checkout_preflight_issue",
+        "phase": context,
+        "kind": kind,
+        "message": issue["message"],
+    })
+    return payload
+
+
+def _status_path(line: str) -> str:
+    text = line[3:].strip() if len(line) > 3 else line.strip()
+    if " -> " in text:
+        text = text.split(" -> ", 1)[1].strip()
+    return text
+
+
+def _git_diff_stat(project_dir: Path) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "diff", "--stat"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+async def _checkout_v5_branch_clean_with_repair(
+    *,
+    project_dir: Path,
+    branch: str,
+    context: str,
+    session_dir: Path,
+    config: dict[str, Any],
+    integration_branch: str | None,
+    task_id: str,
+    on_event: Any = None,
+) -> dict[str, Any]:
+    """Checkout a branch, repairing dirty/failed checkout states via agent."""
+
+    def passed_payload() -> dict[str, Any]:
+        return {
+            "check": "git_checkout_clean",
+            "phase": context,
+            "cwd": str(project_dir),
+            "passed": True,
+            "issues": [],
+            "error": None,
+        }
+
+    def run_once() -> dict[str, Any]:
+        payload = _checkout_v5_branch_clean(
+            project_dir=project_dir,
+            branch=branch,
+            context=context,
+            on_event=on_event,
+        )
+        return payload or passed_payload()
+
+    first = run_once()
+    if not _integration_smoke_blocks(first):
+        return first
+    controller = PreflightRepairController(
+        session_dir=session_dir,
+        worktree_path=project_dir,
+        agent_repair=lambda request: _run_preflight_repair_agent(
+            request=request,
+            task_id=task_id,
+            project_dir=project_dir,
+            config=config,
+            integration_branch=integration_branch,
+            on_event=on_event,
+        ),
+    )
+    result = await controller.repair_until_clean(run_once, initial_payload=first)
+    payload = result.preflight_payload
+    payload["repair"] = result.to_jsonable()
+    _emit(on_event, {
+        "event": "checkout_repair_done",
+        "task_id": task_id,
+        "phase": context,
+        "terminal_state": result.terminal_state,
+        "attempts": len(result.attempts),
+        "log_path": str(controller.log_path),
+    })
+    return payload
 
 
 def _integration_restore_branch(
@@ -372,12 +522,28 @@ async def run_v5_pipeline(
             logger.warning("ensure_initial_commit failed: %s", exc)
 
         root_branch = _v5_root_branch(project_dir, config)
-        _checkout_v5_branch_clean(
+        root_session_id = _new_session_id()
+        root_session_dir = _paths.session_dir(project_dir, root_session_id)
+        root_session_dir.mkdir(parents=True, exist_ok=True)
+        _emit(on_event, {"event": "session_open", "session_id": root_session_id})
+
+        checkout_result = await _checkout_v5_branch_clean_with_repair(
             project_dir=project_dir,
             branch=root_branch,
             context="v5_pipeline_start",
+            session_dir=root_session_dir,
+            config=config,
+            integration_branch=None,
+            task_id=ROOT_TASK_ID,
             on_event=on_event,
         )
+        if _preflight_repair_escalated(checkout_result) or _integration_smoke_blocks(checkout_result):
+            result.verdict = "merge_blocked"
+            result.failure_reason = _preflight_blocking_summary(
+                "Pipeline start branch checkout could not be repaired",
+                checkout_result,
+            )
+            return result
 
         # Clean up stale dev-server processes bound to this project's
         # declared ports. Each "port already in use" error inside an agent
@@ -399,10 +565,6 @@ async def run_v5_pipeline(
             logger.warning("port cleanup failed: %s", exc)
 
         # ---- Phase A: Root session setup ----
-        root_session_id = _new_session_id()
-        root_session_dir = _paths.session_dir(project_dir, root_session_id)
-        root_session_dir.mkdir(parents=True, exist_ok=True)
-        _emit(on_event, {"event": "session_open", "session_id": root_session_id})
 
         # ---- Phase B: Compile flat spec ----
         _emit(on_event, {"event": "compile_start"})
@@ -443,6 +605,13 @@ async def run_v5_pipeline(
             integration_branch=None,
             config=config,
             kind="plan_or_inline",
+            decomp_runtime_context=_build_decomp_runtime_context(
+                project_dir=project_dir,
+                config=config,
+                max_parallel=max_parallel,
+                run_started_at=started,
+                spec=spec,
+            ),
         )
         result.root_lead_result = root_result
         _emit(on_event, {
@@ -488,6 +657,7 @@ async def run_v5_pipeline(
                 child_results=result.child_results,
                 integration_results=result.integration_results,
                 on_event=on_event,
+                run_started_at=started,
             )
             # ---- Phase E: Run root integration ----
             child_summaries = _build_child_summaries(
@@ -510,28 +680,42 @@ async def run_v5_pipeline(
                 except OSError as exc:
                     logger.warning("could not copy spec for root integration: %s", exc)
             _emit(on_event, {"event": "integration_start", "task_id": ROOT_TASK_ID})
-            _checkout_v5_branch_clean(
+            checkout_result = await _checkout_v5_branch_clean_with_repair(
                 project_dir=project_dir,
                 branch=root_branch,
                 context="root_integration_start",
-                on_event=on_event,
-            )
-            preflight_result = await _run_integration_smoke_preflight_with_repair(
-                project_dir=project_dir,
-                worktree_path=project_dir,
-                task_id=ROOT_TASK_ID,
-                phase="pre_agent",
                 session_dir=integration_session_dir,
                 config=config,
                 integration_branch=None,
+                task_id=ROOT_TASK_ID,
                 on_event=on_event,
             )
+            if _preflight_repair_escalated(checkout_result) or _integration_smoke_blocks(checkout_result):
+                preflight_result = checkout_result
+            else:
+                preflight_result = _run_integration_smoke_preflight(
+                    worktree_path=project_dir,
+                    task_id=ROOT_TASK_ID,
+                    phase="pre_agent",
+                    on_event=on_event,
+                )
             if _preflight_repair_escalated(preflight_result):
                 integration_result = _preflight_blocked_result(
                     task_id=ROOT_TASK_ID,
                     preflight_result=preflight_result,
                 )
             else:
+                integration_packet_path = _write_integration_packet(
+                    project_dir=project_dir,
+                    parent_task_id=ROOT_TASK_ID,
+                    session_dir=integration_session_dir,
+                    child_results=result.child_results,
+                    integration_results=result.integration_results,
+                    child_summaries=child_summaries,
+                    preflight_result=preflight_result,
+                    integration_branch=root_branch,
+                    integration_worktree=project_dir,
+                )
                 integration_result = await run_lead(
                     task_id=ROOT_TASK_ID,
                     intent=intent,
@@ -542,6 +726,7 @@ async def run_v5_pipeline(
                     kind="integration",
                     child_summaries=child_summaries,
                     preflight_result=preflight_result,
+                    integration_packet_path=str(integration_packet_path),
                 )
                 _commit_integration_agent_changes(
                     project_dir=project_dir,
@@ -553,14 +738,10 @@ async def run_v5_pipeline(
             if _preflight_repair_escalated(preflight_result):
                 post_preflight_result = preflight_result
             else:
-                post_preflight_result = await _run_integration_smoke_preflight_with_repair(
-                    project_dir=project_dir,
+                post_preflight_result = _run_integration_smoke_preflight(
                     worktree_path=project_dir,
                     task_id=ROOT_TASK_ID,
                     phase="post_agent",
-                    session_dir=integration_session_dir,
-                    config=config,
-                    integration_branch=None,
                     on_event=on_event,
                 )
             if integration_result.verify_result is None:
@@ -652,6 +833,7 @@ async def _process_children(
     integration_results: dict[str, LeadResult],
     on_event: Any = None,
     dispatch_lease: _DispatchLease | None = None,
+    run_started_at: float | None = None,
 ) -> None:
     """Process the v5_pending queue for ``parent_task_id``'s subtree.
 
@@ -957,6 +1139,8 @@ async def _process_children(
                     project_dir=project_dir,
                     entry=entry,
                     config=config,
+                    max_parallel=max_parallel,
+                    run_started_at=run_started_at,
                     on_event=on_event,
                 )
             )
@@ -1004,6 +1188,7 @@ async def _process_children(
                             integration_results=integration_results,
                             on_event=on_event,
                             dispatch_lease=dispatch_lease,
+                            run_started_at=run_started_at,
                         )
                         # Run this child's integration Lead.
                         integ_result = await _run_integration(
@@ -1063,6 +1248,8 @@ async def _run_child(
     project_dir: Path,
     entry: dict[str, Any],
     config: dict[str, Any],
+    max_parallel: int = 1,
+    run_started_at: float | None = None,
     on_event: Any = None,
 ) -> LeadResult:
     """Run one child Lead in its own session + worktree, with provider fallback."""
@@ -1195,6 +1382,13 @@ async def _run_child(
         config=config,
         kind="plan_or_inline",
         context_slice_note=context_slice_note,
+        decomp_runtime_context=_build_decomp_runtime_context(
+            project_dir=project_dir,
+            config=config,
+            max_parallel=max_parallel,
+            run_started_at=run_started_at,
+            spec_path=child_spec_path,
+        ),
         on_event=on_event,
     )
 
@@ -1285,6 +1479,7 @@ async def _run_lead_with_fallback(
     kind: str = "plan_or_inline",
     child_summaries: list[dict[str, Any]] | None = None,
     context_slice_note: str = "",
+    decomp_runtime_context: dict[str, Any] | None = None,
     on_event: Any = None,
 ) -> LeadResult:
     """Run a Lead with task-level provider fallback.
@@ -1323,6 +1518,7 @@ async def _run_lead_with_fallback(
         kind=kind,  # type: ignore[arg-type]
         child_summaries=child_summaries,
         context_slice_note=context_slice_note,
+        decomp_runtime_context=decomp_runtime_context,
     )
     duration_a = _time.monotonic() - started
     append_attempt(
@@ -1372,6 +1568,7 @@ async def _run_lead_with_fallback(
         kind=kind,  # type: ignore[arg-type]
         child_summaries=child_summaries,
         context_slice_note=context_slice_note,
+        decomp_runtime_context=decomp_runtime_context,
     )
     append_attempt(
         session_dir / "summary.json",
@@ -1480,14 +1677,9 @@ def _preflight_blocked_result(
     task_id: str,
     preflight_result: dict[str, Any],
 ) -> LeadResult:
-    reason = (
-        "Integration preflight repair escalated before agent dispatch: "
-        + "; ".join(
-            str(issue.get("message") or issue.get("kind"))
-            for issue in preflight_result.get("issues", [])
-            if isinstance(issue, dict)
-            and issue.get("severity") in ("error", "block")
-        )
+    reason = _preflight_blocking_summary(
+        "Integration preflight repair escalated before agent dispatch",
+        preflight_result,
     )
     return LeadResult(
         task_id=task_id,
@@ -1502,86 +1694,14 @@ def _preflight_blocked_result(
     )
 
 
-async def _run_integration_smoke_preflight_with_repair(
-    *,
-    project_dir: Path,
-    worktree_path: Path,
-    task_id: str,
-    phase: str,
-    session_dir: Path,
-    config: dict[str, Any],
-    integration_branch: str | None,
-    on_event: Any = None,
-) -> dict[str, Any]:
-    """Run integration smoke preflight with bounded deterministic repair."""
-
-    def run_once() -> dict[str, Any]:
-        return _run_integration_smoke_preflight(
-            worktree_path=worktree_path,
-            task_id=task_id,
-            phase=phase,
-            on_event=on_event,
-        )
-
-    first = run_once()
-    if not _integration_smoke_blocks(first):
-        return first
-    first_issue = _first_preflight_blocking_issue(first)
-    if first_issue is None:
-        return first
-
-    controller = PreflightRepairController(
-        session_dir=session_dir,
-        worktree_path=worktree_path,
-        original_budget_usd=_preflight_original_budget_usd(config),
-        agent_repair=lambda request: _run_preflight_repair_agent(
-            request=request,
-            task_id=task_id,
-            project_dir=project_dir,
-            config=config,
-            integration_branch=integration_branch,
-            on_event=on_event,
-        ),
-    )
-    result = await controller.repair_until_clean(run_once, initial_payload=first)
-    payload = result.preflight_payload
-    payload["repair"] = result.to_jsonable()
-    _emit(on_event, {
-        "event": "preflight_repair_done",
-        "task_id": task_id,
-        "phase": phase,
-        "terminal_state": result.terminal_state,
-        "attempts": len(result.attempts),
-        "log_path": str(controller.log_path),
-    })
-    return payload
-
-
-def _first_preflight_blocking_issue(payload: dict[str, Any]) -> dict[str, Any] | None:
-    for issue in payload.get("issues") or []:
-        if isinstance(issue, dict) and issue.get("severity") in ("error", "block"):
-            return issue
-    return None
-
-
-def _preflight_original_budget_usd(config: dict[str, Any]) -> float:
-    budgets = config.get("budgets") if isinstance(config, dict) else None
-    if isinstance(budgets, dict):
-        for key in ("total_cost_usd", "tree_budget_usd", "max_cost_usd"):
-            try:
-                value = float(budgets.get(key) or 0.0)
-            except (TypeError, ValueError):
-                value = 0.0
-            if value > 0:
-                return value
-    for key in ("tree_budget_usd", "max_cost_usd", "budget_usd"):
-        try:
-            value = float(config.get(key) or 0.0)
-        except (TypeError, ValueError, AttributeError):
-            value = 0.0
-        if value > 0:
-            return value
-    return 25.0
+def _preflight_blocking_summary(prefix: str, payload: dict[str, Any]) -> str:
+    messages = [
+        str(issue.get("message") or issue.get("kind"))
+        for issue in payload.get("issues", [])
+        if isinstance(issue, dict)
+        and issue.get("severity") in ("error", "block")
+    ]
+    return prefix + (": " + "; ".join(messages) if messages else "")
 
 
 async def _run_preflight_repair_agent(
@@ -1792,14 +1912,10 @@ async def _run_integration(
 
     parent_integration_branch = own_integration_branch
     integration_cwd = integration_worktree or project_dir
-    preflight_result = await _run_integration_smoke_preflight_with_repair(
-        project_dir=project_dir,
+    preflight_result = _run_integration_smoke_preflight(
         worktree_path=integration_cwd,
         task_id=task_id,
         phase="pre_agent",
-        session_dir=integration_session_dir,
-        config=config,
-        integration_branch=parent_integration_branch,
         on_event=on_event,
     )
 
@@ -1810,6 +1926,17 @@ async def _run_integration(
             preflight_result=preflight_result,
         )
     else:
+        integration_packet_path = _write_integration_packet(
+            project_dir=project_dir,
+            parent_task_id=task_id,
+            session_dir=integration_session_dir,
+            child_results=child_results,
+            integration_results=integration_results,
+            child_summaries=summaries,
+            preflight_result=preflight_result,
+            integration_branch=parent_integration_branch,
+            integration_worktree=integration_cwd,
+        )
         result = await run_lead(
             task_id=task_id,
             intent=intent,
@@ -1820,6 +1947,7 @@ async def _run_integration(
             kind="integration",
             child_summaries=summaries,
             preflight_result=preflight_result,
+            integration_packet_path=str(integration_packet_path),
         )
         _commit_integration_agent_changes(
             project_dir=project_dir,
@@ -1831,14 +1959,10 @@ async def _run_integration(
     if _preflight_repair_escalated(preflight_result):
         post_preflight_result = preflight_result
     else:
-        post_preflight_result = await _run_integration_smoke_preflight_with_repair(
-            project_dir=project_dir,
+        post_preflight_result = _run_integration_smoke_preflight(
             worktree_path=integration_cwd,
             task_id=task_id,
             phase="post_agent",
-            session_dir=integration_session_dir,
-            config=config,
-            integration_branch=parent_integration_branch,
             on_event=on_event,
         )
     if result.verify_result is None:
@@ -1870,15 +1994,21 @@ async def _run_integration(
     integration_results[task_id] = result
     _emit(on_event, {"event": "integration_done", "task_id": task_id, "verdict": result.verdict})
     restore_branch = _integration_restore_branch(project_dir, task_id, config)
-    try:
-        _checkout_v5_branch_clean(
-            project_dir=project_dir,
-            branch=restore_branch,
-            context=f"integration_return:{task_id}",
-            on_event=on_event,
+    restore_result = await _checkout_v5_branch_clean_with_repair(
+        project_dir=project_dir,
+        branch=restore_branch,
+        context=f"integration_return:{task_id}",
+        session_dir=integration_session_dir,
+        config=config,
+        integration_branch=parent_integration_branch,
+        task_id=task_id,
+        on_event=on_event,
+    )
+    if _preflight_repair_escalated(restore_result) or _integration_smoke_blocks(restore_result):
+        detail = _preflight_blocking_summary(
+            f"could not restore project_dir after integration {task_id} to {restore_branch}",
+            restore_result,
         )
-    except (MergeWorktreeDirtyError, RuntimeError) as exc:
-        detail = str(exc)
         logger.warning(
             "could not restore project_dir after integration %s to %s: %s",
             task_id, restore_branch, detail,
@@ -1892,6 +2022,121 @@ async def _run_integration(
         set_verdict(project_dir, task_id, "merge_blocked", cost_usd=result.cost_usd)
         result.verdict = "merge_blocked"
     return result
+
+
+def _write_integration_packet(
+    *,
+    project_dir: Path,
+    parent_task_id: str,
+    session_dir: Path,
+    child_results: dict[str, LeadResult],
+    integration_results: dict[str, LeadResult],
+    child_summaries: list[dict[str, Any]],
+    preflight_result: dict[str, Any],
+    integration_branch: str,
+    integration_worktree: Path,
+) -> Path:
+    from otto.v5_branching import child_branch_name, integration_branch_name
+
+    children: list[dict[str, Any]] = []
+    for cid in children_of(project_dir, parent_task_id):
+        entry = get_task(project_dir, cid) or {}
+        result = integration_results.get(cid) or child_results.get(cid)
+        build_branch = child_branch_name(cid)
+        subtree_branch = integration_branch_name(cid)
+        verdict_payload = (
+            result.verify_result
+            if result is not None and isinstance(result.verify_result, dict)
+            else {}
+        )
+        children.append({
+            "task_id": cid,
+            "intent": entry.get("intent", ""),
+            "task_graph": entry,
+            "session_dir": _find_session_dir_for_task(project_dir, cid),
+            "agent_session_id": result.agent_session_id if result else "",
+            "branches": {"build": build_branch, "integration": subtree_branch},
+            "changed_files": {
+                "build": _changed_files_for_branch(project_dir, build_branch),
+                "integration": _changed_files_for_branch(project_dir, subtree_branch),
+            },
+            "verdict": result.verdict if result else entry.get("verdict"),
+            "verdict_json": verdict_payload,
+            "intent_coverage": verdict_payload.get("intent_coverage") if verdict_payload else None,
+            "decisions_appended": verdict_payload.get("decisions_appended") if verdict_payload else [],
+            "runner_checks": verdict_payload.get("runner_checks") if verdict_payload else [],
+        })
+    packet = {
+        "schema_version": 1,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "parent_task_id": parent_task_id,
+        "integration_branch": integration_branch,
+        "integration_worktree": str(integration_worktree),
+        "child_summaries": child_summaries,
+        "children": children,
+        "preflight_results": {"pre_agent": preflight_result},
+        "applicable_journey_ids": _journey_ids_from_spec(session_dir / "spec" / "spec.json"),
+    }
+    path = session_dir / "integration_packet.json"
+    path.write_text(json.dumps(packet, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    return path
+
+
+def _find_session_dir_for_task(project_dir: Path, task_id: str) -> str:
+    sessions_root = project_dir / "otto_logs" / "sessions"
+    if not sessions_root.exists():
+        return ""
+    matches: list[Path] = []
+    for summary in sessions_root.glob("*/summary.json"):
+        try:
+            payload = json.loads(summary.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("task_id") == task_id:
+            matches.append(summary.parent)
+    return str(sorted(matches)[-1]) if matches else ""
+
+
+def _changed_files_for_branch(project_dir: Path, branch: str) -> list[str]:
+    exists = subprocess.run(
+        ["git", "rev-parse", "--verify", branch],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    if exists.returncode != 0:
+        return []
+    base = "main"
+    base_exists = subprocess.run(
+        ["git", "rev-parse", "--verify", base],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    if base_exists.returncode != 0:
+        base = "HEAD"
+    proc = subprocess.run(
+        ["git", "diff", "--name-only", f"{base}...{branch}"],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return []
+    return sorted({line.strip() for line in proc.stdout.splitlines() if line.strip()})
+
+
+def _journey_ids_from_spec(spec_path: Path) -> list[str]:
+    try:
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    journeys = payload.get("behavior_journeys") if isinstance(payload, dict) else []
+    return [
+        str(journey.get("id"))
+        for journey in journeys or []
+        if isinstance(journey, dict) and journey.get("id")
+    ]
 
 
 def _build_child_summaries(
@@ -2196,6 +2441,109 @@ def _emit(on_event: Any, payload: dict[str, Any]) -> None:
         on_event(payload)
     except Exception:  # noqa: BLE001 — observability is best-effort
         pass
+
+
+def _build_decomp_runtime_context(
+    *,
+    project_dir: Path,
+    config: dict[str, Any],
+    max_parallel: int,
+    run_started_at: float | None,
+    spec: FlatSpec | None = None,
+    spec_path: Path | None = None,
+) -> dict[str, Any]:
+    spec_payload = _spec_payload(spec=spec, spec_path=spec_path)
+    graph = read_graph(project_dir)
+    pending = read_pending(project_dir)
+    tasks = graph.get("tasks") if isinstance(graph.get("tasks"), dict) else {}
+    terminal = {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}
+    done = {
+        tid for tid, task in tasks.items()
+        if isinstance(task, dict) and task.get("verdict") in terminal
+    }
+    runnable = [
+        entry for entry in pending
+        if entry.get("task_id")
+        and entry.get("task_id") not in done
+        and entry.get("review_state") in ("approved", None)
+    ]
+    ready = [
+        entry for entry in runnable
+        if all(dep in done for dep in (entry.get("depends_on") or []))
+    ]
+    elapsed = int(time.monotonic() - run_started_at) if run_started_at else 0
+    budget = int(config.get("run_budget_seconds") or 3600)
+    provider = (
+        config.get("provider")
+        or (config.get("defaults", {}) or {}).get("provider")
+        or "claude"
+    )
+    return {
+        "max_parallel": max(1, int(max_parallel or 1)),
+        "run_budget_seconds": budget,
+        "run_elapsed_seconds": max(0, elapsed),
+        "cost_model_s": {
+            "worktree_setup_s": 60,
+            "prompt_render_s": 10,
+            "min_leaf_runtime_s": 300,
+        },
+        "queue_state": {
+            "active": 0,
+            "queued": len(runnable),
+            "ready": len(ready),
+            "waiting_on_deps": max(0, len(runnable) - len(ready)),
+            "free_slots": max(1, int(max_parallel or 1)),
+        },
+        "spec_profile": _spec_profile(spec_payload),
+        "runtime_policy": {
+            "tier": str(config.get("v5_tier") or "auto"),
+            "review_first_decomp": bool(config.get("v5_review_first_decomp")),
+            "context_slicing": _context_slicing_enabled(config),
+            "provider": str(provider),
+        },
+    }
+
+
+def _spec_payload(*, spec: FlatSpec | None, spec_path: Path | None) -> dict[str, Any]:
+    if spec is not None:
+        return {
+            "project_kind": spec.project_kind,
+            "intent_claims": spec.intent_claims,
+            "core_entities": spec.core_entities,
+            "behavior_journeys": spec.behavior_journeys,
+        }
+    if spec_path and spec_path.exists():
+        try:
+            payload = json.loads(spec_path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+    return {}
+
+
+def _spec_profile(spec: dict[str, Any]) -> dict[str, Any]:
+    entities = spec.get("core_entities") if isinstance(spec.get("core_entities"), list) else []
+    journeys = spec.get("behavior_journeys") if isinstance(spec.get("behavior_journeys"), list) else []
+    actions = 0
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        raw_actions = entity.get("primary_actions") or entity.get("actions") or []
+        if isinstance(raw_actions, list):
+            actions += len(raw_actions)
+    entry_routes = sorted({
+        str(journey.get("entry_route"))
+        for journey in journeys
+        if isinstance(journey, dict) and journey.get("entry_route")
+    })
+    return {
+        "project_kind": str(spec.get("project_kind") or "unknown"),
+        "intent_claims": len(spec.get("intent_claims") or []),
+        "core_entities": len(entities),
+        "primary_actions": actions,
+        "behavior_journeys": len(journeys),
+        "entry_routes": entry_routes,
+    }
 
 
 def _context_slicing_enabled(config: dict[str, Any]) -> bool:

@@ -13,6 +13,10 @@ Input:
 - BEHAVIOR JOURNEYS: {journeys_path}
 - INTEGRATION BRANCH: {integration_branch}
 - SESSION_DIR: {session_dir}
+- DECOMP_RUNTIME_CONTEXT:
+```json
+{decomp_runtime_context}
+```
 - SCOPED CONTEXT:
 ```
 {context_slice_note}
@@ -32,17 +36,25 @@ other sibling-facing contract, append one concise entry and list it in
 
 ## Decide
 
-Prefer inline work for a focused feature, a brownfield change, or a moderate
-scope that fits in context. Call `mcp__otto__begin_inline`, then build.
+Use `DECOMP_RUNTIME_CONTEXT` to reason about wall-clock critical path, not child
+count. Prefer inline work for a focused feature, a brownfield change, or a
+moderate scope that fits in context. Call `mcp__otto__begin_inline`, then build.
 
 Decompose only when the goal has genuinely independent subsystems or is too
 large to fit in one agent context. For a moderate web app, the usual shape is:
 one concise architect/scaffold task plus 3-5 build leaves. Do not create a
 separate integration child; Otto runs integration automatically after children.
 
+FE waiting on BE is fake parallelism: it lengthens the critical path while
+paying setup cost twice. Prefer vertical capability leaves that can start,
+build, and verify end-to-end without waiting on sibling code. If a dependency
+is truly needed, consider a small scaffold/contracts task first; otherwise keep
+the capability inline.
+
 Avoid recursive decomposition. If a child scope seems large, prefer a bigger
-coherent leaf over many tiny leaves unless the work truly cannot fit. Every
-extra session pays setup, prompt, worktree, and test overhead.
+coherent vertical leaf over many tiny horizontal layer leaves unless the work
+truly cannot fit. Every extra session pays setup, prompt, worktree, and test
+overhead.
 
 When you decompose:
 - Emit semantic user-visible goals with `mcp__otto__submit_subtask`.
@@ -107,6 +119,8 @@ If you built inline, write `<session_dir>/verdict.json` as a real file:
 `pass` means all applicable journeys passed and the scoped intent is
 substantially built. Use `partial` for failed journeys or meaningful gaps.
 Use `unverified` only when tests could not run.
+Do not write a bare status object such as `{"status":"success"}`; Otto's
+canonical contract is the `verdict` object above.
 
 ## Tools
 

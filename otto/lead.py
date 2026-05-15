@@ -78,6 +78,8 @@ async def run_lead(
     child_summaries: list[dict[str, Any]] | None = None,
     preflight_result: dict[str, Any] | None = None,
     context_slice_note: str = "",
+    decomp_runtime_context: dict[str, Any] | None = None,
+    integration_packet_path: str = "",
 ) -> LeadResult:
     """Run one Lead session for one task. The single v5 build primitive.
 
@@ -161,6 +163,8 @@ async def run_lead(
             preflight_result=preflight_result,
             tier=tier,
             context_slice_note=context_slice_note,
+            decomp_runtime_context=decomp_runtime_context or {},
+            integration_packet_path=integration_packet_path,
         )
 
         # Save the rendered prompt for observability.
@@ -241,18 +245,11 @@ async def run_lead(
             # Integration agent ended without writing verdict.json.
             # Don't force pending_children (would loop). Mark unverified.
             result.verdict = "unverified"
-            failure_reason = (
-                "Integration agent did not write verdict.json; "
-                "marking unverified."
-            )
+            failure_reason = _verdict_failure_reason(session_dir, integration=True)
         else:
             # Leaf agent ended without writing verdict.json.
             result.verdict = "unverified"
-            failure_reason = (
-                "Agent did not write verdict.json; cannot certify pass. "
-                "Agents must write their verdict to <session_dir>/verdict.json "
-                "after running tests."
-            )
+            failure_reason = _verdict_failure_reason(session_dir, integration=False)
 
         if (
             result.verify_called
@@ -380,6 +377,8 @@ def _render_prompt(
     preflight_result: dict[str, Any] | None = None,
     tier: str = "auto",
     context_slice_note: str = "",
+    decomp_runtime_context: dict[str, Any] | None = None,
+    integration_packet_path: str = "",
 ) -> str:
     """Render the Lead's prompt by interpolating into the template."""
     template_name = "lead.md" if kind == "plan_or_inline" else "lead-integration.md"
@@ -396,6 +395,12 @@ def _render_prompt(
         tier_hint = "\n## Tier preset: modular\n\nThis intent involves multiple subsystems. Consider decomposition, usually architect plus 3-5 build leaves for a moderate app.\n"
 
     if kind == "plan_or_inline":
+        runtime_context_text = json.dumps(
+            decomp_runtime_context or {},
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
         return _interpolate_prompt(template, {
             "task_id": task_id,
             "intent": intent,
@@ -403,6 +408,7 @@ def _render_prompt(
             "journeys_path": str(journeys_path),
             "integration_branch": str(integration_branch or "main"),
             "session_dir": str(session_dir),
+            "decomp_runtime_context": runtime_context_text,
             "context_slice_note": (
                 context_slice_note
                 or "No scoped context slice for this Lead; use repo-root CHARTER.md and decisions.md."
@@ -450,6 +456,7 @@ def _render_prompt(
             "preflight_result": preflight_text,
             "journeys_path": str(journeys_path),
             "session_dir": str(session_dir),
+            "integration_packet_path": integration_packet_path,
         })
 
 
@@ -629,36 +636,57 @@ def _rewrite_canonical_verdict(path: Path, payload: dict[str, Any]) -> None:
 def _canonicalize_verdict_payload(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
-    verdict = str(payload.get("verdict") or "").strip().lower()
+    verdict = _verdict_token_to_canonical(payload.get("verdict"))
     if verdict in _CANONICAL_VERDICTS:
         canonical = dict(payload)
         canonical["verdict"] = verdict
         return canonical
 
-    status = str(payload.get("status") or payload.get("result") or "").strip().lower()
-    if status in {"success", "succeeded", "pass", "passed", "ok", "done"} and _tests_indicate_pass(payload):
-        canonical = dict(payload)
-        canonical["verdict"] = "pass"
-        canonical.setdefault("summary", _summary_from_noncanonical(payload))
-        canonical.setdefault("journeys", [])
-        canonical.setdefault("evidence", list(payload.get("deliverables") or []))
-        canonical["canonicalized_from"] = {
-            "status": payload.get("status"),
-            "keys": sorted(str(key) for key in payload.keys()),
-        }
-        return canonical
-    if status in {"partial", "warning", "warn"}:
-        canonical = dict(payload)
-        canonical["verdict"] = "partial"
-        canonical.setdefault("summary", _summary_from_noncanonical(payload))
-        canonical.setdefault("journeys", [])
-        canonical.setdefault("evidence", list(payload.get("deliverables") or []))
-        canonical["canonicalized_from"] = {
-            "status": payload.get("status"),
-            "keys": sorted(str(key) for key in payload.keys()),
-        }
-        return canonical
+    for key in ("status", "result", "outcome", "terminal_outcome", "state"):
+        verdict = _verdict_token_to_canonical(payload.get(key))
+        if verdict is not None:
+            if verdict == "pass" and _tests_explicitly_fail(payload):
+                verdict = "partial"
+            return _noncanonical_verdict(payload, verdict, source={key: payload.get(key)})
+
+    for key in ("passed", "success", "ok"):
+        if isinstance(payload.get(key), bool):
+            verdict = "pass" if payload.get(key) else "partial"
+            return _noncanonical_verdict(payload, verdict, source={key: payload.get(key)})
     return None
+
+
+def _verdict_token_to_canonical(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return "pass" if value else "partial"
+    token = str(value or "").strip().lower().replace("-", "_")
+    if token in {"pass", "passed", "success", "succeeded", "ok", "done"}:
+        return "pass"
+    if token in {"partial", "warning", "warn", "fail", "failed", "failure", "error", "errored"}:
+        return "partial"
+    if token in {"unverified", "unknown", "unclear", "skipped"}:
+        return "unverified"
+    if token in {"merge_blocked", "blocked"}:
+        return "merge_blocked"
+    return None
+
+
+def _noncanonical_verdict(
+    payload: dict[str, Any],
+    verdict: str,
+    *,
+    source: dict[str, Any],
+) -> dict[str, Any]:
+    canonical = dict(payload)
+    canonical["verdict"] = verdict
+    canonical.setdefault("summary", _summary_from_noncanonical(payload))
+    canonical.setdefault("journeys", [])
+    canonical.setdefault("evidence", list(payload.get("deliverables") or []))
+    canonical["canonicalized_from"] = {
+        **source,
+        "keys": sorted(str(key) for key in payload.keys()),
+    }
+    return canonical
 
 
 def _summary_from_noncanonical(payload: dict[str, Any]) -> str:
@@ -666,38 +694,65 @@ def _summary_from_noncanonical(payload: dict[str, Any]) -> str:
     return summary or "Non-canonical verdict was mapped to canonical Otto schema."
 
 
-def _tests_indicate_pass(payload: dict[str, Any]) -> bool:
-    tests = payload.get("tests")
-    if tests in (None, "", [], {}):
-        return bool(payload.get("deliverables") or payload.get("evidence"))
-    return _value_indicates_pass(tests)
+def _tests_explicitly_fail(payload: dict[str, Any]) -> bool:
+    tests = payload.get("tests", payload.get("checks"))
+    return _value_indicates_failure(tests)
 
 
-def _value_indicates_pass(value: Any) -> bool:
+def _value_indicates_failure(value: Any) -> bool:
     if isinstance(value, bool):
-        return value
+        return not value
     if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"pass", "passed", "success", "succeeded", "ok"}:
-            return True
-        if lowered in {"fail", "failed", "failure", "error", "errored", "timeout"}:
-            return False
-        return False
+        return value.strip().lower() in {
+            "fail", "failed", "failure", "error", "errored", "timeout"
+        }
     if isinstance(value, (int, float)):
-        return value == 0
+        return value != 0
     if isinstance(value, list):
-        return bool(value) and all(_value_indicates_pass(item) for item in value)
+        return any(_value_indicates_failure(item) for item in value)
     if isinstance(value, dict):
-        if "passed" in value:
-            return _value_indicates_pass(value.get("passed"))
-        if "status" in value:
-            return _value_indicates_pass(value.get("status"))
-        if "exit_code" in value:
-            return _value_indicates_pass(value.get("exit_code"))
-        if "returncode" in value:
-            return _value_indicates_pass(value.get("returncode"))
-        return bool(value) and all(_value_indicates_pass(item) for item in value.values())
+        for key in ("failed", "failures", "errors"):
+            raw = value.get(key)
+            if isinstance(raw, bool) and raw:
+                return True
+            if isinstance(raw, (int, float)) and raw > 0:
+                return True
+        if "passed" in value and _value_indicates_failure(value.get("passed")):
+            return True
+        if "status" in value and _value_indicates_failure(value.get("status")):
+            return True
+        if "exit_code" in value and _value_indicates_failure(value.get("exit_code")):
+            return True
+        if "returncode" in value and _value_indicates_failure(value.get("returncode")):
+            return True
+        return any(
+            _value_indicates_failure(item)
+            for item in value.values()
+            if isinstance(item, (dict, list, bool, str))
+        )
     return False
+
+
+def _verdict_failure_reason(session_dir: Path, *, integration: bool) -> str:
+    context = _malformed_verdict_context(session_dir)
+    if context is not None:
+        original = str(context.get("original_text") or "")
+        excerpt = original[:800] + ("..." if len(original) > 800 else "")
+        return (
+            "Agent wrote verdict.json, but Otto could not parse it as the "
+            "canonical verdict schema. "
+            f"path={context.get('path')}; error={context.get('error')}. "
+            "Expected keys include verdict, summary, journeys, intent_coverage, "
+            "evidence, and test_command. Excerpt:\n"
+            f"{excerpt}"
+        )
+    if integration:
+        return "Integration agent did not write verdict.json; marking unverified."
+    return (
+        "Agent did not write verdict.json; cannot certify pass. "
+        "Agents must write their verdict to <session_dir>/verdict.json "
+        "after running tests."
+    )
 
 
 def _malformed_verdict_context(session_dir: Path) -> dict[str, Any] | None:
@@ -797,9 +852,7 @@ def _rescue_verdict_from_messages(session_dir: Path) -> dict[str, Any] | None:
                 continue
             if msg.get("type") == "result" and msg.get("subtype") == "success":
                 structured_output = msg.get("structured_output")
-                if isinstance(structured_output, dict) and structured_output.get("verdict") in (
-                    "pass", "partial", "unverified", "merge_blocked",
-                ):
+                if _canonicalize_verdict_payload(structured_output) is not None:
                     return structured_output
                 result_text = msg.get("result")
                 if isinstance(result_text, str):
@@ -820,7 +873,7 @@ def _rescue_verdict_from_messages(session_dir: Path) -> dict[str, Any] | None:
 
 
 def _extract_verdict_json(text: str) -> dict[str, Any] | None:
-    """Find the first JSON object containing a `verdict` field in ``text``.
+    """Find the first JSON object containing a recognizable verdict in ``text``.
 
     Looks for fenced ```json blocks first, then for any balanced-brace JSON
     object. Returns the parsed dict if it has the verdict schema we expect.
@@ -831,9 +884,7 @@ def _extract_verdict_json(text: str) -> dict[str, Any] | None:
     for m in re.finditer(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL):
         try:
             obj = json.loads(m.group(1))
-            if isinstance(obj, dict) and obj.get("verdict") in (
-                "pass", "partial", "unverified", "merge_blocked",
-            ):
+            if _canonicalize_verdict_payload(obj) is not None:
                 return obj
         except json.JSONDecodeError:
             continue
@@ -865,66 +916,12 @@ def _extract_verdict_json(text: str) -> dict[str, Any] | None:
                 candidate = text[start:i+1]
                 try:
                     obj = json.loads(candidate)
-                    if isinstance(obj, dict) and obj.get("verdict") in (
-                        "pass", "partial", "unverified", "merge_blocked",
-                    ):
+                    if _canonicalize_verdict_payload(obj) is not None:
                         return obj
                 except json.JSONDecodeError:
                     pass
                 start = -1
     return None
-
-
-def _detect_verify(log_dir: Path) -> tuple[bool, dict[str, Any] | None]:
-    """Determine if mcp__otto__verify ran and capture its result.
-
-    Two sources, in order of authority:
-      1. ``<session_dir>/verify/verify-result.json`` — written by the verify
-         tool itself when it runs. AUTHORITATIVE.
-      2. SDK message stream (messages.jsonl etc.) — fallback for cases where
-         the verify tool short-circuited before writing.
-    """
-    # Source 1: verify-result.json (the verify tool writes this on success).
-    # log_dir is .../session_dir/lead; verify writes to .../session_dir/verify/.
-    session_dir = log_dir.parent
-    verify_result_path = session_dir / "verify" / "verify-result.json"
-    if verify_result_path.exists():
-        try:
-            payload = json.loads(verify_result_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict) and payload.get("verdict"):
-                return True, payload
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    # Source 2: walk messages.jsonl for the tool_use marker. Stream parsing
-    # for the tool_result block is less reliable than reading verify-result.json
-    # directly, so we use this only to confirm the tool was attempted.
-    candidates = [log_dir / "messages.jsonl"]
-    for cand in (log_dir / "stream.jsonl", log_dir / "narrative.jsonl"):
-        candidates.append(cand)
-    seen_call = False
-    for path in candidates:
-        if not path.exists():
-            continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            blocks = msg.get("blocks") or []
-            for block in blocks:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "tool_use":
-                    name = (block.get("name") or "").lower()
-                    if "verify" in name and "otto" in name:
-                        seen_call = True
-        if seen_call:
-            break
-    return seen_call, None
 
 
 def _write_summary(session_dir: Path, result: LeadResult) -> None:

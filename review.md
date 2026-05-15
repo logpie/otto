@@ -553,3 +553,29 @@ Verification:
 - Requested focused suite: 412 passed, 2229 deselected.
 - Ruff on touched files: passed.
 - Py compile on touched Python files: passed.
+
+---
+
+## Implementation Gate — 2026-05-14 — v6.6 consolidation
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, diff review, ruff, and
+the requested smoke matrix were used instead.
+
+Findings during implementation review:
+- [IMPORTANT] Initial artifact edit overwrote the existing tracked
+  `research.md`; restored it from HEAD and moved this pass's notes to
+  `research-v6.6-consolidation.md`.
+- [IMPORTANT] Separate smoke-preflight repair consumed the failure before the
+  integration prompt could see it; changed integration smoke preflight to
+  observe/inject and left repair-loop dispatch for branch hygiene.
+- [NOTE] Git commits could not be created because the sandbox cannot write the
+  parent git admin dir for this worktree.
+
+Verification:
+- Six post-change runs of `uv run --extra dev pytest tests/smoke/ -q` passed.
+- Six post-change runs of
+  `uv run --extra dev pytest tests/ -q -k "v5" --ignore=tests/integration`
+  passed.
+- Final matrix: smoke 14 passed; v5 suite 302 passed, 2353 deselected.
+- Ruff on touched files passed.

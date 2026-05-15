@@ -88,26 +88,25 @@ class PreflightRepairController:
         *,
         session_dir: Path,
         worktree_path: Path,
-        original_budget_usd: float,
+        original_budget_usd: float | None = None,
         agent_repair: AgentRepairCallable | None = None,
         port_cleanup: AutoRepairCallable | None = None,
         filename_repair: AutoRepairCallable | None = None,
+        chmod_repair: AutoRepairCallable | None = None,
         max_attempts_per_kind: int = 2,
         max_total_attempts: int = 3,
-        cost_cap_ratio: float = 0.10,
     ) -> None:
         self.session_dir = Path(session_dir)
         self.worktree_path = Path(worktree_path)
-        self.original_budget_usd = max(0.0, float(original_budget_usd or 0.0))
+        del original_budget_usd  # Back-compat only; this loop is attempt-capped.
         self.agent_repair = agent_repair
         self.port_cleanup = port_cleanup or self._cleanup_ports
         self.filename_repair = filename_repair or self._repair_overlong_paths
+        self.chmod_repair = chmod_repair or self._repair_permissions
         self.max_attempts_per_kind = max_attempts_per_kind
         self.max_total_attempts = max_total_attempts
-        self.cost_cap_ratio = cost_cap_ratio
         self._attempts_by_kind: defaultdict[str, int] = defaultdict(int)
         self._total_attempts = 0
-        self._agent_spend_usd = 0.0
         self._seen_fingerprints: set[str] = set()
 
     @property
@@ -204,6 +203,8 @@ class PreflightRepairController:
                 detail = self.port_cleanup(self.worktree_path, issue)
             elif failure_kind == "filename_too_long":
                 detail = self.filename_repair(self.worktree_path, issue)
+            elif failure_kind == "permission_chmod":
+                detail = self.chmod_repair(self.worktree_path, issue)
             else:
                 return self._escalate(
                     issue,
@@ -253,14 +254,6 @@ class PreflightRepairController:
                 reason="missing_agent_repair_callback",
                 fingerprint=fingerprint,
             )
-        if self._agent_spend_usd >= self._agent_cost_cap_usd():
-            return self._escalate(
-                issue,
-                failure_kind=failure_kind,
-                action="agent",
-                reason="agent_cost_cap",
-                fingerprint=fingerprint,
-            )
 
         request = AgentRepairRequest(
             failure_kind=failure_kind,
@@ -273,15 +266,6 @@ class PreflightRepairController:
         )
         raw_result = self.agent_repair(request)
         result = await raw_result if inspect.isawaitable(raw_result) else raw_result
-        self._agent_spend_usd += float(result.cost_usd or 0.0)
-        if self._agent_spend_usd > self._agent_cost_cap_usd():
-            return self._escalate(
-                issue,
-                failure_kind=failure_kind,
-                action="agent",
-                reason="agent_cost_cap",
-                fingerprint=fingerprint,
-            )
 
         outcome = "repaired" if result.ok else "agent_failed"
         self._append_log(
@@ -343,11 +327,6 @@ class PreflightRepairController:
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
-    def _agent_cost_cap_usd(self) -> float:
-        if self.original_budget_usd <= 0:
-            return 0.0
-        return self.original_budget_usd * self.cost_cap_ratio
-
     def _cleanup_ports(self, worktree_path: Path, _issue: dict[str, Any]) -> dict[str, Any]:
         from otto.v5_clean_verify import _parse_declared_ports
 
@@ -385,6 +364,21 @@ class PreflightRepairController:
             renamed.append({"from": str(path), "to": str(target)})
         return {"renamed": renamed}
 
+    def _repair_permissions(self, worktree_path: Path, issue: dict[str, Any]) -> dict[str, Any]:
+        message = str(issue.get("message") or "")
+        raw_paths = list(issue.get("paths") or []) + _extract_likely_paths(message)
+        changed: list[str] = []
+        for raw_path in raw_paths:
+            rel = str(raw_path).strip()
+            if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+                continue
+            path = worktree_path / rel
+            if path.suffix != ".sh" or not path.is_file():
+                continue
+            path.chmod(path.stat().st_mode | 0o111)
+            changed.append(rel)
+        return {"chmod_x": sorted(set(changed))}
+
 
 def _first_blocking_issue(payload: dict[str, Any]) -> dict[str, Any] | None:
     for issue in payload.get("issues") or []:
@@ -415,10 +409,22 @@ def classify_preflight_issue(issue: dict[str, Any]) -> dict[str, Any]:
         or "errno 63" in lowered
     ):
         return {"failure_kind": "filename_too_long", "action": "auto_fix"}
+    likely_paths = tuple(
+        dict.fromkeys([str(path) for path in (issue.get("paths") or [])] + _extract_likely_paths(message))
+    )
+    if (
+        ("not executable" in lowered or "permission denied" in lowered)
+        and any(str(path).endswith(".sh") for path in likely_paths)
+    ):
+        return {
+            "failure_kind": "permission_chmod",
+            "action": "auto_fix",
+            "workspace_paths": likely_paths,
+        }
     return {
         "failure_kind": kind or "preflight_failed",
         "action": "agent",
-        "workspace_paths": tuple(_extract_likely_paths(message)),
+        "workspace_paths": likely_paths,
         "instruction": (
             "Inspect the failure, git status, and nearby files. Make the "
             "smallest repair that lets the preflight pass without changing "

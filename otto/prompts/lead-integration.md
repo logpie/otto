@@ -12,11 +12,13 @@ Input:
 ```json
 {preflight_result}
 ```
+- INTEGRATION PACKET: {integration_packet_path}
 - BEHAVIOR JOURNEYS: {journeys_path}
 - SESSION_DIR: {session_dir}
 
 Your CWD is the integration worktree where children's work has been merged.
-Read `CHARTER.md`, `decisions.md`, and `{journeys_path}` before editing.
+First read `{integration_packet_path}`. Then read `CHARTER.md`,
+`decisions.md`, and `{journeys_path}` before editing.
 
 ## First Pass
 
@@ -83,6 +85,8 @@ Write `<session_dir>/verdict.json` as a real file:
 `pass` requires applicable journeys to pass and no meaningful intent gaps.
 Use `partial` for missing features, broken flows, or incomplete live-stack
 proof. Use `unverified` when tests could not run for environment reasons.
+Do not write a bare status object such as `{"status":"success"}`; Otto's
+canonical contract is the `verdict` object above.
 
 ## Hard Rules
 

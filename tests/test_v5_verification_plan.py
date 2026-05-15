@@ -560,10 +560,10 @@ def test_decisions_appended_legacy_missing_field_is_accepted(tmp_path: Path) -> 
     )
 
     assert outcome.final_verdict == "pass"
-    assert _checks_by_kind(outcome.verification_plan)["decisions_broadcast"][0]["status"] == "pass"
+    assert "decisions_broadcast" not in _checks_by_kind(outcome.verification_plan)
 
 
-def test_shared_schema_change_without_decision_downgrades(tmp_path: Path) -> None:
+def test_shared_schema_change_without_decision_no_longer_downgrades(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
     _write(tmp_path / "shared" / "types.ts", "export type Issue = { id: string };\n")
@@ -581,41 +581,8 @@ def test_shared_schema_change_without_decision_downgrades(tmp_path: Path) -> Non
         initial_verdict="pass",
     )
 
-    check = _checks_by_kind(outcome.verification_plan)["decisions_broadcast"][0]
-    assert check["status"] == "fail"
-    assert check["refs"]["touched_paths"] == ["shared/types.ts"]
-    assert outcome.final_verdict == "partial"
-
-
-def test_shared_schema_change_with_matching_decision_passes(tmp_path: Path) -> None:
-    session = tmp_path / "session"
-    _passing_project(tmp_path, session)
-    _write(tmp_path / "shared" / "types.ts", "export type Issue = { id: string };\n")
-    _write(
-        tmp_path / "decisions.md",
-        "# Decisions\n\n- [2026-05-14 10:00] dec-issue-shape api child: Issue includes status. RATIONALE: UI filters need it.\n",
-    )
-    _init_git_repo(tmp_path)
-    _write(
-        tmp_path / "shared" / "types.ts",
-        "export type Issue = { id: string; status: string };\n",
-    )
-    verdict = _verdict(decisions_appended=[
-        {"decision_id": "dec-issue-shape", "summary": "Issue includes status."}
-    ])
-    roundtripped = json.loads(json.dumps(verdict))
-
-    outcome = validate_lead_verdict(
-        project_dir=tmp_path,
-        worktree_dir=tmp_path,
-        session_dir=session,
-        agent_verdict=roundtripped,
-        initial_verdict="pass",
-    )
-
-    check = _checks_by_kind(outcome.verification_plan)["decisions_broadcast"][0]
-    assert check["status"] == "pass"
     assert outcome.final_verdict == "pass"
+    assert "decisions_broadcast" not in _checks_by_kind(outcome.verification_plan)
 
 
 def test_missing_passed_journey_downgrades_pass(tmp_path: Path) -> None:

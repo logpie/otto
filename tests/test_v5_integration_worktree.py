@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,7 @@ def test_integration_prompt_renders_smoke_preflight_payload(tmp_path: Path) -> N
         session_dir=tmp_path / "session",
         integration_branch="i2p/integ/v5-integrate",
         child_summaries=[],
+        integration_packet_path="/tmp/session/integration_packet.json",
         preflight_result={
             "check": "smoke_clean_deploy",
             "cwd": "/tmp/merged-worktree",
@@ -78,6 +80,31 @@ def test_integration_prompt_renders_smoke_preflight_payload(tmp_path: Path) -> N
     assert "/tmp/merged-worktree" in rendered
     assert "clean_deploy_start_failed" in rendered
     assert "start.sh failed" in rendered
+    assert "First read `/tmp/session/integration_packet.json`" in rendered
+
+
+def test_lead_prompt_renders_decomp_runtime_context(tmp_path: Path) -> None:
+    rendered = _render_prompt(
+        kind="plan_or_inline",
+        task_id="root",
+        intent="build tracker",
+        session_dir=tmp_path / "session",
+        integration_branch=None,
+        child_summaries=[],
+        decomp_runtime_context={
+            "max_parallel": 3,
+            "run_budget_seconds": 3600,
+            "cost_model_s": {"worktree_setup_s": 60},
+            "queue_state": {"ready": 0, "free_slots": 3},
+            "spec_profile": {"core_entities": 4},
+        },
+    )
+
+    assert "DECOMP_RUNTIME_CONTEXT" in rendered
+    assert '"max_parallel": 3' in rendered
+    assert "FE waiting on BE is fake parallelism" in rendered
+    assert "vertical capability leaves" in rendered
+    assert "budget_usd" not in rendered
 
 
 @pytest.mark.asyncio
@@ -428,6 +455,11 @@ async def test_integration_smoke_payload_uses_resolved_worktree_and_reruns(
     assert payload["passed"] is False
     assert payload["issues"][0]["kind"] == "clean_deploy_start_failed"
     assert "before repair" in payload["issues"][0]["message"]
+    packet_path = Path(lead_kwargs[0]["integration_packet_path"])
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert packet["parent_task_id"] == task_id
+    assert packet["integration_branch"] == own_integration
+    assert packet["preflight_results"]["pre_agent"]["issues"][0]["kind"] == "clean_deploy_start_failed"
 
     assert result.verify_result is not None
     assert result.verify_result["post_integration_preflight"]["passed"] is True

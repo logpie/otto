@@ -3,6 +3,149 @@
 Things deliberately not in v5, with rationale for deferral and pointers
 to where they connect.
 
+## v6.6 — Safety-check Should Be Repair Entry, NOT Hard Exception
+
+v6e crashed `catastrophic` despite successfully building the product.
+Root cause: TWO of today's fixes contradict each other.
+
+**The contradiction:**
+
+- Morning fix (`_checkout_v5_branch_clean` in `otto/v5_runner.py:227`)
+  raises `RuntimeError` if worktree is dirty before root integration
+  start. Was added during worktree-hygiene bundle to prevent dirty
+  state from accumulating across phases.
+- Afternoon fix (v6.5 simplification of repair classifier) defaults
+  fixable failures to coding-agent repair rather than escalation.
+
+**The conflict:**
+The hard exception fires at a pre-flight layer BEFORE the repair
+classifier sees it. So when v6e's FE work was complete-but-uncommitted
+(15+ modified files, no actual product bug), the safety check raised
+RuntimeError → catastrophic crash. The agent never got a chance to
+trivially fix it (`git commit -m "fe work" && retry`).
+
+**v6.6 work:**
+
+1. **Demote `_checkout_v5_branch_clean` from RuntimeError to
+   classified failure.** It should signal `worktree_dirty_at_phase`
+   to the repair loop, NOT throw.
+
+2. **Repair classifier handles `worktree_dirty_at_phase`** as
+   agent-fixable: spawn coding agent with the dirty file list +
+   diff stat + phase context. Agent decides: commit / stash /
+   revert (in tracked context).
+
+3. **Cap by attempts as usual.** Repeated dirty-state after 2 fixes
+   → escalate to merge_blocked.
+
+**Why this matters:** v6e PROVED that Otto can build the product
+(3000+ LOC real FE pages, real backend, all in 65 min). The only
+failure was the pipeline refusing to finalize what was already done.
+That's a runner-side ergonomics bug, not an agent capability bug.
+
+This is one of the clearest examples of "patches contradict each
+other" — exactly the pattern the Design Principle (Trust the agent,
+minimize classification, reject patches when an LLM can decide) was
+written to prevent. Even with the principle in place, we still
+shipped two fixes that fought each other.
+
+Lesson: when adding ANY new pre-flight check that raises, ask "if
+this fires, can an agent fix it?" If yes, classify and dispatch the
+agent rather than raising.
+
+## v6.6 — Decomp Reasoning via Operational Inputs (NOT Rules)
+
+Today's v6e showed the gap: agent decomp is decision-poor.
+Lead doesn't know `max_parallel`, cost model, queue state, project
+profile. Result: emits 3 children with a serial chain (FE→BE),
+wasting the parallelism we configured.
+
+The principle-aligned answer is NOT to add rules ("max 5 children").
+It's to give the lead **operational facts** and ask it to reason
+about critical path. Codex's design (audited self-critique against
+the principle):
+
+### New data passed into lead prompt (`decomp_runtime_context`)
+
+```python
+{
+    "max_parallel": int,            # from CLI / config
+    "run_budget_seconds": int,      # NOTE: time, NOT USD
+    "run_elapsed_seconds": int,
+    "cost_model_s": {
+        "worktree_setup_s": 60,
+        "prompt_render_s": 10,
+        "min_leaf_runtime_s": 300,
+    },
+    "queue_state": {
+        "active": int, "queued": int, "ready": int,
+        "waiting_on_deps": int, "free_slots": int,
+    },
+    "spec_profile": {
+        "project_kind": str, "intent_claims": int,
+        "core_entities": int, "primary_actions": int,
+        "behavior_journeys": int, "entry_routes": [str],
+    },
+    "runtime_policy": {
+        "tier": str, "review_first_decomp": bool,
+        "context_slicing": bool, "provider": str,
+    },
+    "recent_stats": {  # optional, from cross-sessions history
+        "leaf_duration_p50_s": int,
+        "leaf_duration_p80_s": int,
+        "integration_duration_p50_s": int,
+    },
+}
+```
+
+### Lead prompt addendum (~30 lines)
+
+> "Reason about wall-clock critical path, not child count. A child
+> only creates parallelism if it can start and verify without
+> waiting for another child's code. FE-then-BE is FAKE parallelism.
+> Prefer either (a) a small scaffold task that makes later leaves
+> independent, or (b) coherent VERTICAL leaves owning end-to-end
+> user capability.
+>
+> For each plausible shape, estimate: ready-at-start children vs
+> waiting, longest dependency chain, fixed overhead paid per child,
+> tree budget consumed, integration risk.
+>
+> Pick the fastest correct end-to-end plan under current runtime
+> facts. Valid to emit fewer, equal, or more children than
+> max_parallel when critical path justifies it. After emitting,
+> leave a concise rationale in the final message."
+
+### Why this is inputs, not rules
+
+- No "max N children" threshold
+- No "max depth 2" guard
+- No schema validator rejecting trees
+- No new classifier
+- Lead retains full judgment authority; just has the economics
+
+### What's NOT in this design (deliberately deferred)
+
+- Dynamic `max_parallel` auto-bumping (operator policy, not planning hint)
+- Decomp self-review by separate agent (single-Lead reasoning only)
+- Persistent stats collection if `recent_stats` unavailable (use defaults)
+
+### Estimated LOC
+
+~20 lines code (collect context, pass into prompt) + ~30 lines prompt.
+**Net positive only because we're adding new context**, not because
+we're adding new rules. Trade-off is acceptable.
+
+### Validation strategy
+
+After implementation, dogfood the SAME iTracker intent. Compare:
+- Tree shape (number of children + parallelism)
+- Wall clock
+- Whether lead's emitted rationale reflects critical-path reasoning
+
+If trees still serialize unnecessarily, iterate on the prompt's
+reasoning prompts (not on new rules).
+
 ## Design Principle (governs all entries below)
 
 **Trust the agent. Minimize classification. Reject patches when an LLM

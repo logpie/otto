@@ -9,7 +9,11 @@ from typing import Any
 
 import pytest
 
-from otto.lead import _read_agent_verdict, _read_agent_verdict_with_rewrite
+from otto.lead import (
+    _read_agent_verdict,
+    _read_agent_verdict_with_rewrite,
+    _verdict_failure_reason,
+)
 from otto.merge_queue import _merge_raw_log_dir
 from otto.safe_slug import safe_slug
 from otto.v5_preflight_repair import (
@@ -115,6 +119,37 @@ async def test_filename_too_long_autofix_fires_and_continues(tmp_path: Path) -> 
     assert result.terminal_state == "continued"
     assert len(calls) == 1
     assert _log_events(session_dir)[0]["failure_kind"] == "filename_too_long"
+
+
+@pytest.mark.asyncio
+async def test_non_executable_shell_script_autochmod_fires_and_continues(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    worktree = tmp_path / "repo"
+    session_dir.mkdir()
+    worktree.mkdir()
+    script = worktree / "start.sh"
+    script.write_text("#!/usr/bin/env bash\necho ok\n", encoding="utf-8")
+    script.chmod(0o644)
+    runs = 0
+
+    def run_preflight() -> dict[str, Any]:
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            return _blocking_payload("clean_deploy_script_valid_failed", "start.sh is not executable")
+        return _passing_payload()
+
+    controller = PreflightRepairController(
+        session_dir=session_dir,
+        worktree_path=worktree,
+        original_budget_usd=100.0,
+    )
+
+    result = await controller.repair_until_clean(run_preflight)
+
+    assert result.terminal_state == "continued"
+    assert script.stat().st_mode & 0o111
+    assert _log_events(session_dir)[0]["failure_kind"] == "permission_chmod"
 
 
 @pytest.mark.asyncio
@@ -254,6 +289,39 @@ def test_noncanonical_success_verdict_maps_to_pass(tmp_path: Path) -> None:
     assert payload["summary"] == "tests passed"
     assert payload["canonicalized_from"]["status"] == "success"
     assert json.loads((session_dir / "verdict.json").read_text(encoding="utf-8"))["verdict"] == "pass"
+
+
+def test_verdict_parser_maps_aliases_and_reports_bad_existing_file(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / "verdict.json").write_text(
+        json.dumps({"status": "success"}),
+        encoding="utf-8",
+    )
+
+    called, payload = _read_agent_verdict(session_dir)
+
+    assert called is True
+    assert payload is not None
+    assert payload["verdict"] == "pass"
+
+    (session_dir / "verdict.json").write_text(
+        json.dumps({"verdict": "passed", "summary": "provider alias"}),
+        encoding="utf-8",
+    )
+
+    called, payload = _read_agent_verdict(session_dir)
+
+    assert called is True
+    assert payload is not None
+    assert payload["verdict"] == "pass"
+
+    (session_dir / "verdict.json").write_text("{ not json", encoding="utf-8")
+    reason = _verdict_failure_reason(session_dir, integration=False)
+
+    assert "Agent wrote verdict.json" in reason
+    assert "json_decode_error" in reason
+    assert "Agent did not write verdict.json" not in reason
 
 
 @pytest.mark.asyncio
