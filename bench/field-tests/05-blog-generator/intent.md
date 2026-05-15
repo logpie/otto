@@ -2,6 +2,11 @@
 
 Build a Python static blog generator.
 
+This is a recursive-decomposition field-test scenario. Use an architecture
+contract first, then split the generator pipeline into nested ownership where
+that keeps parser/frontmatter, template rendering, listing/feed/search outputs,
+and acceptance coverage from stepping on each other.
+
 Required behavior:
 
 - Source posts live under `content/` as Markdown files with YAML frontmatter:
@@ -14,6 +19,8 @@ Required behavior:
   - `output/rss.xml`.
   - `output/search.json` with title, slug, summary, tags, and date.
 - Use one shared base template for generated pages.
+- Keep shared contracts explicit: frontmatter schema, slug rules, generated
+  file layout, template context fields, and rebuild/idempotency behavior.
 - Seed three example posts so the generated output can be inspected immediately.
 - Include `start.sh` at the repo root. It must build the site if needed and
   serve `output/` on `$PORT`.

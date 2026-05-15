@@ -456,6 +456,49 @@ def _commit_integration_agent_changes(
         result.verdict = "merge_blocked"
 
 
+def _commit_root_inline_changes(
+    *,
+    project_dir: Path,
+    root_branch: str,
+    result: LeadResult,
+    on_event: Any = None,
+) -> None:
+    """Runner-owned commit for root inline builds."""
+    if result.decomposition != "inline" or result.verdict == "catastrophic":
+        return
+
+    from otto.v5_branching import commit_worktree, git_current_branch
+
+    current_branch = git_current_branch(project_dir)
+    if current_branch != root_branch:
+        detail = (
+            f"root inline finished on {current_branch!r}, expected {root_branch!r}; "
+            "refusing runner commit"
+        )
+        _emit(on_event, {
+            "event": "inline_commit_failed",
+            "task_id": ROOT_TASK_ID,
+            "worktree": str(project_dir),
+            "detail": detail,
+        })
+        logger.warning(detail)
+        set_verdict(project_dir, ROOT_TASK_ID, "merge_blocked", cost_usd=result.cost_usd)
+        result.verdict = "merge_blocked"
+        return
+
+    ok, detail = commit_worktree(worktree_path=project_dir, message="v5 inline build")
+    _emit(on_event, {
+        "event": "inline_commit" if ok else "inline_commit_failed",
+        "task_id": ROOT_TASK_ID,
+        "worktree": str(project_dir),
+        "detail": detail,
+    })
+    if not ok:
+        logger.warning("root inline commit failed: %s", detail)
+        set_verdict(project_dir, ROOT_TASK_ID, "merge_blocked", cost_usd=result.cost_usd)
+        result.verdict = "merge_blocked"
+
+
 def _propagate_subtree_integration(
     *,
     project_dir: Path,
@@ -621,6 +664,12 @@ async def run_v5_pipeline(
             "decomposition": root_result.decomposition,
             "emitted": len(root_result.emitted_subtask_ids),
         })
+        _commit_root_inline_changes(
+            project_dir=project_dir,
+            root_branch=root_branch,
+            result=root_result,
+            on_event=on_event,
+        )
 
         # ---- Phase C.5: Optional review pause for root's emitted children ----
         if (

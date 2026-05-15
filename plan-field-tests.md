@@ -78,3 +78,46 @@ branch `cc-i2p-2`.
 Plan Gate status: APPROVED locally via `/codex-gate` checklist. External Codex
 MCP review is unavailable in this session; the available `codex-gate` skill is
 a local checklist and explicitly says not to invoke unavailable reviewer tools.
+
+## Forced Tier Refresh (2026-05-15)
+
+Objective: make the five field-test scenarios exercise distinct v5
+decomposition shapes, surface the selected tier in reports, and commit root
+inline builds on `main` after the root Lead finishes.
+
+Owned files:
+- `bench/field-tests/**/{expected_shape.md,success_criteria.md,intent.md}`
+- `scripts/run_field_tests.py`
+- `tests/test_run_field_tests.py`
+- `otto/lead.py`
+- `otto/v5_runner.py`
+- focused v5 runner/prompt regression tests
+- `research.md`, `plan-field-tests.md`, `review.md`
+
+Plan Gate checklist:
+1. Scenario tiers: set `01=solo`, `02=auto`, `03=lead`, `04=modular`,
+   `05=modular`; update each `expected_shape.md` with an explicit forced-tier
+   declaration. Verify: dry-run report command previews show the intended
+   `--tier` values.
+2. Intent shaping: keep `01`, `02`, and `03` focused; tighten `04` around
+   architecture plus vertical CRM leaves and `05` around recursive static-blog
+   pipeline leaves. Verify: dry-run report still discovers exactly five
+   scenarios.
+3. Rig reporting: validate tier metadata and include tier in `ScenarioResult`,
+   JSON output, matrix, and details. Verify: `tests/test_run_field_tests.py`
+   asserts parsed and rendered tier.
+4. Tier prompt semantics: make `lead` encourage flat architect/leaves and make
+   `modular` require architecture-first root decomposition. Verify: focused
+   prompt rendering tests inspect the tier text.
+5. Inline commit finalization: after a root inline Lead returns with a
+   non-catastrophic verdict, commit product changes on the root branch with
+   message `v5 inline build` using the managed gitignore commit helper.
+   Verify: a 0% LLM pipeline test writes a top-level file in root inline mode
+   and proves the file is reachable from `main` via a commit.
+6. Validation: run the requested smoke matrix and a dry-run; no live run.
+   Verify: `uv run --extra dev pytest tests/smoke/ -q` passes and
+   `uv run python scripts/run_field_tests.py --dry-run ...` exits 0.
+
+Plan Gate status: APPROVED locally via `/codex-gate` checklist. The external
+Codex MCP peer tool remains unavailable in this session, so no separate peer
+review was invoked.

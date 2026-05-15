@@ -5,7 +5,7 @@ Scenario metadata:
 - kind: cli
 - budget_seconds: 900
 - max_parallel: 2
-- tier: auto
+- tier: solo
 - boot_smoke: false
 
 The product is successful when:

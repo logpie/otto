@@ -5,6 +5,33 @@ implementation of `plan-parallel.md`.
 
 ---
 
+## Field-Test Forced Tiers — Implementation Gate (2026-05-15)
+
+Scope reviewed:
+- Scenario tier metadata and expected-shape declarations under
+  `bench/field-tests/`.
+- `scripts/run_field_tests.py` tier validation/reporting.
+- `otto/lead.py` tier prompt semantics.
+- `otto/v5_runner.py` root inline commit finalization.
+- Regression tests for field-test reporting, tier prompt text, and root inline
+  commit behavior.
+
+Local `codex-gate` checklist result: APPROVED. External Codex MCP gate remains
+unavailable in this session; no peer review tool was invoked.
+
+Diff review findings:
+- No blocking findings. Root inline uses `commit_worktree()` instead of the
+  stricter integration allowlist because greenfield inline products may create
+  legitimate top-level files such as `csv_to_json.py`.
+
+Validation:
+- `uv run --extra dev pytest tests/test_run_field_tests.py tests/test_v5_inline_commit.py tests/test_v5_integration_worktree.py -q` — 17 passed.
+- `uv run ruff check scripts/run_field_tests.py tests/test_run_field_tests.py tests/test_v5_inline_commit.py tests/test_v5_integration_worktree.py otto/lead.py otto/v5_runner.py` — passed.
+- `uv run --extra dev pytest tests/smoke/ -q` — 12 passed.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/run_field_tests.py --dry-run --report-path /tmp/otto-field-test-tier-dry-run.md` — passed and wrote tiered dry-run report.
+
+---
+
 ## v6 Dispatch 3 — Gate Availability (2026-05-14)
 
 The local `codex-gate` skill was present, but the `mcp__codex__codex` tool was

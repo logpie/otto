@@ -43,6 +43,7 @@ if not OTTO_BIN.exists():
 _META_RE = re.compile(r"^\s*[-*]\s*([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*?)\s*$")
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
+VALID_TIERS = {"auto", "solo", "lead", "modular"}
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class ScenarioResult:
     name: str
     status: str
     dry_run: bool
+    tier: str = ""
     project_dir: str = ""
     log_path: str = ""
     wall_seconds: float = 0.0
@@ -161,7 +163,10 @@ def load_scenario(path: Path) -> Scenario:
     kind = meta.get("kind", "web").strip().lower() or "web"
     budget_seconds = _positive_int(meta.get("budget_seconds"), default=1200)
     max_parallel = _positive_int(meta.get("max_parallel"), default=3)
-    tier = meta.get("tier", "auto").strip() or "auto"
+    tier = meta.get("tier", "auto").strip().lower() or "auto"
+    if tier not in VALID_TIERS:
+        allowed = ", ".join(sorted(VALID_TIERS))
+        raise ValueError(f"{path.name} has invalid tier {tier!r}; expected one of: {allowed}")
     boot_smoke = parse_bool(meta.get("boot_smoke", "true"), default=True)
     smoke_path = meta.get("smoke_path", "/").strip() or "/"
     if not smoke_path.startswith("/"):
@@ -352,6 +357,7 @@ def run_scenario(
         name=scenario.name,
         status=("dry_run" if dry_run else "running"),
         dry_run=dry_run,
+        tier=scenario.tier,
         port_start=ports.start,
         port_end=ports.end,
         notes=[f"command: {command_preview(scenario)}"],
@@ -718,9 +724,9 @@ def render_report(
     lines.append("## Matrix")
     lines.append("")
     lines.append(
-        "| Scenario | Expected | Shape | Nodes | Depth | Wall | Agent | Cost | Verdict | Boot | Bugs / notes |"
+        "| Scenario | Tier | Expected | Shape | Nodes | Depth | Wall | Agent | Cost | Verdict | Boot | Bugs / notes |"
     )
-    lines.append("|---|---|---|---:|---:|---:|---:|---:|---|---|---|")
+    lines.append("|---|---|---|---|---:|---:|---:|---:|---:|---|---|---|")
     for result in results:
         scenario = scenario_map[result.name]
         expected = _one_line(_drop_heading(scenario.expected_shape), limit=80)
@@ -729,7 +735,7 @@ def render_report(
         if result.boot.detail:
             boot = f"{boot}: {_one_line(result.boot.detail, limit=40)}"
         lines.append(
-            f"| `{result.name}` | {expected} | {result.shape} | "
+            f"| `{result.name}` | `{result.tier or scenario.tier}` | {expected} | {result.shape} | "
             f"{result.tree_nodes} | {result.tree_depth} | "
             f"{fmt_seconds(result.wall_seconds)} | {fmt_seconds(result.agent_seconds)} | "
             f"{fmt_cost(result.cost_usd, dry_run=result.dry_run)} | "
@@ -743,6 +749,7 @@ def render_report(
         lines.append(f"### {result.name}")
         lines.append("")
         lines.append(f"- status: `{result.status}`")
+        lines.append(f"- tier: `{result.tier or scenario_map[result.name].tier}`")
         lines.append(f"- project_dir: `{result.project_dir or '-'}`")
         lines.append(f"- otto_log: `{result.log_path or '-'}`")
         lines.append(f"- port_range: `{result.port_start}-{result.port_end}`")
@@ -821,18 +828,19 @@ def run_many(
                     boot_smoke_enabled=boot_smoke_enabled,
                     boot_timeout_s=boot_timeout_s,
                     dry_run=dry_run,
-                ): scenario.name
+                ): scenario
                 for scenario, allocation in indexed
             }
             for future in concurrent.futures.as_completed(future_map):
-                name = future_map[future]
+                scenario = future_map[future]
                 try:
-                    results[name] = future.result()
+                    results[scenario.name] = future.result()
                 except Exception as exc:  # noqa: BLE001 - keep matrix complete.
-                    results[name] = ScenarioResult(
-                        name=name,
+                    results[scenario.name] = ScenarioResult(
+                        name=scenario.name,
                         status="error",
                         dry_run=dry_run,
+                        tier=scenario.tier,
                         bugs=[f"driver error: {type(exc).__name__}: {exc}"],
                     )
     return [results[s.name] for s in scenarios]

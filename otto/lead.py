@@ -391,8 +391,36 @@ def _render_prompt(
     tier_hint = ""
     if tier == "solo":
         tier_hint = "\n## Tier preset: solo\n\nYou MUST call mcp__otto__begin_inline. Do NOT call mcp__otto__submit_subtask.\n"
+    elif tier == "lead":
+        tier_hint = (
+            "\n## Tier preset: lead\n\n"
+            "Use decomposition for multi-subsystem work. For a root task with "
+            "backend/frontend, CLI/core/tests, or other independent ownership "
+            "surfaces, call mcp__otto__submit_subtask for a shallow architect/"
+            "scaffold task plus parallel vertical build leaves. Keep the tree "
+            "flat unless the intent explicitly asks for recursive sub-decomposition.\n"
+        )
     elif tier == "modular":
-        tier_hint = "\n## Tier preset: modular\n\nThis intent involves multiple subsystems. Consider decomposition, usually architect plus 3-5 build leaves for a moderate app.\n"
+        if is_root:
+            tier_hint = (
+                "\n## Tier preset: modular\n\n"
+                "You MUST use architecture-first decomposition. Do not build "
+                "the whole product inline at the root. First submit one "
+                "architect/scaffold child that establishes shared contracts, "
+                "then submit 2-5 vertical build leaves. If the intent explicitly "
+                "asks for recursive decomposition, make one substantial child "
+                "own that nested subtree instead of flattening everything at "
+                "the root.\n"
+            )
+        else:
+            tier_hint = (
+                "\n## Tier preset: modular\n\n"
+                "Honor the architecture-first shape from the parent. Build "
+                "your scoped child inline unless this child scope is itself "
+                "multi-subsystem or explicitly asks for recursive "
+                "sub-decomposition; in that case emit a small nested subtree "
+                "with clear ownership boundaries.\n"
+            )
 
     if kind == "plan_or_inline":
         runtime_context_text = json.dumps(

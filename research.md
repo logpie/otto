@@ -1,5 +1,46 @@
 # Otto redesign — research
 
+## Field-test forced tier research (2026-05-15)
+
+Scope: update the v5 field-test rig so the next run exercises inline, flat
+decomposition, and recursive decomposition instead of letting every scenario
+default to auto/inline. No live Otto runs.
+
+Relevant current paths:
+
+- `scripts/run_field_tests.py` already parses `tier` from
+  `success_criteria.md` metadata and passes `--tier` in `otto_command()`, but
+  the scenario files all still set `tier: auto` and the result matrix does not
+  show the tier.
+- `bench/field-tests/*/expected_shape.md` describes the desired shape, but it
+  does not declare the forced tier. The generated project includes this text in
+  `FIELD_TEST.md`; the CLI `--tier` flag remains the actual enforcement path.
+- `otto/lead.py` currently gives special prompt text for `solo` and `modular`,
+  but not for `lead`. The `modular` text says to consider decomposition rather
+  than requiring the architecture-first shape advertised by the CLI help.
+- The root inline path in `otto/v5_runner.py` runs the root Lead and then
+  aggregates the verdict without a runner-owned commit. Child build branches
+  commit via `commit_worktree()`, and root integration commits via
+  `commit_integration_worktree()`.
+
+Decision:
+
+- Keep tier metadata in `success_criteria.md`; adding a new config file would
+  duplicate an existing parser path.
+- Use the proposed mapping: `01=solo`, `02=auto`, `03=lead`,
+  `04=modular`, `05=modular`. Tighten `04` for architect plus vertical leaves
+  and `05` for recursive output-pipeline decomposition.
+- Reuse `commit_worktree(..., message="v5 inline build")` for root inline
+  finalization. Root inline owns the full product, including top-level CLI
+  files such as `csv_to_json.py`, so the stricter integration allowlist would
+  reject legitimate greenfield output.
+
+Open constraints:
+
+- The external Codex MCP gate tool is not available in this session. I will
+  run the local `codex-gate` checklist and document plan/implementation gate
+  status in `plan-field-tests.md` / `review.md`.
+
 ## Pre-v6c test coverage audit (2026-05-14)
 
 Scope: raise confidence before another live v6 run by reading the focused

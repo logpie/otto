@@ -5,7 +5,7 @@ Scenario metadata:
 - kind: web
 - budget_seconds: 1200
 - max_parallel: 3
-- tier: auto
+- tier: modular
 - boot_smoke: true
 - smoke_path: /
 - smoke_port_var: PORT

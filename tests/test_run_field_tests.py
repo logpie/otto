@@ -56,7 +56,24 @@ def test_discover_scenarios_ignores_runs_dir(tmp_path: Path) -> None:
 
     assert [s.name for s in scenarios] == ["01-one"]
     assert scenarios[0].budget_seconds == 777
+    assert scenarios[0].tier == "auto"
     assert scenarios[0].smoke_path == "/health"
+
+
+def test_load_scenario_rejects_unknown_tier(tmp_path: Path) -> None:
+    path = _scenario_dir(tmp_path, "01-one")
+    success = path.joinpath("success_criteria.md")
+    success.write_text(
+        success.read_text(encoding="utf-8").replace("- tier: auto\n", "- tier: diagonal\n"),
+        encoding="utf-8",
+    )
+
+    try:
+        rig.load_scenario(path)
+    except ValueError as exc:
+        assert "invalid tier" in str(exc)
+    else:
+        raise AssertionError("invalid tier should fail scenario loading")
 
 
 def test_collect_metrics_from_task_graph_and_summaries(tmp_path: Path) -> None:
@@ -140,4 +157,5 @@ def test_render_report_includes_dry_run_matrix(tmp_path: Path) -> None:
     assert "No live Otto runs were executed" in report
     assert "`01-one`" in report
     assert "otto v5 run <intent>" in report
-    assert "| `01-one` | Inline for a tiny product." in report
+    assert "| Scenario | Tier | Expected |" in report
+    assert "| `01-one` | `auto` | Inline for a tiny product." in report

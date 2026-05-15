@@ -107,6 +107,55 @@ def test_lead_prompt_renders_decomp_runtime_context(tmp_path: Path) -> None:
     assert "budget_usd" not in rendered
 
 
+def test_lead_tier_prompt_encourages_flat_decomposition(tmp_path: Path) -> None:
+    rendered = _render_prompt(
+        kind="plan_or_inline",
+        task_id="root",
+        intent="build full stack todo",
+        session_dir=tmp_path / "session",
+        integration_branch=None,
+        child_summaries=[],
+        tier="lead",
+    )
+
+    assert "Tier preset: lead" in rendered
+    assert "shallow architect/scaffold task plus parallel vertical build leaves" in rendered
+    assert "Keep the tree flat" in rendered
+
+
+def test_modular_tier_prompt_requires_root_architecture_first(tmp_path: Path) -> None:
+    rendered = _render_prompt(
+        kind="plan_or_inline",
+        task_id="root",
+        intent="build mini crm",
+        session_dir=tmp_path / "session",
+        integration_branch=None,
+        child_summaries=[],
+        tier="modular",
+    )
+
+    assert "Tier preset: modular" in rendered
+    assert "You MUST use architecture-first decomposition" in rendered
+    assert "Do not build the whole product inline at the root" in rendered
+    assert "recursive decomposition" in rendered
+
+
+def test_modular_tier_prompt_allows_nested_child_when_explicit(tmp_path: Path) -> None:
+    rendered = _render_prompt(
+        kind="plan_or_inline",
+        task_id="v5-blog-pipeline",
+        intent="recursively decompose static blog outputs",
+        session_dir=tmp_path / "session",
+        integration_branch="i2p/integ/root",
+        child_summaries=[],
+        tier="modular",
+    )
+
+    assert "Honor the architecture-first shape from the parent" in rendered
+    assert "explicitly asks for recursive sub-decomposition" in rendered
+    assert "emit a small nested subtree" in rendered
+
+
 @pytest.mark.asyncio
 async def test_nested_integration_restores_project_dir_to_parent_branch(
     tmp_path: Path,

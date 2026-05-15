@@ -2,6 +2,10 @@
 
 Build a small CRM for tracking companies, contacts, and deals.
 
+This is an architecture-first field-test scenario. Start from a shared
+contract/scaffold before building vertical workflows so entity relationships,
+routes, storage shape, and port conventions do not drift across leaves.
+
 Required behavior:
 
 - Provide a web UI and a FastAPI backend.
@@ -20,6 +24,9 @@ Required behavior:
   `$PORT`; use `$API_PORT` or `$BACKEND_PORT` for any separate backend process.
 - Include `tests/run_acceptance.py` that verifies the API and one end-to-end
   seed workflow through the app shell or served HTML.
+- Keep a short `CHARTER.md` or equivalent architecture note with the shared
+  entity schema, API route conventions, storage choice, and vertical ownership
+  boundaries used by the implementation.
 
 Keep the scope deliberately tight. No auth, no teams, no email sending, and no
 third-party CRM integrations.

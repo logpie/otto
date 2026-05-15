@@ -58,6 +58,9 @@ The driver reads metadata from bullet lines in `success_criteria.md`:
 - smoke_port_var: PORT
 ```
 
+`tier` must be one of `auto`, `solo`, `lead`, or `modular`; the driver passes
+it through to `otto v5 run --tier`.
+
 `kind: cli` skips the boot-smoke test. Web/static scenarios should require a
 root `start.sh` that honors `$PORT` for the user-facing HTTP surface. Full-stack
 scenarios may also use `$API_PORT`, `$BACKEND_PORT`, `$FRONTEND_PORT`, and the
