@@ -535,6 +535,75 @@ def _propagate_subtree_integration(
     return ok, detail, source, target
 
 
+def _verify_child_branches_reached_parent(
+    *,
+    project_dir: Path,
+    parent_task_id: str,
+    on_event: Any = None,
+) -> None:
+    """Verify terminal child branch tips are reachable from their parent target."""
+    from otto.v5_branching import child_branch_name, integration_branch_name
+
+    target = "main" if parent_task_id == ROOT_TASK_ID else integration_branch_name(parent_task_id)
+    for child_id in children_of(project_dir, parent_task_id):
+        child = get_task(project_dir, child_id) or {}
+        verdict = str(child.get("verdict") or "")
+        if verdict not in {"pass", "partial", "unverified"}:
+            continue
+
+        branches = [child_branch_name(child_id)]
+        if child.get("child_task_ids") or child.get("decomposition") == "emit":
+            branches.append(integration_branch_name(child_id))
+
+        for branch in dict.fromkeys(branches):
+            ok, detail = _branch_is_ancestor(project_dir, branch, target)
+            _emit(on_event, {
+                "event": "child_branch_ancestry_ok" if ok else "child_branch_ancestry_failed",
+                "task_id": child_id,
+                "branch": branch,
+                "target": target,
+                "detail": detail,
+            })
+            if ok:
+                continue
+            logger.warning(
+                "child branch ancestry verification failed for %s: %s",
+                child_id,
+                detail,
+            )
+            set_verdict(project_dir, child_id, "merge_blocked")
+
+
+def _branch_is_ancestor(project_dir: Path, branch: str, target: str) -> tuple[bool, str]:
+    exists = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=str(project_dir),
+        capture_output=True,
+    )
+    if exists.returncode != 0:
+        return False, f"branch {branch!r} is missing"
+
+    target_exists = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target}"],
+        cwd=str(project_dir),
+        capture_output=True,
+    )
+    if target_exists.returncode != 0:
+        return False, f"target branch {target!r} is missing"
+
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", branch, target],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    if ancestor.returncode == 0:
+        return True, f"{branch} reaches {target}"
+    detail = (ancestor.stderr or ancestor.stdout or "").strip()
+    suffix = f": {detail}" if detail else ""
+    return False, f"{branch} is not an ancestor of {target}{suffix}"
+
+
 async def run_v5_pipeline(
     *,
     project_dir: Path,
@@ -742,10 +811,14 @@ async def run_v5_pipeline(
             if _preflight_repair_escalated(checkout_result) or _integration_smoke_blocks(checkout_result):
                 preflight_result = checkout_result
             else:
-                preflight_result = _run_integration_smoke_preflight(
+                preflight_result = await _run_integration_smoke_preflight_with_repair(
+                    project_dir=project_dir,
                     worktree_path=project_dir,
                     task_id=ROOT_TASK_ID,
                     phase="pre_agent",
+                    session_dir=integration_session_dir,
+                    config=config,
+                    integration_branch=None,
                     on_event=on_event,
                 )
             if _preflight_repair_escalated(preflight_result):
@@ -787,10 +860,14 @@ async def run_v5_pipeline(
             if _preflight_repair_escalated(preflight_result):
                 post_preflight_result = preflight_result
             else:
-                post_preflight_result = _run_integration_smoke_preflight(
+                post_preflight_result = await _run_integration_smoke_preflight_with_repair(
+                    project_dir=project_dir,
                     worktree_path=project_dir,
                     task_id=ROOT_TASK_ID,
                     phase="post_agent",
+                    session_dir=integration_session_dir,
+                    config=config,
+                    integration_branch=None,
                     on_event=on_event,
                 )
             if integration_result.verify_result is None:
@@ -1198,6 +1275,11 @@ async def _process_children(
 
         # If nothing in flight and nothing ready, we're done.
         if not in_flight and not ready:
+            _verify_child_branches_reached_parent(
+                project_dir=project_dir,
+                parent_task_id=parent_task_id,
+                on_event=on_event,
+            )
             break
         if not in_flight and ready and not spawned_any:
             await dispatch_lease.wait_for_change()
@@ -1707,6 +1789,57 @@ def _run_integration_smoke_preflight(
     return payload
 
 
+async def _run_integration_smoke_preflight_with_repair(
+    *,
+    project_dir: Path,
+    worktree_path: Path,
+    task_id: str,
+    phase: str,
+    session_dir: Path,
+    config: dict[str, Any],
+    integration_branch: str | None,
+    on_event: Any = None,
+) -> dict[str, Any]:
+    """Run clean-deploy smoke and repair blocking issues before continuing."""
+
+    def run_once() -> dict[str, Any]:
+        return _run_integration_smoke_preflight(
+            worktree_path=worktree_path,
+            task_id=task_id,
+            phase=phase,
+            on_event=on_event,
+        )
+
+    first = run_once()
+    if not _integration_smoke_blocks(first):
+        return first
+
+    controller = PreflightRepairController(
+        session_dir=session_dir,
+        worktree_path=worktree_path,
+        agent_repair=lambda request: _run_preflight_repair_agent(
+            request=request,
+            task_id=task_id,
+            project_dir=project_dir,
+            config=config,
+            integration_branch=integration_branch,
+            on_event=on_event,
+        ),
+    )
+    result = await controller.repair_until_clean(run_once, initial_payload=first)
+    payload = result.preflight_payload
+    payload["repair"] = result.to_jsonable()
+    _emit(on_event, {
+        "event": "integration_smoke_repair_done",
+        "task_id": task_id,
+        "phase": phase,
+        "terminal_state": result.terminal_state,
+        "attempts": len(result.attempts),
+        "log_path": str(controller.log_path),
+    })
+    return payload
+
+
 def _integration_smoke_blocks(payload: dict[str, Any]) -> bool:
     issues = payload.get("issues") or []
     return any(
@@ -1820,7 +1953,24 @@ async def _run_preflight_repair_agent(
         ),
         on_event=on_event,
     )
-    ok = result.verdict != "catastrophic"
+    ok = result.verdict not in ("catastrophic", "merge_blocked")
+    commit_detail = ""
+    if ok:
+        from otto.v5_branching import commit_integration_worktree
+
+        commit_ok, commit_detail = commit_integration_worktree(
+            worktree_path=request.worktree_path,
+            task_id=f"{task_id}-preflight-{request.failure_kind}",
+        )
+        _emit(on_event, {
+            "event": "preflight_repair_commit" if commit_ok else "preflight_repair_commit_failed",
+            "task_id": task_id,
+            "failure_kind": request.failure_kind,
+            "worktree": str(request.worktree_path),
+            "detail": commit_detail,
+        })
+        if not commit_ok:
+            ok = False
     _emit(on_event, {
         "event": "preflight_repair_agent_done",
         "task_id": task_id,
@@ -1828,10 +1978,13 @@ async def _run_preflight_repair_agent(
         "verdict": result.verdict,
         "cost_usd": result.cost_usd,
     })
+    summary = result.failure_reason or result.final_text[:300] or result.verdict
+    if commit_detail:
+        summary = f"{summary}; commit: {commit_detail}"
     return AgentRepairResult(
         ok=ok,
         cost_usd=result.cost_usd,
-        summary=result.failure_reason or result.final_text[:300] or result.verdict,
+        summary=summary,
     )
 
 
@@ -1961,10 +2114,14 @@ async def _run_integration(
 
     parent_integration_branch = own_integration_branch
     integration_cwd = integration_worktree or project_dir
-    preflight_result = _run_integration_smoke_preflight(
+    preflight_result = await _run_integration_smoke_preflight_with_repair(
+        project_dir=project_dir,
         worktree_path=integration_cwd,
         task_id=task_id,
         phase="pre_agent",
+        session_dir=integration_session_dir,
+        config=config,
+        integration_branch=parent_integration_branch,
         on_event=on_event,
     )
 
@@ -2008,10 +2165,14 @@ async def _run_integration(
     if _preflight_repair_escalated(preflight_result):
         post_preflight_result = preflight_result
     else:
-        post_preflight_result = _run_integration_smoke_preflight(
+        post_preflight_result = await _run_integration_smoke_preflight_with_repair(
+            project_dir=project_dir,
             worktree_path=integration_cwd,
             task_id=task_id,
             phase="post_agent",
+            session_dir=integration_session_dir,
+            config=config,
+            integration_branch=parent_integration_branch,
             on_event=on_event,
         )
     if result.verify_result is None:

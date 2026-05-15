@@ -636,3 +636,36 @@ Verification:
 - `uv run python scripts/run_field_tests.py --dry-run --scenario 03-todo-fullstack --parallel 2 --report-path /tmp/otto-field-test-one-dry-run.md`
   passed and verified scenario selection.
 - `git diff --check` passed.
+
+---
+
+## Implementation Gate — 2026-05-15 — modular decomposition repair
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, diff review, focused
+tests, ruff, py_compile, and live field-test launch attempts were used
+instead.
+
+Findings during implementation review:
+- [IMPORTANT] `start.sh` clean-deploy failures were blocking before the
+  integration repair loop could act. Root and subtree integration smoke
+  preflights now run through the repair controller and commit successful
+  repair edits on the integration branch.
+- [IMPORTANT] Direct child branch propagation had no final invariant. The
+  scheduler now verifies that every pass/partial/unverified child branch tip
+  reaches the parent target branch before it declares the parent ready.
+- [IMPORTANT] Port cleanup killed every PID on declared ports. It now kills
+  only Otto-owned or field-test-owned listeners and leaves unrelated processes
+  alone.
+- [NOTE] Live validation could not reach product execution in this sandbox:
+  the requested runs root was not writable, and writable reruns for
+  `04-mini-crm` and `05-blog-generator` both stopped during spec compilation
+  because the Claude provider was not logged in.
+
+Verification:
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run ruff check otto/v5_runner.py otto/v5_preflight_repair.py otto/v5_clean_verify.py tests/test_v5_integration_worktree.py tests/test_v5_port_cleanup.py tests/test_v5_decomposed_child_lands_in_main.py` passed.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python -m py_compile otto/v5_runner.py otto/v5_preflight_repair.py otto/v5_clean_verify.py tests/test_v5_integration_worktree.py tests/test_v5_port_cleanup.py tests/test_v5_decomposed_child_lands_in_main.py` passed.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev pytest -q tests/test_v5_port_cleanup.py tests/smoke/test_preflight_repair_fixtures.py tests/test_v5_integration_worktree.py::test_integration_smoke_failure_runs_repair_on_resolved_worktree tests/test_v5_decomposed_child_lands_in_main.py::test_all_passing_direct_child_branch_tips_reach_main_even_noop_child` passed: 18 tests.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev pytest -q tests/test_v5_integration_worktree.py tests/test_v5_port_cleanup.py tests/test_v5_decomposed_child_lands_in_main.py tests/smoke/test_preflight_repair_fixtures.py tests/test_v5_preflight.py tests/smoke/test_nested_subtree_propagation.py` passed: 46 tests.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke` passed: 305 passed, 2370 deselected.
+- `git diff --check` passed.

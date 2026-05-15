@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
-import os
 import re
-import signal
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -328,7 +326,12 @@ class PreflightRepairController:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
     def _cleanup_ports(self, worktree_path: Path, _issue: dict[str, Any]) -> dict[str, Any]:
-        from otto.v5_clean_verify import _parse_declared_ports
+        from otto.v5_clean_verify import (
+            _is_otto_owned_process,
+            _parse_declared_ports,
+            _pids_for_port,
+            _terminate_pid,
+        )
 
         ports = _parse_declared_ports(worktree_path)
         killed: dict[int, list[int]] = {}
@@ -480,54 +483,3 @@ def _dedupe_existing_name(path: Path) -> str:
 
 def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def _pids_for_port(port: int) -> list[int]:
-    import subprocess
-
-    try:
-        out = subprocess.check_output(
-            ["lsof", "-ti", f":{port}"],
-            text=True,
-            timeout=2,
-            stderr=subprocess.DEVNULL,
-        )
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        FileNotFoundError,
-    ):
-        return []
-    pids: list[int] = []
-    for raw in out.split():
-        try:
-            pids.append(int(raw))
-        except ValueError:
-            continue
-    return pids
-
-
-def _is_otto_owned_process(pid: int, worktree_path: Path) -> bool:
-    try:
-        import psutil
-    except ImportError:
-        return False
-    try:
-        proc = psutil.Process(pid)
-        cwd = Path(proc.cwd()).resolve()
-        worktree = worktree_path.resolve()
-        if cwd == worktree or worktree in cwd.parents:
-            return True
-        cmdline = " ".join(proc.cmdline())
-        return str(worktree) in cmdline and "otto" in cmdline.lower()
-    except (psutil.Error, OSError, RuntimeError):
-        return False
-
-
-def _terminate_pid(pid: int) -> None:
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except OSError:
-        return

@@ -183,6 +183,18 @@ def _assert_file_reachable_from_main(
     )
 
 
+def _assert_branch_tip_reaches(
+    repo: Path,
+    *,
+    branch: str,
+    target: str = "main",
+) -> None:
+    ancestor = _git(repo, "merge-base", "--is-ancestor", branch, target)
+    assert ancestor.returncode == 0, (
+        f"{branch} tip is not reachable from {target}\nbranch state:\n{_branch_state(repo)}"
+    )
+
+
 class LeadStub:
     def __init__(
         self,
@@ -558,3 +570,67 @@ async def test_mixed_shallow_and_deep_root_children_land_on_main(
             rel_path=rel_path,
             expected_content=content,
         )
+
+
+@pytest.mark.asyncio
+async def test_all_passing_direct_child_branch_tips_reach_main_even_noop_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    intents = {
+        "v5-architect": "Build scaffold",
+        "v5-frontend": "Inspect frontend and make changes only if needed",
+        "v5-tests": "Build tests",
+    }
+    record_task(repo, task_id=ROOT_TASK_ID, intent="root", parent_task_id=None)
+    set_decomposition(repo, ROOT_TASK_ID, "emit")
+    set_verdict(repo, ROOT_TASK_ID, "pending_children")
+    _enqueue_fixed_task(
+        repo,
+        task_id="v5-architect",
+        parent_task_id=ROOT_TASK_ID,
+        intent=intents["v5-architect"],
+    )
+    _enqueue_fixed_task(
+        repo,
+        task_id="v5-frontend",
+        parent_task_id=ROOT_TASK_ID,
+        intent=intents["v5-frontend"],
+        depends_on=["v5-architect"],
+    )
+    _enqueue_fixed_task(
+        repo,
+        task_id="v5-tests",
+        parent_task_id=ROOT_TASK_ID,
+        intent=intents["v5-tests"],
+        depends_on=["v5-architect"],
+    )
+    events: list[dict[str, Any]] = []
+    stub = LeadStub(
+        repo,
+        intents=intents,
+        children={},
+        files={
+            "v5-architect": {"frontend/index.html": "<div>complete shell</div>\n"},
+            "v5-tests": {"tests/run_acceptance.py": "print('ok')\n"},
+            # v5-frontend intentionally writes nothing; its branch still must
+            # be represented by a reachable tip, not silently disappear.
+            "v5-frontend": {},
+        },
+    )
+
+    await _run_process_children(repo, monkeypatch, stub, max_parallel=3, events=events)
+
+    for child_id in ("v5-architect", "v5-frontend", "v5-tests"):
+        _assert_branch_tip_reaches(repo, branch=child_branch_name(child_id))
+
+    ok_events = {
+        event.get("task_id")
+        for event in events
+        if event.get("event") == "child_branch_ancestry_ok"
+        and event.get("target") == "main"
+    }
+    assert {"v5-architect", "v5-frontend", "v5-tests"} <= ok_events

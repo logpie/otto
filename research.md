@@ -1121,3 +1121,141 @@ that triggered this redesign (mc-i2p drawer showing legacy WARN noise
 on i2p runs) is fixed not by patching the legacy panel but by routing
 i2p runs to the new `run_view.py` + `<RunDrawer />` from day one.
 Legacy runs keep using the legacy panel until Phase B.
+
+---
+
+# Modular Decomposition Field-Test Failure Research
+
+Date: 2026-05-15T02:05:47Z
+
+## Scope
+
+Fix the v5 modular/decomposition path after Round 2 field tests:
+
+- `04-mini-crm`: root emitted three children; all children reported pass; final verdict was `merge_blocked`.
+- `05-blog-generator`: root emitted three children; all children reported pass; final verdict was `merge_blocked`.
+
+Constraints from the request:
+
+- Trust the agent. Minimize classification. Default repairable clean-deploy failures to a coding agent.
+- No new validators or prompt-rule expansion.
+- No provider routing changes.
+- Do not touch the i2p monolithic path.
+- Time-based validation matters more than unit tests; live rerun 04 and 05.
+
+## Evidence Read
+
+Artifacts inspected:
+
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/04-mini-crm/otto_logs/cross-sessions/task_graph.json`
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/04-mini-crm/field-test-otto.log`
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/04-mini-crm/otto_logs/sessions/*/lead/narrative.log`
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/05-blog-generator/otto_logs/cross-sessions/task_graph.json`
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/05-blog-generator/field-test-otto.log`
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/05-blog-generator/otto_logs/sessions/*/lead/narrative.log`
+
+04 facts:
+
+- Task graph: `root` emitted `v5-cb6494d893d7`, `v5-6825f5f82ade`, `v5-6cda4e78f2a9`.
+- All three children have `verdict: pass`.
+- Final field-test log reports:
+  - `clean_deploy_port_busy [block]`: declared port `[19301]` already bound.
+  - `clean_deploy_start_failed [block]`: `start.sh exited 127` with `python: command not found`.
+- Git ancestry check showed all three `i2p/build/*` branch tips are ancestors of `main`.
+- The frontend branch `i2p/build/v5-6825f5f82ade` has no unique frontend commit; its tip is a merge commit of the architect branch. The narrative says the FE agent found the frontend already complete and made no code changes.
+
+05 facts:
+
+- Task graph: `root` emitted `v5-361449e77ed0`, `v5-380ad5811f2c`, `v5-5805bd7c96b7`.
+- All three children have `verdict: pass`.
+- Final field-test log reports `clean_deploy_start_failed [block]`: `OSError: [Errno 48] Address already in use` from `http.server`.
+- Git ancestry check showed all three `i2p/build/*` branch tips are ancestors of `main`.
+
+## Relevant Code Paths
+
+- `otto/v5_runner.py:_run_integration_smoke_preflight` runs `smoke_clean_deploy()` and serializes blocking `PreflightIssue`s.
+- Root integration and subtree integration pass preflight payloads to the integration Lead, then run `smoke_clean_deploy()` again afterward.
+- The clean-deploy smoke path is not wrapped in `PreflightRepairController`; therefore `clean_deploy_start_failed` and `clean_deploy_port_busy` never get the existing default agent/auto-fix loop.
+- `PreflightRepairController.classify_preflight_issue()` already defaults unknown blocking failures to `agent`; it auto-fixes `port_busy`.
+- `_run_preflight_repair_agent()` currently dispatches a focused Lead but does not runner-commit repair edits. A start.sh repair can pass in the dirty worktree but still fail to propagate through branch-based integration.
+- `cleanup_stale_declared_ports()` currently runs once near pipeline start, before an architect-created `CHARTER.md` normally exists, so it often has no declared ports. It also kills all listeners on declared ports, which is too broad for user safety.
+- `_merge_child_branch()` merges child build branches into the parent integration branch but does not explicitly verify the branch tip is an ancestor afterward. The observed 04/05 runs passed ancestry, but the existing test did not assert all children in a real task graph reach main after `_process_children`.
+
+## Root-Cause Hypotheses
+
+### H1: Clean-deploy smoke failures bypass the repair loop (root)
+
+Supports:
+
+- Field logs show blocking clean-deploy issues, not merge conflicts.
+- `_run_integration_smoke_preflight()` only records issues.
+- Root integration only dispatches the normal integration Lead, then downgrades to `merge_blocked` if post-smoke still blocks.
+- `PreflightRepairController` is only used for checkout repair in this path.
+
+Test:
+
+- Simulate `smoke_clean_deploy()` returning `clean_deploy_start_failed`, then a focused repair edits `start.sh`; assert integration proceeds without invoking the broad integration Lead first and commits the repair.
+
+### H2: Zombie port cleanup happens at the wrong layer and too early
+
+Supports:
+
+- Pipeline-start cleanup runs before the architect writes `CHARTER.md`, so there are no declared ports to clean.
+- 04 field log still hit port 19301 busy after children passed.
+- 05 hit address-in-use during the clean-deploy start.
+
+Conflicts:
+
+- Some port conflicts should be product bugs, not environment bugs, if `start.sh` fails to respect `$PORT`.
+
+Test:
+
+- Run clean-deploy repair loop with a `clean_deploy_port_busy` issue and assert it invokes the port cleanup auto-fix before rerunning smoke.
+- Harden the cleanup helper to kill only Otto-owned project processes, not arbitrary listeners.
+
+### H3: Branch propagation can be reported green without explicit ancestry invariant
+
+Supports:
+
+- The v6e bug class existed before: decomposed subtree integration work could stay on `i2p/integ/<id>` and never reach main.
+- Existing tests exercise `merge_branch_into()` directly, but do not assert every child branch listed in the task graph is an ancestor of the parent/root integration after `_process_children`.
+- Field-test interpretation was confused because a no-op child branch may not have a unique "v5 task" commit even when its branch tip is actually reachable from main.
+
+Conflicts:
+
+- Round 2 04 and 05 archived repos do have all child build branch tips as ancestors of main.
+
+Test:
+
+- Add a real `_process_children()` regression where multiple children pass, one child makes no unique code changes, and assert every pass child branch tip is an ancestor of `main`.
+- Add a runner-side verification/logging helper so future failures surface as branch ancestry failures, not silent N-1 propagation.
+
+## Plan Gate
+
+Owned files:
+
+- `otto/v5_runner.py`
+- `otto/v5_preflight_repair.py`
+- `otto/v5_clean_verify.py`
+- Focused v5 tests under `tests/`
+- This research/debug/plan/review trail
+
+Risky assumptions and verification:
+
+- Assumption: wrapping smoke preflight with `PreflightRepairController` is enough for both `start.sh` portability and port-busy failures.
+  Verify: focused async tests plus live 04/05 reruns.
+- Assumption: committing successful preflight repair edits via the integration commit allowlist will preserve fixes without tracking runtime garbage.
+  Verify: test repaired `start.sh` is committed and `git status` clean.
+- Assumption: branch propagation was not the direct Round 2 root cause, but missing invariant tests allowed confusion.
+  Verify: ancestry checks for every child in tests and live rerun repos.
+- Assumption: safe port cleanup belongs in the v5 clean-deploy repair path, not the field-test driver.
+  Verify: cleanup filters to project/Otto-owned processes and clean-deploy reruns after cleanup.
+
+System-level checks:
+
+- Focused pytest for v5 integration preflight repair, branch propagation, and port cleanup.
+- Ruff on touched files.
+- `git diff --check`.
+- Live `scripts/run_field_tests.py --scenario 04-mini-crm --parallel 1`.
+- Live `scripts/run_field_tests.py --scenario 05-blog-generator --parallel 1`.
+- After live runs: `git merge-base --is-ancestor` for all child branches versus `main`, `field-test-result.json` verdict and boot smoke HTTP status.

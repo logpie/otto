@@ -761,6 +761,109 @@ def _check_ports_free(declared_ports: list[int]) -> list[int]:
     return busy
 
 
+def _pids_for_port(port: int) -> list[int]:
+    try:
+        out = subprocess.check_output(
+            ["lsof", "-ti", f":{port}"],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        )
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ):
+        return []
+    pids: list[int] = []
+    for raw in out.split():
+        try:
+            pids.append(int(raw))
+        except ValueError:
+            continue
+    return pids
+
+
+def _process_environ(proc: Any) -> dict[str, str]:
+    try:
+        env = proc.environ()
+    except Exception:  # noqa: BLE001
+        return {}
+    return env if isinstance(env, dict) else {}
+
+
+def _looks_like_field_test_path(path: str) -> bool:
+    text = path.replace("\\", "/")
+    return "/field-tests/" in text or text.endswith("/field-tests")
+
+
+def _looks_like_local_server(cmdline: str) -> bool:
+    lowered = cmdline.lower()
+    markers = (
+        "uvicorn",
+        "http.server",
+        "vite",
+        "next dev",
+        "npm run",
+        "pnpm",
+        "flask",
+        "fastapi",
+        "node",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_otto_owned_process(pid: int, project_dir: Path) -> bool:
+    try:
+        import psutil
+    except ImportError:
+        return False
+    try:
+        proc = psutil.Process(pid)
+        cwd = Path(proc.cwd()).resolve()
+        project = project_dir.resolve()
+        if cwd == project or project in cwd.parents:
+            return True
+        env = _process_environ(proc)
+        field_test_project = env.get("FIELD_TEST_PROJECT_DIR", "")
+        if field_test_project and _looks_like_field_test_path(field_test_project):
+            return True
+        queue_project = env.get("OTTO_QUEUE_PROJECT_DIR", "")
+        if queue_project:
+            try:
+                queue_root = Path(queue_project).resolve()
+                if queue_root == project or queue_root in project.parents or project in queue_root.parents:
+                    return True
+            except OSError:
+                pass
+        cmdline = " ".join(proc.cmdline())
+        if str(project) in cmdline and "otto" in cmdline.lower():
+            return True
+        if _looks_like_field_test_path(str(cwd)):
+            return _looks_like_local_server(cmdline)
+        if cwd.name.startswith("otto-clean-"):
+            return _looks_like_local_server(cmdline)
+        return False
+    except (psutil.Error, OSError, RuntimeError):
+        return False
+
+
+def _terminate_pid(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        return
+    time.sleep(0.2)
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OSError):
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError):
+        return
+
+
 def cleanup_stale_declared_ports(
     project_dir: Path, logger_fn: Any = None
 ) -> list[int]:
@@ -788,34 +891,13 @@ def cleanup_stale_declared_ports(
 
     killed_on: list[int] = []
     for port in ports:
-        try:
-            out = subprocess.check_output(
-                ["lsof", "-ti", f":{port}"],
-                text=True,
-                timeout=2,
-                stderr=subprocess.DEVNULL,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        pids = _pids_for_port(port)
+        owned = [pid for pid in pids if _is_otto_owned_process(pid, project_dir)]
+        if not owned:
             continue
-        pids: list[int] = []
-        for pid_str in out.strip().split():
-            try:
-                pids.append(int(pid_str.strip()))
-            except ValueError:
-                continue
-        if not pids:
-            continue
-        log(f"port-cleanup: port {port} bound by PIDs {pids}; killing")
-        for pid in pids:
-            try:
-                subprocess.run(
-                    ["kill", "-9", str(pid)],
-                    timeout=2,
-                    check=False,
-                    stderr=subprocess.DEVNULL,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+        log(f"port-cleanup: port {port} bound by Otto-owned PIDs {owned}; killing")
+        for pid in owned:
+            _terminate_pid(pid)
         killed_on.append(port)
     return killed_on
 

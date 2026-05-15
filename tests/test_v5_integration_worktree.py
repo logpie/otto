@@ -282,7 +282,7 @@ async def test_root_integration_starts_on_main_even_after_prior_worktree_state(
 
 
 @pytest.mark.asyncio
-async def test_root_integration_receives_clean_deploy_preflight_payload(
+async def test_root_integration_repairs_clean_deploy_preflight_before_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -316,6 +316,15 @@ async def test_root_integration_receives_clean_deploy_preflight_payload(
 
     async def fake_run_lead(**kwargs: Any) -> LeadResult:
         lead_kwargs.append(kwargs)
+        if "preflight" in kwargs["task_id"]:
+            return LeadResult(
+                task_id=kwargs["task_id"],
+                verdict="pass",
+                cost_usd=0.05,
+                decomposition="inline",
+                verify_called=True,
+                verify_result={"verdict": "pass", "summary": "repaired"},
+            )
         if kwargs.get("kind") == "integration":
             return LeadResult(
                 task_id=kwargs["task_id"],
@@ -342,6 +351,7 @@ async def test_root_integration_receives_clean_deploy_preflight_payload(
             )
         ],
         [],
+        [],
     ]
 
     def fake_smoke(path: Path, *_args: Any, **_kwargs: Any) -> list[PreflightIssue]:
@@ -360,13 +370,19 @@ async def test_root_integration_receives_clean_deploy_preflight_payload(
     )
 
     assert result.verdict == "pass"
+    repair_calls = [call for call in lead_kwargs if "preflight" in call["task_id"]]
+    assert len(repair_calls) == 1
+    assert "root start failed" in repair_calls[0]["intent"]
+
     integration_calls = [call for call in lead_kwargs if call.get("kind") == "integration"]
     assert len(integration_calls) == 1
     payload = integration_calls[0]["preflight_result"]
     assert payload["check"] == "smoke_clean_deploy"
     assert payload["task_id"] == "root"
-    assert payload["passed"] is False
-    assert payload["issues"][0]["message"] == "root start failed"
+    assert payload["passed"] is True
+    assert payload["issues"] == []
+    assert payload["repair"]["terminal_state"] == "continued"
+    assert payload["repair"]["attempts"][0]["failure_kind"] == "clean_deploy_start_failed"
 
 
 @pytest.mark.asyncio
@@ -439,7 +455,7 @@ async def test_runner_commits_integration_product_files_and_excludes_runtime_fil
 
 
 @pytest.mark.asyncio
-async def test_integration_smoke_payload_uses_resolved_worktree_and_reruns(
+async def test_integration_smoke_failure_runs_repair_on_resolved_worktree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -460,6 +476,7 @@ async def test_integration_smoke_payload_uses_resolved_worktree_and_reruns(
             )
         ],
         [],
+        [],
     ]
     lead_kwargs: list[dict[str, Any]] = []
 
@@ -469,6 +486,20 @@ async def test_integration_smoke_payload_uses_resolved_worktree_and_reruns(
 
     async def fake_run_lead(**kwargs: Any) -> LeadResult:
         lead_kwargs.append(kwargs)
+        if "preflight" in kwargs["task_id"]:
+            worktree = (Path(kwargs["session_dir"]) / "worktree").resolve()
+            (worktree / "start.sh").write_text(
+                "#!/usr/bin/env bash\npython3 -m http.server ${PORT:-9000}\n",
+                encoding="utf-8",
+            )
+            return LeadResult(
+                task_id=kwargs["task_id"],
+                verdict="pass",
+                cost_usd=0.05,
+                decomposition="inline",
+                verify_called=True,
+                verify_result={"verdict": "pass", "summary": "fixed start.sh"},
+            )
         return LeadResult(
             task_id=kwargs["task_id"],
             verdict="pass",
@@ -491,24 +522,34 @@ async def test_integration_smoke_payload_uses_resolved_worktree_and_reruns(
     )
 
     assert result.verdict == "pass"
-    assert len(smoke_calls) == 2
+    assert len(smoke_calls) == 3
     assert all(path != repo for path in smoke_calls)
     assert all(path.exists() for path in smoke_calls)
-    assert smoke_calls[0] == smoke_calls[1]
+    assert smoke_calls[0] == smoke_calls[1] == smoke_calls[2]
     assert _git(smoke_calls[0], "branch", "--show-current").stdout.strip() == own_integration
 
-    assert len(lead_kwargs) == 1
-    payload = lead_kwargs[0]["preflight_result"]
+    repair_calls = [call for call in lead_kwargs if "preflight" in call["task_id"]]
+    assert len(repair_calls) == 1
+    assert repair_calls[0]["kind"] == "plan_or_inline"
+    assert "start.sh failed before repair" in repair_calls[0]["intent"]
+    assert (
+        _git(repo, "show", f"{own_integration}:start.sh").stdout
+        == "#!/usr/bin/env bash\npython3 -m http.server ${PORT:-9000}\n"
+    )
+
+    integration_calls = [call for call in lead_kwargs if call.get("kind") == "integration"]
+    assert len(integration_calls) == 1
+    payload = integration_calls[0]["preflight_result"]
     assert payload["check"] == "smoke_clean_deploy"
     assert payload["cwd"] == str(smoke_calls[0])
-    assert payload["passed"] is False
-    assert payload["issues"][0]["kind"] == "clean_deploy_start_failed"
-    assert "before repair" in payload["issues"][0]["message"]
-    packet_path = Path(lead_kwargs[0]["integration_packet_path"])
+    assert payload["passed"] is True
+    assert payload["issues"] == []
+    assert payload["repair"]["attempts"][0]["failure_kind"] == "clean_deploy_start_failed"
+    packet_path = Path(integration_calls[0]["integration_packet_path"])
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
     assert packet["parent_task_id"] == task_id
     assert packet["integration_branch"] == own_integration
-    assert packet["preflight_results"]["pre_agent"]["issues"][0]["kind"] == "clean_deploy_start_failed"
+    assert packet["preflight_results"]["pre_agent"]["repair"]["terminal_state"] == "continued"
 
     assert result.verify_result is not None
     assert result.verify_result["post_integration_preflight"]["passed"] is True

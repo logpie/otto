@@ -705,3 +705,47 @@ Per CLAUDE.md mandatory protocol:
   `~/.claude/plans/plan-based-on-this-soft-cloud.md` step 11.
 - Concurrent-Run support (research §11.6): out of scope; single
   project lock retained.
+
+---
+
+# Plan: Make Modular Decomposition Repairable
+
+Date: 2026-05-15T02:05:47Z
+
+## Objective
+
+Make v5 modular decomposition useful in field tests by fixing the runner-level failures that turned all-green child runs into `merge_blocked`.
+
+## Steps
+
+1. Route integration clean-deploy smoke through the repair controller.
+   - Why: `clean_deploy_start_failed` and `clean_deploy_port_busy` are currently observed but not repaired.
+   - Verify: focused async test where first smoke fails with `start.sh exited 127`, repair edits `start.sh`, second smoke passes, integration proceeds.
+
+2. Commit successful preflight repair edits.
+   - Why: a repair Lead can change `start.sh`, but runner-managed branch commits are what make fixes durable across integration/propagation.
+   - Verify: test committed `start.sh` change is present on the integration branch and worktree is clean.
+
+3. Move zombie-port handling into safe preflight repair.
+   - Why: the field-test driver should not encode product-run lifecycle policy; v5 clean deploy owns declared-port hygiene once ports exist.
+   - Verify: `port_busy` auto-fix kills only project/Otto-owned listeners and reruns smoke; unrelated listeners are left alone and escalate.
+
+4. Add branch ancestry invariant coverage.
+   - Why: all child branch tips reaching the parent/root integration branch is the product invariant; unique commit messages are insufficient.
+   - Verify: `_process_children()` test asserts every passing direct child build branch is an ancestor of main, including a no-op child branch.
+
+5. Run local gates.
+   - Verify: focused pytest, ruff on touched files, `git diff --check`.
+
+6. Rerun live field tests.
+   - Verify: 04 and 05 final verdict not `merge_blocked`/`catastrophic`; boot smoke HTTP 200; every child branch is ancestor of `main`.
+
+## Plan Gate Review
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is available in this session. Local `codex-gate` checklist applied:
+
+- Worktree confirmed: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`, branch `cc-i2p-2`.
+- Existing repo patterns found: `PreflightRepairController`, `commit_integration_worktree`, `merge_branch_into`, `_process_children` tests.
+- Riskiest assumption: treating clean-deploy start failures as repairable will not hide true product failures. Mitigation: repair attempts are capped and repeat failures still return `merge_blocked`.
+- Simpler alternative rejected: only changing field-test port allocation. That would avoid one environmental failure but would not fix `python` portability or any future agent-fixable `start.sh` failure.
+- Behavior docs/artifacts: append research/debug/plan/review trail; no user docs needed unless live rerun reveals UX-facing changes.
