@@ -37,7 +37,7 @@ def test_pass_on_zero_exit(tmp_path: Path) -> None:
     assert written["verdict"] == "pass"
 
 
-def test_unverified_on_nonzero_exit(tmp_path: Path) -> None:
+def test_partial_on_nonzero_exit(tmp_path: Path) -> None:
     project = tmp_path / "p"
     project.mkdir()
     session = tmp_path / "session"
@@ -49,7 +49,7 @@ def test_unverified_on_nonzero_exit(tmp_path: Path) -> None:
         build_command="false",
         summary="would have been pass",
     ))
-    assert result["verdict"] == "unverified"
+    assert result["verdict"] == "partial"
     assert "scaffold build failed" in result["summary"]
 
 

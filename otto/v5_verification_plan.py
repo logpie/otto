@@ -79,6 +79,7 @@ _USER_VISIBLE_STRING_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _TOAST_STRING_CONTEXT_RE = re.compile(r"\btoast\.\w+\s*\([^)]*$", re.IGNORECASE)
+_STRUCTURED_IA_PROJECT_KINDS = {"webapp"}
 
 
 @dataclass
@@ -127,14 +128,7 @@ def validate_lead_verdict(
         ))
         checks.extend(_check_local_scope_evidence(agent_verdict))
     else:
-        checks.append(_check(
-            "structured_contract_present",
-            "structured_contract",
-            True,
-            "skipped structured checks because spec or CHARTER IA is absent/legacy",
-            required=False,
-            skipped=True,
-        ))
+        checks.append(_structured_contract_presence_check(spec, ia))
 
     checks.extend(_check_no_stub_text(worktree_dir))
     checks.extend(_check_verdict_consistency(agent_verdict))
@@ -235,6 +229,42 @@ def _has_structured_spec(spec: dict[str, Any]) -> bool:
         or spec.get("intent_claims")
         or spec.get("cold_start_states")
         or spec.get("quality_constraints")
+    )
+
+
+def _requires_structured_ia_contract(spec: dict[str, Any]) -> bool:
+    return str(spec.get("project_kind") or "").strip().casefold() in _STRUCTURED_IA_PROJECT_KINDS
+
+
+def _structured_contract_presence_check(
+    spec: dict[str, Any],
+    ia: dict[str, Any] | None,
+) -> dict[str, Any]:
+    missing: list[str] = []
+    if not spec:
+        missing.append("structured spec is absent or invalid")
+    elif not _has_structured_spec(spec):
+        missing.append("structured spec fields are absent")
+    if not isinstance(ia, dict):
+        missing.append("CHARTER information architecture contract is absent or invalid")
+    if _requires_structured_ia_contract(spec):
+        detail = "missing required webapp structured contract: " + "; ".join(missing)
+        return _check(
+            "structured_contract_present",
+            "structured_contract",
+            False,
+            detail,
+            required=True,
+            refs={"project_kind": str(spec.get("project_kind") or "")},
+        )
+    return _check(
+        "structured_contract_present",
+        "structured_contract",
+        True,
+        "skipped structured checks because spec or CHARTER IA is absent/legacy",
+        required=False,
+        skipped=True,
+        refs={"missing": missing},
     )
 
 

@@ -2502,9 +2502,6 @@ async def _run_slice(
         scope_warnings = detect_scope_violations(
             group_obj, spec, modified, project_root=worktree
         )
-        for path in detect_dependency_scope_extensions(group_obj, spec, modified):
-            if path not in scope_warnings:
-                scope_warnings.append(path)
         if scope_warnings:
             logger.info(
                 "group %s: scope violation (%d path(s) outside own scope): %s",

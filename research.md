@@ -1391,3 +1391,50 @@ Branch: `cc-i2p-2`
   module without changing the runner contract. The smallest safe change is an
   explicit resolver hook plus an auditable `scope_resolution` record; runner
   fallback remains last-resort and logged when no resolver is supplied.
+
+---
+
+# Research: P2 Agentic-Native Over-Classification Hardening
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+
+## Existing State
+
+- `otto/repair_gates.py` uses term lists and methodology/surface heuristics to
+  turn non-passing audit verdicts into proof gaps or browser-repro requests.
+  That can suppress the agent + oracle repair lane after a detector already
+  found a failing feature.
+- `otto/browser_testing.py` classifies browser command families with substring
+  checks against argv parts. `otto/checks.py` has a second Playwright detector
+  with more substring logic for package scripts.
+- `otto/spec_compile_flat.py` already reads typed `structured_output` result
+  fields, but it first accepts assistant tool calls whose names merely look like
+  structured-output aliases such as `submit_spec`.
+- `otto/v5_verification_plan.py` skips the structured spec / CHARTER IA matrix
+  with `required=False` whenever either side is missing, even for webapp specs.
+- `otto/mcp_tools.py` writes scaffold build failures as `verdict:
+  unverified`, which is a weaker signal than the canonical `partial` repair
+  lane used elsewhere.
+
+## Constraints
+
+- Keep deterministic non-repairable classifications narrow and typed. Do not
+  replace fuzzy blocklists with different fuzzy blocklists.
+- Unknown or weakly classified audit failures should route to agent repair; the
+  smoke/verify oracle is the gate.
+- Browser command identity should live in one adapter. Unknown BrowserJourney
+  commands must still run as real checks.
+- Provider structured-output recovery should prefer typed result fields and the
+  exact Claude `StructuredOutput` contract; tool-name aliases are not evidence.
+- Missing structured IA should fail only for typed product kinds that require
+  IA, currently v5 `project_kind: webapp`.
+
+## Verification Plan
+
+- Add `tests/test_v5_p2_hardening.py` with one regression per requested item.
+- Run that file before production changes and capture the expected failures.
+- Apply the scoped production patch and rerun the P2 tests.
+- Run the requested P0/P1/leaf/smoke regressions, smoke tier, ruff, and
+  basedpyright on touched files.

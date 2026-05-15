@@ -129,30 +129,6 @@ def select_failing_features(
     return failing
 
 
-_UNACTIONABLE_BLOCKED_DETAIL_MARKERS: tuple[str, ...] = (
-    "not evaluated",
-    "not audited",
-    "not tested",
-    "not verified",
-    "not in scope",
-    "out of scope",
-    "no direct test evidence",
-    "no test evidence",
-    "no evidence collected",
-    "tests were not audited",
-)
-_UNACTIONABLE_REPAIR_DETAIL_MARKERS: tuple[str, ...] = (
-    *_UNACTIONABLE_BLOCKED_DETAIL_MARKERS,
-    "no changes were needed",
-    "no changes needed",
-    "not affected",
-    "does not mention this function",
-    "not mention this function",
-    "outside the requested scope",
-    "outside of the requested scope",
-)
-
-
 def _is_actionable_repair_verdict(
     verdict_payload: dict[str, Any],
     *,
@@ -160,29 +136,12 @@ def _is_actionable_repair_verdict(
 ) -> bool:
     """Return whether a verdict should be routed to a repair agent.
 
-    Audit agents sometimes mark unrelated or uninspected Features as
-    ``blocked`` simply because they did not gather evidence. Those are
-    audit-coverage gaps, not implementation bugs. Sending them to repair
-    burns provider budget and can crowd out the real failing features in
-    the same audit pass.
+    Non-passing detector verdicts default to repair. Deterministic opt-out is
+    allowed only through typed non-repairable codes handled by
+    ``repair_gate_for_verdict``.
     """
-    detail = str(verdict_payload.get("detail") or "").casefold()
-    if any(marker in detail for marker in _UNACTIONABLE_REPAIR_DETAIL_MARKERS):
-        return False
-    has_strength_metadata = any(
-        str(verdict_payload.get(key) or "").strip()
-        for key in ("surface", "methodology", "evidence_completeness", "coverage_confidence")
-    )
-    if verdict != "blocked":
-        return repair_gate_for_verdict(verdict_payload).actionable if has_strength_metadata else True
-    evidence_refs = verdict_payload.get("evidence_refs") or []
-    if isinstance(evidence_refs, list) and any(str(ref).strip() for ref in evidence_refs):
-        return repair_gate_for_verdict(verdict_payload).actionable if has_strength_metadata else True
-    if not detail:
-        return repair_gate_for_verdict(verdict_payload).actionable if has_strength_metadata else True
-    if any(marker in detail for marker in _UNACTIONABLE_BLOCKED_DETAIL_MARKERS):
-        return False
-    return repair_gate_for_verdict(verdict_payload).actionable if has_strength_metadata else True
+    del verdict
+    return repair_gate_for_verdict(verdict_payload).actionable
 
 
 def group_for_feature(spec: Spec, feature_id: str) -> Group | None:

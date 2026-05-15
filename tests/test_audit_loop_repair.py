@@ -132,11 +132,11 @@ def test_no_failing_features_returns_immediately() -> None:
     assert fix_calls == []
 
 
-def test_visual_only_feature_verdict_does_not_trigger_repair() -> None:
+def test_visual_only_feature_verdict_triggers_agent_repair() -> None:
     spec = _spec("f1")
     fix_agent, fix_calls = _make_fix_agent()
 
-    result = asyncio.run(
+    asyncio.run(
         repair_failing_features(
             spec=spec,
             feature_verdicts=[
@@ -152,9 +152,7 @@ def test_visual_only_feature_verdict_does_not_trigger_repair() -> None:
         )
     )
 
-    assert result.attempts == []
-    assert result.halted_reason == "no_failing_features"
-    assert fix_calls == []
+    assert fix_calls == [("f1", "g")]
 
 
 def test_live_ui_feature_verdict_triggers_repair() -> None:
@@ -444,7 +442,7 @@ def test_max_attempts_per_run_does_not_truncate_first_failing_group_attempts() -
     assert fix_calls[2][0] == "f3"
 
 
-def test_unactionable_blocked_verdicts_do_not_crowd_out_real_repairs() -> None:
+def test_unclassified_blocked_verdicts_get_agent_repair_attempts() -> None:
     spec = _spec_by_group({
         "not_seen": "g1",
         "crashing_api": "g2",
@@ -452,6 +450,7 @@ def test_unactionable_blocked_verdicts_do_not_crowd_out_real_repairs() -> None:
     })
     fix_agent, fix_calls = _make_fix_agent()
     re_audit, re_audit_calls = _make_re_audit({
+        "not_seen": "passed",
         "crashing_api": "passed",
         "wrong_output": "passed",
     })
@@ -485,11 +484,13 @@ def test_unactionable_blocked_verdicts_do_not_crowd_out_real_repairs() -> None:
     )
 
     assert [feature_id for feature_id, _ in fix_calls] == [
+        "not_seen",
         "crashing_api",
         "wrong_output",
     ]
-    assert re_audit_calls == [["crashing_api", "wrong_output"]]
+    assert re_audit_calls == [["not_seen", "crashing_api", "wrong_output"]]
     assert [a.feature_id for a in result.attempts] == [
+        "not_seen",
         "crashing_api",
         "wrong_output",
     ]

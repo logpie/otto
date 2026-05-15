@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -319,7 +320,7 @@ async def test_run_compile_recovers_large_result_from_messages_jsonl(
     result_text = json.dumps(payload)
     assert len(result_text) > 32_000
 
-    async def fake_run_agent_with_timeout(*_args: object, **kwargs: object):
+    async def fake_run_agent_with_timeout(*_args: object, **kwargs: Any):
         log_dir = Path(kwargs["log_dir"])
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "messages.jsonl").write_text(
@@ -350,7 +351,7 @@ async def test_run_compile_prefers_result_structured_output_over_prose_result(
     payload = asdict(_valid_spec())
     payload["core_entities"][0]["name"] = "Structured result entity"
 
-    async def fake_run_agent_with_timeout(*_args: object, **kwargs: object):
+    async def fake_run_agent_with_timeout(*_args: object, **kwargs: Any):
         log_dir = Path(kwargs["log_dir"])
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "messages.jsonl").write_text(
@@ -385,7 +386,7 @@ async def test_run_compile_prefers_structured_output_tool_input(
     payload = asdict(_valid_spec())
     payload["intent_claims"][0]["text"] = "structured tool payload wins"
 
-    async def fake_run_agent_with_timeout(*_args: object, **kwargs: object):
+    async def fake_run_agent_with_timeout(*_args: object, **kwargs: Any):
         log_dir = Path(kwargs["log_dir"])
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "messages.jsonl").write_text(
@@ -425,7 +426,7 @@ async def test_run_compile_prefers_structured_output_tool_input(
     assert parsed["behavior_journeys"][0]["id"] == payload["behavior_journeys"][0]["id"]
 
 
-def test_structured_output_tool_input_accepts_submit_spec_alias(tmp_path: Path) -> None:
+def test_structured_output_tool_input_requires_exact_claude_tool_name(tmp_path: Path) -> None:
     payload = asdict(_valid_spec())
     messages = tmp_path / "messages.jsonl"
     messages.write_text(
@@ -436,6 +437,25 @@ def test_structured_output_tool_input_accepts_submit_spec_alias(tmp_path: Path) 
                     "type": "tool_use",
                     "id": "toolu_submit",
                     "name": "submit_spec",
+                    "input": payload,
+                }
+            ],
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    recovered = _read_structured_output_tool_input(messages)
+
+    assert recovered is None
+
+    messages.write_text(
+        json.dumps({
+            "type": "assistant",
+            "blocks": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_structured",
+                    "name": "StructuredOutput",
                     "input": payload,
                 }
             ],
@@ -459,7 +479,7 @@ async def test_run_compile_falls_back_to_returned_text_without_messages_result(
     payload["permissions"][0]["name"] = "Returned text fallback"
     result_text = "Here is the JSON:\n" + json.dumps(payload) + "\nDone."
 
-    async def fake_run_agent_with_timeout(*_args: object, **kwargs: object):
+    async def fake_run_agent_with_timeout(*_args: object, **kwargs: Any):
         log_dir = Path(kwargs["log_dir"])
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "messages.jsonl").write_text(

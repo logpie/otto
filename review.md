@@ -802,3 +802,50 @@ Verification:
 - Touched-file type check: `uv run --extra dev basedpyright --level error otto/v5_preflight.py otto/v5_preflight_repair.py otto/v5_clean_verify.py otto/v5_runner.py otto/v5_branching.py otto/audit_loop.py otto/v5_context_slicer.py otto/build.py tests/test_v5_p1_hardening.py tests/test_audit_loop_repair.py tests/test_build.py`
   passed: 0 errors, 0 warnings, 0 notes.
 - `git diff --check` passed.
+
+---
+
+## Implementation Gate — 2026-05-15 — v5 P2 agentic-native hardening
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, focused diff review,
+red/green regression proof, smoke gates, ruff, basedpyright, and diff-check
+were used instead.
+
+Findings during implementation review:
+- [IMPORTANT] Detector-found non-passing verdicts now default to agent repair.
+  Deterministic no-repair is limited to typed provider/auth/quota codes with
+  explicit reasons.
+- [IMPORTANT] Browser command classification is centralized behind a typed
+  adapter with exact executable/module/script-table mappings. Unknown commands
+  fall through as real checks instead of being silently skipped.
+- [IMPORTANT] Flat spec compile now prefers typed structured-output payloads
+  from the provider result/breakdown, with only the exact Claude
+  `StructuredOutput` tool contract retained as provider-specific fallback.
+- [IMPORTANT] Webapp structured contract absence is a required verification
+  failure so compile/product repair can see it. Non-webapp legacy specs remain
+  skipped.
+- [IMPORTANT] Scaffold build failures now emit `partial` instead of
+  `unverified`, preserving the negative evidence for repair routing.
+- [NOTE] A residual string scan remains in the agent-browser server boot
+  preflight for script contents. It is outside the central command-family
+  router changed in this pass and should be revisited in a broader heuristic
+  audit.
+
+Verification:
+- Red proof before production patch: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p2_hardening.py -q`
+  failed as expected: 9 failed, 1 passed.
+- Focused P2 regression after implementation: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p2_hardening.py -q`
+  passed: 10 passed.
+- Existing touched regressions: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_repair_gates.py tests/test_browser_testing.py tests/test_spec_compile_flat_structured.py tests/test_v5_verification_plan.py tests/test_v5_certify_scaffold.py tests/test_audit_loop_repair.py -q`
+  passed: 75 passed.
+- Required P0/P1/leaf/smoke plus P2: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p0_hardening.py tests/test_v5_p1_hardening.py tests/test_v5_leaf_runtime_invariants.py tests/smoke tests/test_v5_p2_hardening.py -q`
+  passed: 102 passed.
+- Required merge/audit/build non-regression: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_merge_queue.py tests/test_audit_loop_repair.py tests/test_build.py -q`
+  passed: 137 passed.
+- Required smoke tier: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke`
+  passed: 306 passed, 2460 deselected.
+- Touched-file lint: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run ruff check ...`
+  passed.
+- Touched-file type check: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error ...`
+  passed: 0 errors, 0 warnings, 0 notes.

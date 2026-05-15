@@ -97,7 +97,7 @@ async def _run_scaffold_certification(
     if exit_code != 0:
         tail = "\n".join((text or "").strip().splitlines()[-5:])
         payload = {
-            "verdict": "unverified",
+            "verdict": "partial",
             "journeys": [],
             "evidence": [str(log_path)],
             "summary": f"scaffold build failed (exit {exit_code}): {tail[:200]}",

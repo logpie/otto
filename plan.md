@@ -922,3 +922,72 @@ available in this session. Local `codex-gate` checklist applied:
   amendment side-channel, and merge-queue conflict-context wording.
 - System checks: focused P1 tests, required P0/leaf/smoke tests, smoke tier,
   ruff, basedpyright, and production-only rollback red proof.
+
+---
+
+# Plan: P2 Agentic-Native Over-Classification Hardening
+
+Date: 2026-05-15
+
+## Objective
+
+Remove over-classification gates that decide with string/regex/extension
+heuristics where Otto should instead rely on typed provider signals or dispatch
+agent repair behind an oracle.
+
+## Steps
+
+1. Replace repair-gate term lists with default-actionable behavior and a typed
+   non-repairable allowlist.
+   - Why: detector-found failures should enter repair unless a typed reason says
+     a coding agent cannot act, such as provider auth exhaustion.
+   - Verify: P2 tests show weak visual/http/source findings and empty details
+     route to repair, while a typed provider-auth code does not.
+
+2. Centralize BrowserJourney tool-family identity in a typed adapter.
+   - Why: substring matching command text misclassifies wrappers and silently
+     applies agent-browser preflight to non-agent commands.
+   - Verify: P2 tests show exact agent-browser commands still require sessions,
+     substring impostors are `other`, and unknown commands fall through.
+
+3. Make flat-spec structured-output extraction typed.
+   - Why: fuzzy tool-name aliases can select the wrong tool payload and replay
+     the provider-divergence bug class.
+   - Verify: P2 tests show returned `structured_output` wins without parsing
+     prose and alias tool names are ignored.
+
+4. Fail missing webapp structured IA contracts.
+   - Why: a webapp spec that should have PM/IA structure cannot be verified if
+     `spec.json` or CHARTER IA is missing.
+   - Verify: P2 tests show webapp missing-structure/missing-IA downgrades a pass
+     to partial, while non-webapp legacy specs remain skippable.
+
+5. Return scaffold build failures as `partial`.
+   - Why: `unverified` hides a concrete failed build from the repair routing
+     signal model.
+   - Verify: P2 tests show nonzero scaffold certification writes `partial` to
+     the return payload and `verify-result.json`.
+
+6. Run local gates and implementation review.
+   - Verify: red P2 proof before production patch, green P2 after, requested
+     regression suites, smoke tier, ruff, basedpyright, and diff review.
+
+## Plan Gate Review
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local `codex-gate` checklist applied:
+
+- Worktree confirmed: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`,
+  branch `cc-i2p-2`, clean before edits.
+- Owned files: `otto/repair_gates.py`, `otto/browser_testing.py`,
+  `otto/checks.py`, `otto/spec_compile_flat.py`,
+  `otto/v5_verification_plan.py`, `otto/mcp_tools.py`, focused tests, and gate
+  trail artifacts.
+- Riskiest assumptions: exact `StructuredOutput` is the Claude typed tool
+  contract; v5 `webapp` is the product kind requiring IA; unknown browser
+  commands should still execute rather than getting preflight-skipped.
+- Simpler existing patterns: reuse canonical `partial`, existing
+  `structured_output` JSONL field, `BrowserJourney` typed check boundaries, and
+  `verification_plan.json` required-failure downgrade.
+- System checks: focused P2 tests, required P0/P1/leaf/smoke tests, smoke tier,
+  ruff, basedpyright, and production-only rollback red proof.

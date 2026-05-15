@@ -945,7 +945,7 @@ async def _run_compile(prompt: str, options: Any, log_dir: Path, project_dir: Pa
     """Run one compile attempt. Returns the LLM's text output."""
     from otto.agent import run_agent_with_timeout
 
-    text, _cost, _session_id, _breakdown = await run_agent_with_timeout(
+    text, _cost, _session_id, breakdown = await run_agent_with_timeout(
         prompt,
         options,
         log_dir=log_dir,
@@ -955,9 +955,17 @@ async def _run_compile(prompt: str, options: Any, log_dir: Path, project_dir: Pa
         project_dir=project_dir,
     )
     messages_jsonl = log_dir / "messages.jsonl"
-    structured_tool_input = _read_structured_output_tool_input(messages_jsonl)
-    if structured_tool_input is not None:
-        return json.dumps(structured_tool_input)
+    structured_result = _structured_flat_spec_payload(
+        breakdown.get("structured_output") if isinstance(breakdown, dict) else None
+    )
+    if structured_result is None:
+        structured_result = _read_last_success_structured_output(messages_jsonl)
+    if structured_result is not None:
+        return json.dumps(structured_result)
+    if _provider_uses_claude_structured_tool(getattr(options, "provider", None)):
+        structured_tool_input = _read_structured_output_tool_input(messages_jsonl)
+        if structured_tool_input is not None:
+            return json.dumps(structured_tool_input)
     result_text = _read_last_success_result_text(messages_jsonl)
     return _extract_first_json_object(result_text if result_text is not None else (text or ""))
 
@@ -1027,34 +1035,15 @@ _FLAT_SPEC_PAYLOAD_KEYS = {
     "behavior_journeys",
 }
 
-_STRUCTURED_OUTPUT_TOOL_NAMES = {
-    "structuredoutput",
-    "ottostructuredoutput",
-    "flat_spec",
-    "flatspec",
-    "submit_spec",
-    "submitspec",
-    "final_answer",
-    "finalanswer",
-}
-_STRUCTURED_OUTPUT_TOOL_NAME_KEYS = {
-    re.sub(r"[^a-z0-9]", "", item) for item in _STRUCTURED_OUTPUT_TOOL_NAMES
-}
+_CLAUDE_STRUCTURED_OUTPUT_TOOL_NAME = "StructuredOutput"
 
 
 def _looks_like_flat_spec_payload(value: Any) -> bool:
     return isinstance(value, dict) and _FLAT_SPEC_PAYLOAD_KEYS.issubset(value.keys())
 
 
-def _is_structured_output_tool_name(name: Any) -> bool:
-    normalized = re.sub(r"[^a-z0-9]", "", str(name or "").lower())
-    if normalized in _STRUCTURED_OUTPUT_TOOL_NAME_KEYS:
-        return True
-    return "structuredoutput" in normalized
-
-
 def _read_structured_output_tool_input(messages_jsonl: Path) -> dict[str, Any] | None:
-    """Return the latest flat-spec payload emitted through a structured-output tool."""
+    """Return the latest Claude ``StructuredOutput`` flat-spec tool payload."""
     try:
         with messages_jsonl.open(encoding="utf-8") as fh:
             latest: dict[str, Any] | None = None
@@ -1073,7 +1062,7 @@ def _read_structured_output_tool_input(messages_jsonl: Path) -> dict[str, Any] |
                         continue
                     if block.get("type") != "tool_use":
                         continue
-                    if not _is_structured_output_tool_name(block.get("name")):
+                    if block.get("name") != _CLAUDE_STRUCTURED_OUTPUT_TOOL_NAME:
                         continue
                     tool_input = block.get("input")
                     if _looks_like_flat_spec_payload(tool_input):
@@ -1100,16 +1089,48 @@ def _read_last_success_result_text(messages_jsonl: Path) -> str | None:
                     continue
                 if record.get("type") != "result" or record.get("subtype") != "success":
                     continue
-                structured_output = record.get("structured_output")
-                if structured_output is not None:
-                    last_result = json.dumps(structured_output)
-                    continue
                 result = record.get("result")
                 if isinstance(result, str) and result.strip():
                     last_result = result
             return last_result
     except OSError:
         return None
+
+
+def _read_last_success_structured_output(messages_jsonl: Path) -> dict[str, Any] | None:
+    """Return the latest typed structured output from a successful result record."""
+    try:
+        with messages_jsonl.open(encoding="utf-8") as fh:
+            latest: dict[str, Any] | None = None
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if record.get("type") != "result" or record.get("subtype") != "success":
+                    continue
+                payload = _structured_flat_spec_payload(record.get("structured_output"))
+                if payload is not None:
+                    latest = payload
+            return latest
+    except OSError:
+        return None
+
+
+def _structured_flat_spec_payload(value: Any) -> dict[str, Any] | None:
+    return _as_dict(value) if _looks_like_flat_spec_payload(value) else None
+
+
+def _provider_uses_claude_structured_tool(provider: Any) -> bool:
+    name = str(provider or "").strip().casefold()
+    if not name:
+        return True
+    return name.startswith("claude") or name.startswith("anthropic")
 
 
 def _extract_first_json_object(text: str) -> str:

@@ -1420,7 +1420,7 @@ def test_run_build_ignores_otto_runtime_paths_in_scope_warnings(tmp_path: Path) 
 
 
 def test_run_build_warns_on_dep_owned_extension(tmp_path: Path) -> None:
-    """Downstream edits to dep-owned files pass but are surfaced."""
+    """Downstream edits to dep-owned files are in scope through dependencies."""
     _init_git(tmp_path)
     session_dir = tmp_path / "_session"
     session_dir.mkdir()
@@ -1464,11 +1464,10 @@ def test_run_build_warns_on_dep_owned_extension(tmp_path: Path) -> None:
     )
 
     by_id = {r.group_id: r for r in result.group_results}
-    assert by_id["task_lifecycle"].status == GroupStatus.FAILED_SCOPE
-    assert "todo.py" in by_id["task_lifecycle"].scope_warnings
+    assert by_id["task_lifecycle"].status == GroupStatus.PASSING
+    assert by_id["task_lifecycle"].scope_warnings == []
     journal = (session_dir / "spec-state.jsonl").read_text(encoding="utf-8")
-    assert '"kind": "scope.warning"' in journal
-    assert "todo.py" in journal
+    assert '"kind": "scope.warning"' not in journal
 
 
 # ---------------------------------------------------------------------------
