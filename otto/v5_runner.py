@@ -44,7 +44,6 @@ from otto import paths as _paths
 from otto.lead import LeadKind, LeadResult, run_lead
 from otto.safe_slug import safe_slug
 from otto.v5_preflight import (
-    check_scaffold_compiles,
     filter_blocked_descendants,
     run_preflight,
     smoke_clean_deploy,
@@ -57,7 +56,14 @@ from otto.v5_preflight_repair import (
     RepairPacket,
     run_oracle_repair_agent,
 )
-from otto.v5_clean_verify import build_clean_verify_oracle_command
+from otto.v5_clean_verify import (
+    CleanOracleIssue,
+    CleanOracleResult,
+    CleanOracleStepResult,
+    Scope,
+    build_clean_verify_oracle_command,
+    verify_from_clean_oracle,
+)
 from otto.queue.subtask import (
     read_pending,
     take_ready,
@@ -89,7 +95,6 @@ ROOT_TASK_ID = "root"
 # prepended to its intent. This is the cap on those retries (architect
 # is allowed 1 original attempt + ``MAX_ARCHITECT_RETRIES`` re-runs).
 MAX_ARCHITECT_RETRIES = 2
-MAX_CHILD_VERIFY_REPAIR_RETRIES = 1
 
 
 class _DispatchLease:
@@ -450,6 +455,205 @@ def _git_diff_stat(project_dir: Path) -> str:
     return proc.stdout.strip()
 
 
+def _git_capture(
+    worktree: Path,
+    args: list[str],
+    *,
+    timeout: int = 10,
+) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or "").strip()
+
+
+def _git_diff_name_only(worktree: Path) -> list[str]:
+    paths = [
+        line.strip()
+        for line in _git_capture(worktree, ["diff", "--name-only"]).splitlines()
+        if line.strip()
+    ]
+    for line in _git_status_short(worktree).splitlines():
+        raw = line[3:] if len(line) > 3 else ""
+        if " -> " in raw:
+            raw = raw.split(" -> ", 1)[1]
+        rel = raw.strip().strip('"')
+        if rel:
+            paths.append(rel)
+    return sorted(dict.fromkeys(paths))
+
+
+def _git_diff_full(worktree: Path, *, max_chars: int = 60000) -> str:
+    text = _git_capture(worktree, ["diff", "--", "."], timeout=20)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n... <truncated>"
+
+
+def _git_diff_stat_for_ref_range(
+    worktree: Path,
+    base_ref: str,
+    head_ref: str,
+) -> str:
+    if not base_ref or not head_ref:
+        return ""
+    return _git_capture(worktree, ["diff", "--stat", f"{base_ref}..{head_ref}"], timeout=20)
+
+
+def _read_text_artifact(path: Path, *, max_chars: int = 60000) -> dict[str, Any]:
+    payload: dict[str, Any] = {"path": str(path), "exists": path.exists()}
+    if not path.exists() or not path.is_file():
+        return payload
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        payload["error"] = f"{type(exc).__name__}: {exc}"
+        return payload
+    payload["text"] = text[:max_chars]
+    payload["truncated"] = len(text) > max_chars
+    return payload
+
+
+def _read_json_artifact(path: Path, *, max_chars: int = 120000) -> dict[str, Any]:
+    payload = _read_text_artifact(path, max_chars=max_chars)
+    text = payload.get("text")
+    if not isinstance(text, str):
+        return payload
+    try:
+        payload["json"] = json.loads(text)
+    except json.JSONDecodeError as exc:
+        payload["json_error"] = f"{type(exc).__name__}: {exc}"
+    return payload
+
+
+def _repair_budget_from_config(
+    config: dict[str, Any],
+    *,
+    prefix: str,
+    default_agent_turns: int,
+    default_oracle_invocations: int,
+    default_wall_clock_s: float = 1800.0,
+) -> RepairBudget:
+    def number(key: str, default: float | None) -> float | None:
+        raw = config.get(f"{prefix}_{key}", config.get(f"repair_{key}", default))
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        return default
+
+    def integer(key: str, default: int | None) -> int | None:
+        raw = config.get(f"{prefix}_{key}", config.get(f"repair_{key}", default))
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str) and raw.strip().isdigit():
+            return int(raw)
+        return default
+
+    return RepairBudget(
+        wall_clock_s=float(number("wall_clock_s", default_wall_clock_s) or default_wall_clock_s),
+        cost_usd=number("cost_usd", None),
+        agent_turns=max(0, int(integer("agent_turns", default_agent_turns) or 0)),
+        oracle_invocations=max(
+            0,
+            int(integer("oracle_invocations", default_oracle_invocations) or 0),
+        ),
+        idle_s=number("idle_s", None),
+        diff_churn=integer("diff_churn", None),
+        closeout_agent_turns=max(0, int(integer("closeout_agent_turns", 0) or 0)),
+        provider_max_turns=integer(
+            "provider_max_turns",
+            int(config.get("max_turns_per_call") or 1),
+        ),
+    )
+
+
+def _packet_attempt_history(packet_path: Path) -> list[dict[str, Any]]:
+    if not packet_path.exists():
+        return []
+    try:
+        packet = RepairPacket.load(packet_path)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return []
+    history = list(packet.attempt_history)
+    events = packet.events()
+    if events:
+        history.append({
+            "type": "prior_packet_events",
+            "event_count": len(events),
+            "events_tail": events[-20:],
+        })
+    return history
+
+
+def _make_initial_oracle_payload(
+    *,
+    worktree: Path,
+    scope: Scope,
+    oracle_command: Any,
+    issue_kind: str,
+    issue_message: str,
+    step_id: str,
+    paths: list[str] | None = None,
+) -> dict[str, Any]:
+    step = CleanOracleStepResult(
+        id=step_id,
+        status="failed",
+        return_code=1,
+        command_identity=getattr(oracle_command, "command_identity", "clean-verify"),
+        command=list(getattr(oracle_command, "command", []) or []),
+        cwd=str(worktree),
+        env=dict(getattr(oracle_command, "env", {}) or {}),
+        reason=issue_message,
+    )
+    issue = CleanOracleIssue(
+        kind=issue_kind,
+        severity="block",
+        message=issue_message,
+        step_id=step_id,
+        paths=list(paths or []),
+        command_identity=step.command_identity,
+        return_code=1,
+    )
+    result = CleanOracleResult.from_parts(
+        passed=False,
+        scope=scope,
+        issues=[issue],
+        steps=[step],
+        artifact_path_refs=[],
+        command=step.command,
+        env=step.env,
+        project_dir=worktree,
+        temp_dir=None,
+    )
+    return result.to_jsonable()
+
+
+def _worktree_product_contract(
+    *,
+    worktree: Path,
+    spec_path: Path | None = None,
+) -> dict[str, Any]:
+    contract: dict[str, Any] = {
+        "worktree": str(worktree),
+        "config": _read_json_artifact(worktree / "otto.yaml"),
+        "charter": _read_text_artifact(worktree / "CHARTER.md"),
+    }
+    if spec_path is not None:
+        contract["spec"] = _read_json_artifact(spec_path)
+    else:
+        contract["spec"] = _read_json_artifact(worktree / "spec.json")
+    return contract
+
+
 async def _checkout_v5_branch_clean_with_repair(
     *,
     project_dir: Path,
@@ -781,28 +985,179 @@ def _block_child_before_upward_merge(
     return result
 
 
-def _child_verify_repair_intent(
+async def _run_child_verify_repair_packet(
     *,
+    project_dir: Path,
+    child_task_id: str,
+    child_worktree: Path,
+    child_session_dir: Path,
+    parent_integration_branch: str,
     original_intent: str,
     result: LeadResult,
-) -> str:
-    verify_result = result.verify_result if isinstance(result.verify_result, dict) else {}
-    return (
-        "VERIFY/REPAIR BEFORE MERGE.\n\n"
-        "The previous child result was not mergeable. Otto only merges a child "
-        "upward after `pass` or an explicitly recorded reviewed partial. Raw "
-        "`partial` and `unverified` must be repaired or honestly blocked.\n\n"
-        f"Previous verdict: {result.verdict}\n"
-        "Previous verdict payload:\n"
-        f"{json.dumps(verify_result, indent=2, sort_keys=True, default=str)}\n\n"
-        "Repair the child worktree if needed, run the relevant smoke/verify "
-        "oracle, then write a canonical verdict.json. Use `pass` only with "
-        "evidence. If the correct outcome is an explicitly reviewed partial, "
-        "write `verdict: partial` plus `review_state: reviewed_partial` and a "
-        "`reviewed_partial_reason`.\n\n"
-        "Original child intent:\n"
-        f"{original_intent}"
+    config: dict[str, Any],
+    max_parallel: int,
+    run_started_at: float | None,
+    spec_path: Path,
+    on_event: Any = None,
+) -> Any:
+    del max_parallel, run_started_at
+    repair_slug = safe_slug(f"{child_task_id}-child-verify", max_len=64)
+    packet_dir = child_session_dir / "repair" / repair_slug
+    packet_path = packet_dir / "repair_packet.json"
+    packet_dir.mkdir(parents=True, exist_ok=True)
+    link_path = packet_dir / "worktree"
+    if not link_path.exists():
+        try:
+            link_path.symlink_to(child_worktree)
+        except OSError as exc:
+            logger.warning("could not symlink child repair worktree: %s", exc)
+
+    oracle_command = build_clean_verify_oracle_command(
+        worktree_path=child_worktree,
+        verify_scope="subtree",
+        repair_packet_path=packet_path,
     )
+    verify_result = result.verify_result if isinstance(result.verify_result, dict) else {}
+    diff_name_only = _git_diff_name_only(child_worktree)
+    attempt_history = _packet_attempt_history(packet_path)
+    attempt_history.append({
+        "type": "pre_repair_verdict",
+        "verdict": result.verdict,
+        "verify_result": verify_result,
+        "diff_stat": _git_diff_stat(child_worktree),
+        "diff_name_only": diff_name_only,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    packet = RepairPacket(
+        repair_unit={
+            "id": repair_slug,
+            "worktree": str(child_worktree),
+            "branch": _git_capture(child_worktree, ["branch", "--show-current"]),
+            "task_id": child_task_id,
+            "phase": "child_verify",
+            "repair_phase": "child_verify",
+            "allowed_paths": list((get_task(project_dir, child_task_id) or {}).get("owned_paths") or []),
+            "scope_policy": (
+                "allowed_paths"
+                if (get_task(project_dir, child_task_id) or {}).get("owned_paths")
+                else "unrestricted"
+            ),
+            "canonical_verdict_path": str(child_session_dir / "verdict.json"),
+        },
+        acceptance_oracle={
+            "verify_scope": "subtree",
+            "command": oracle_command.command,
+            "env": oracle_command.env,
+            "timeout_s": int(config.get("child_verify_repair_oracle_timeout_s") or 300),
+            "expected_artifact_paths": [str(child_session_dir / "verdict.json")],
+            "success_criteria": {
+                "clean_deploy": True,
+                "composite_gate": True,
+                "child_merge_gate": "pass_or_reviewed_partial",
+                "no_uncommitted_state": True,
+                "no_conflict_markers": True,
+            },
+        },
+        latest_oracle_result=_make_initial_oracle_payload(
+            worktree=child_worktree,
+            scope="subtree",
+            oracle_command=oracle_command,
+            issue_kind="child_verdict_not_mergeable",
+            issue_message=(
+                "Child verdict is not mergeable; expected pass or an explicit "
+                "reviewed_partial before upward merge"
+            ),
+            step_id="child_merge_gate",
+            paths=diff_name_only,
+        ),
+        product_contract={
+            **_worktree_product_contract(worktree=child_worktree, spec_path=spec_path),
+            "original_intent": original_intent,
+        },
+        integration_context={
+            "parent_integration_branch": parent_integration_branch,
+            "child_task": get_task(project_dir, child_task_id) or {},
+            "child_verdict": {
+                "verdict": result.verdict,
+                "verify_called": result.verify_called,
+                "verify_result": verify_result,
+                "failure_reason": result.failure_reason,
+            },
+            "child_diff": {
+                "stat": _git_diff_stat(child_worktree),
+                "name_only": diff_name_only,
+                "patch": _git_diff_full(child_worktree),
+            },
+            "decomposition_runtime_context": {
+                "spec_path": str(spec_path),
+                "session_dir": str(child_session_dir),
+            },
+        },
+        attempt_history=attempt_history,
+        current_state={
+            "git_status": _git_status_short(child_worktree),
+            "head": _git_capture(child_worktree, ["rev-parse", "HEAD"]),
+            "branch": _git_capture(child_worktree, ["branch", "--show-current"]),
+        },
+        budget=_repair_budget_from_config(
+            config,
+            prefix="child_verify_repair",
+            default_agent_turns=1,
+            default_oracle_invocations=3,
+        ),
+        packet_dir=packet_dir,
+    )
+    packet.capture_scope_baseline()
+    _emit(on_event, {
+        "event": "child_verify_repair_start",
+        "task_id": child_task_id,
+        "previous_verdict": result.verdict,
+        "repair_packet": str(packet.packet_path),
+    })
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
+        from otto.v5_branching import commit_worktree
+
+        return commit_worktree(
+            worktree_path=child_worktree,
+            message=f"v5 child verify repair: {child_task_id}",
+        )
+
+    return await run_oracle_repair_agent(
+        packet,
+        config=config,
+        commit_hook=commit_hook,
+    )
+
+
+def _refresh_child_result_from_verdict_file(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    child_session_dir: Path,
+    result: LeadResult,
+    repair: Any,
+) -> LeadResult:
+    from otto.lead import _read_agent_verdict
+
+    verify_called, payload = _read_agent_verdict(child_session_dir)
+    if not verify_called or not isinstance(payload, dict):
+        return result
+    verdict = str(payload.get("verdict") or "unverified")
+    if verdict not in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}:
+        verdict = "unverified"
+    result.verify_called = True
+    result.verify_result = payload
+    result.verify_result["repair_packet"] = repair.packet_path
+    result.verdict = cast(Any, verdict)
+    if verdict in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}:
+        set_verdict(
+            project_dir,
+            child_task_id,
+            cast(Any, verdict),
+            cost_usd=result.cost_usd,
+        )
+    return result
 
 
 async def _ensure_child_merge_ready(
@@ -828,83 +1183,60 @@ async def _ensure_child_merge_ready(
 
     current = result
     original_cost = result.cost_usd
-    for attempt in range(1, MAX_CHILD_VERIFY_REPAIR_RETRIES + 1):
-        repair_session_dir = child_session_dir / "verify-repair" / f"attempt-{attempt:02d}"
-        repair_session_dir.mkdir(parents=True, exist_ok=True)
-        link_path = repair_session_dir / "worktree"
-        if not link_path.exists():
-            try:
-                link_path.symlink_to(child_worktree)
-            except OSError as exc:
-                logger.warning("could not symlink child repair worktree: %s", exc)
-        _emit(on_event, {
-            "event": "child_verify_repair_start",
-            "task_id": child_task_id,
-            "attempt": attempt,
-            "previous_verdict": current.verdict,
-            "session_dir": str(repair_session_dir),
-        })
-        repaired = await _run_lead_with_fallback(
-            task_id=child_task_id,
-            intent=_child_verify_repair_intent(
-                original_intent=original_intent,
-                result=current,
-            ),
-            project_dir=project_dir,
-            session_dir=repair_session_dir,
-            integration_branch=parent_integration_branch,
-            config=config,
-            kind="plan_or_inline",
-            context_slice_note=(
-                "This is a focused verify/repair pass for the same child worktree. "
-                "Do not expand product scope."
-            ),
-            decomp_runtime_context=_build_decomp_runtime_context(
-                project_dir=project_dir,
-                config=config,
-                max_parallel=max_parallel,
-                run_started_at=run_started_at,
-                spec_path=spec_path,
-            ),
-            on_event=on_event,
-        )
-        repaired.cost_usd += original_cost
-        current = repaired
-        _record_reviewed_partial_if_present(project_dir, child_task_id, current)
-        _emit(on_event, {
-            "event": "child_verify_repair_done",
-            "task_id": child_task_id,
-            "attempt": attempt,
-            "verdict": current.verdict,
-        })
-        if not _child_result_allows_upward_merge(project_dir, child_task_id, current):
-            continue
 
-        oracle = await _run_integration_smoke_preflight_with_repair(
+    repair = await _run_child_verify_repair_packet(
+        project_dir=project_dir,
+        child_task_id=child_task_id,
+        child_worktree=child_worktree,
+        child_session_dir=child_session_dir,
+        parent_integration_branch=parent_integration_branch,
+        original_intent=original_intent,
+        result=current,
+        config=config,
+        max_parallel=max_parallel,
+        run_started_at=run_started_at,
+        spec_path=spec_path,
+        on_event=on_event,
+    )
+    current.cost_usd = original_cost + repair.cost_usd
+    if current.verify_result is None:
+        current.verify_result = {}
+    if isinstance(current.verify_result, dict):
+        current.verify_result["child_verify_repair"] = {
+            "verdict": repair.verdict,
+            "summary": repair.summary,
+            "repair_packet": repair.packet_path,
+            "composite_gate": repair.composite_gate,
+            "escalation": repair.escalation,
+        }
+        current.verify_result["repair_packet"] = repair.packet_path
+    if repair.verdict != "pass":
+        return _block_child_before_upward_merge(
             project_dir=project_dir,
-            worktree_path=child_worktree,
-            task_id=child_task_id,
-            phase=f"child_verify_repair_{attempt:02d}",
-            session_dir=repair_session_dir,
-            config=config,
-            integration_branch=parent_integration_branch,
+            child_task_id=child_task_id,
+            result=current,
+            reason=(
+                "Child verify/repair oracle did not pass: "
+                f"{repair.summary}"
+            ),
             on_event=on_event,
         )
-        if current.verify_result is None:
-            current.verify_result = {}
-        if isinstance(current.verify_result, dict):
-            current.verify_result["child_merge_oracle"] = oracle
-        if _preflight_repair_escalated(oracle) or _integration_smoke_blocks(oracle):
-            return _block_child_before_upward_merge(
-                project_dir=project_dir,
-                child_task_id=child_task_id,
-                result=current,
-                reason=_preflight_blocking_summary(
-                    "Child verify/repair smoke oracle failed",
-                    oracle,
-                ),
-                on_event=on_event,
-            )
+
+    current = _refresh_child_result_from_verdict_file(
+        project_dir=project_dir,
+        child_task_id=child_task_id,
+        child_session_dir=child_session_dir,
+        result=current,
+        repair=repair,
+    )
+    _record_reviewed_partial_if_present(project_dir, child_task_id, current)
+    _emit(on_event, {
+        "event": "child_verify_repair_done",
+        "task_id": child_task_id,
+        "verdict": current.verdict,
+        "repair_packet": repair.packet_path,
+    })
+    if _child_result_allows_upward_merge(project_dir, child_task_id, current):
         return current
 
     return _block_child_before_upward_merge(
@@ -912,8 +1244,9 @@ async def _ensure_child_merge_ready(
         child_task_id=child_task_id,
         result=current,
         reason=(
-            "Child remained "
-            f"{current.verdict!r} after verify/repair; refusing upward merge"
+            "Child verify/repair passed its oracle but did not produce "
+            "a mergeable child verdict (pass or reviewed_partial); "
+            f"current verdict is {current.verdict!r}"
         ),
         on_event=on_event,
     )
@@ -1265,6 +1598,172 @@ async def run_v5_pipeline(
     return result
 
 
+_CONTRACT_STRUCTURAL_INVALID_KINDS = {
+    "contract_structural_invalid",
+    "contract_contradiction",
+    "product_contract_contradiction",
+    "ia_contract_invalid",
+    "structured_contract_invalid",
+}
+
+
+def _scaffold_oracle_contract_structurally_invalid(result: CleanOracleResult) -> bool:
+    for issue in result.issues:
+        kind = issue.kind.lower()
+        message = issue.message.lower()
+        if kind in _CONTRACT_STRUCTURAL_INVALID_KINDS:
+            return True
+        if kind.startswith("contract_") and (
+            "contradict" in kind
+            or "invalid" in kind
+            or "contradict" in message
+            or "structural" in message
+        ):
+            return True
+    return False
+
+
+def _emit_scaffold_oracle_issues(
+    *,
+    result: CleanOracleResult,
+    architect_tid: str,
+    retry_count: int,
+    preflight_seen: set[str],
+    on_event: Any = None,
+) -> list[str]:
+    blocking_messages: list[str] = []
+    for issue in result.issues:
+        key = f"{issue.kind}:scaffold:{architect_tid}:{retry_count}"
+        if key in preflight_seen:
+            continue
+        preflight_seen.add(key)
+        severity = issue.severity
+        log_fn = logger.error if severity in ("error", "block") else logger.warning
+        log_fn("preflight %s [%s]: %s", issue.kind, severity, issue.message)
+        _emit(on_event, {
+            "event": "preflight_issue",
+            "kind": issue.kind,
+            "severity": severity,
+            "message": issue.message,
+            "task_id": architect_tid,
+        })
+        if severity == "block":
+            blocking_messages.append(f"[{issue.kind}] {issue.message}")
+    if not result.issues and not result.passed:
+        blocking_messages.append("[scaffold_oracle_failed] scaffold oracle failed without issues")
+    return blocking_messages
+
+
+async def _run_scaffold_repair_packet(
+    *,
+    project_dir: Path,
+    architect_tid: str,
+    architect_task: dict[str, Any],
+    latest_result: CleanOracleResult,
+    config: dict[str, Any],
+    on_event: Any = None,
+) -> Any:
+    repair_slug = safe_slug(f"{architect_tid}-scaffold", max_len=64)
+    packet_dir = _paths.cross_sessions_dir(project_dir) / "repair" / repair_slug
+    packet_path = packet_dir / "repair_packet.json"
+    oracle_command = build_clean_verify_oracle_command(
+        worktree_path=project_dir,
+        verify_scope="scaffold",
+        repair_packet_path=packet_path,
+    )
+    attempt_history = _packet_attempt_history(packet_path)
+    attempt_history.append({
+        "type": "scaffold_oracle_failure",
+        "oracle_result": latest_result.to_jsonable(),
+        "diff_stat": _git_diff_stat(project_dir),
+        "diff_name_only": _git_diff_name_only(project_dir),
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    owned_paths = [str(path) for path in (architect_task.get("owned_paths") or [])]
+    packet = RepairPacket(
+        repair_unit={
+            "id": repair_slug,
+            "worktree": str(project_dir),
+            "branch": _git_capture(project_dir, ["branch", "--show-current"]),
+            "task_id": architect_tid,
+            "phase": "scaffold",
+            "repair_phase": "scaffold",
+            "allowed_paths": owned_paths,
+            "scope_policy": "allowed_paths" if owned_paths else "unrestricted",
+        },
+        acceptance_oracle={
+            "verify_scope": "scaffold",
+            "command": oracle_command.command,
+            "env": oracle_command.env,
+            "timeout_s": int(config.get("scaffold_repair_oracle_timeout_s") or 300),
+            "expected_artifact_paths": [],
+            "success_criteria": {
+                "clean_deploy": True,
+                "scaffold_scope": True,
+                "composite_gate": True,
+                "no_uncommitted_state": True,
+                "no_conflict_markers": True,
+            },
+        },
+        latest_oracle_result=latest_result.to_jsonable(),
+        product_contract={
+            **_worktree_product_contract(worktree=project_dir),
+            "architect_task": architect_task,
+        },
+        integration_context={
+            "architect_task_id": architect_tid,
+            "architect_task": architect_task,
+            "scaffold_oracle": latest_result.to_jsonable(),
+            "current_diff": {
+                "stat": _git_diff_stat(project_dir),
+                "name_only": _git_diff_name_only(project_dir),
+                "patch": _git_diff_full(project_dir),
+            },
+        },
+        attempt_history=attempt_history,
+        current_state={
+            "git_status": _git_status_short(project_dir),
+            "head": _git_capture(project_dir, ["rev-parse", "HEAD"]),
+            "branch": _git_capture(project_dir, ["branch", "--show-current"]),
+        },
+        budget=_repair_budget_from_config(
+            config,
+            prefix="scaffold_repair",
+            default_agent_turns=1,
+            default_oracle_invocations=3,
+        ),
+        packet_dir=packet_dir,
+    )
+    packet.capture_scope_baseline()
+    _emit(on_event, {
+        "event": "scaffold_repair_start",
+        "task_id": architect_tid,
+        "repair_packet": str(packet.packet_path),
+    })
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
+        from otto.v5_branching import commit_integration_worktree
+
+        return commit_integration_worktree(
+            worktree_path=project_dir,
+            task_id=f"{architect_tid}-scaffold-repair",
+        )
+
+    repair = await run_oracle_repair_agent(
+        packet,
+        config=config,
+        commit_hook=commit_hook,
+    )
+    _emit(on_event, {
+        "event": "scaffold_repair_done",
+        "task_id": architect_tid,
+        "verdict": repair.verdict,
+        "summary": repair.summary,
+        "repair_packet": repair.packet_path,
+    })
+    return repair
+
+
 async def _process_children(
     *,
     project_dir: Path,
@@ -1366,44 +1865,33 @@ async def _process_children(
             if preflight_key in architect_preflight_done:
                 continue
             architect_preflight_done.add(preflight_key)
-            logger.info("preflight: running scaffold compile check after architect-pass (task=%s)", architect_tid)
-            compile_issues = check_scaffold_compiles(
-                project_dir, architect_task_id=architect_tid
+            logger.info("preflight: running scaffold clean oracle after architect-pass (task=%s)", architect_tid)
+            scaffold_result = verify_from_clean_oracle(project_dir, scope="scaffold")
+            blocking_messages = _emit_scaffold_oracle_issues(
+                result=scaffold_result,
+                architect_tid=architect_tid,
+                retry_count=retry_count,
+                preflight_seen=preflight_seen,
+                on_event=on_event,
             )
-            blocking_messages: list[str] = []
-            for issue in compile_issues:
-                key = f"{issue.kind}:scaffold:{architect_tid}:{retry_count}"
-                if key in preflight_seen:
-                    continue
-                preflight_seen.add(key)
-                log_fn = logger.error if issue.severity in ("error", "block") else logger.warning
-                log_fn("preflight %s [%s]: %s", issue.kind, issue.severity, issue.message)
-                _emit(on_event, {
-                    "event": "preflight_issue",
-                    "kind": issue.kind,
-                    "severity": issue.severity,
-                    "message": issue.message,
-                })
-                if issue.severity == "block":
-                    blocking_messages.append(f"[{issue.kind}] {issue.message}")
 
-            # Architect retry on blocking compile failure: scaffold
-            # doesn't actually compile from a clean state. The
-            # architect declared pass based on its in-session state
-            # (where node_modules was populated). Invalidate the
-            # verdict, surface the failure, and re-dispatch.
-            if blocking_messages:
+            # Only a typed structural contract contradiction re-enters the
+            # architect. Ordinary scaffold oracle failures are repaired as a
+            # scaffold repair unit with the full packet and composite gate.
+            if (
+                blocking_messages
+                and _scaffold_oracle_contract_structurally_invalid(scaffold_result)
+            ):
                 current_retries = get_retry_count(project_dir, architect_tid)
                 if current_retries < MAX_ARCHITECT_RETRIES:
                     reason = (
-                        "Clean-state preflight failed for your scaffold. "
-                        "The runner copied your output to a temp dir, ran "
-                        "`script_valid`, `npm ci`, `npm run build`, and `py_compile`, and got "
-                        "these errors:\n\n"
+                        "The scaffold oracle found a structured product-contract "
+                        "contradiction. Re-enter the architect because the contract "
+                        "itself must be corrected before code repair can be scoped "
+                        "safely:\n\n"
                         + "\n".join(f"  - {m}" for m in blocking_messages)
-                        + "\n\nFix the underlying bug — don't lean on in-session "
-                        "state (your existing node_modules, venv) that won't "
-                        "survive handoff. Re-emit your scaffold."
+                        + "\n\nFix the contract/scaffold contradiction, then "
+                        "re-emit the scaffold."
                     )
                     new_count = clear_verdict_for_retry(
                         project_dir, architect_tid, reason
@@ -1441,6 +1929,46 @@ async def _process_children(
                     "retry_count": current_retries,
                 })
                 continue
+
+            if blocking_messages:
+                repair = await _run_scaffold_repair_packet(
+                    project_dir=project_dir,
+                    architect_tid=architect_tid,
+                    architect_task=architect_task,
+                    latest_result=scaffold_result,
+                    config=config,
+                    on_event=on_event,
+                )
+                if repair.verdict != "pass":
+                    reason = (
+                        "Scaffold oracle repair did not pass: "
+                        f"{repair.summary}"
+                    )
+                    logger.error("architect %s scaffold repair blocked: %s", architect_tid, reason)
+                    set_verdict(project_dir, architect_tid, "merge_blocked")
+                    update_task_metadata(
+                        project_dir,
+                        architect_tid,
+                        failure_reason=reason,
+                        merge_blocked_origin="scaffold",
+                        merge_blocked_reason=reason,
+                        scaffold_repair_packet=repair.packet_path,
+                        scaffold_repair_escalation=repair.escalation,
+                    )
+                    child_results.pop(architect_tid, None)
+                    _emit(on_event, {
+                        "event": "architect_scaffold_repair_blocked",
+                        "task_id": architect_tid,
+                        "reason": reason,
+                        "repair_packet": repair.packet_path,
+                    })
+                    continue
+                update_task_metadata(
+                    project_dir,
+                    architect_tid,
+                    scaffold_repair_packet=repair.packet_path,
+                    scaffold_repair_summary=repair.summary,
+                )
 
             # Architect passed AND scaffold preflight is clean.
             # Run shared toolchain preflight in the architect
@@ -2112,61 +2640,155 @@ async def _repair_child_merge_conflict_once(
     original_detail: str,
     on_event: Any = None,
 ) -> tuple[bool, str]:
-    packet = _read_latest_conflict_packet(project_dir)
-    paths = tuple(str(path) for path in (packet.get("unmerged_paths") or ()) if str(path))
-    packet_path = ""
+    conflict_packet = _read_latest_conflict_packet(project_dir)
+    paths = [str(path) for path in (conflict_packet.get("unmerged_paths") or ()) if str(path)]
+    conflict_packet_path = ""
     try:
         from otto.v5_branching import latest_conflict_packet_path
 
-        packet_path = str(latest_conflict_packet_path(project_dir))
+        conflict_packet_path = str(latest_conflict_packet_path(project_dir))
     except Exception:  # noqa: BLE001
-        packet_path = ""
-    instruction = (
-        "Resolve this merge conflict on the source child branch, not by editing "
-        "the parent integration target. Read the conflict packet, analyze base, "
-        "ours, and theirs for every unmerged path, and preserve both sides' "
-        "product behavior. Never blindly run whole-file checkout --ours or "
-        "--theirs. After your edit, the runner will retry the merge and run the "
-        "smoke oracle.\n\n"
-        f"Conflict packet: {packet_path or '(missing)'}\n"
-        f"Original merge detail: {original_detail}"
-    )
-    request = AgentRepairRequest(
-        failure_kind="merge_conflict",
-        issue={
-            "kind": "merge_conflict",
-            "severity": "block",
-            "message": original_detail,
-            "conflict_packet": packet_path,
-            "unmerged_paths": list(paths),
-        },
+        conflict_packet_path = ""
+    repair_slug = safe_slug(f"{child_task_id}-merge-conflict", max_len=64)
+    packet_dir = child_session_dir / "repair" / repair_slug
+    packet_path = packet_dir / "repair_packet.json"
+    oracle_command = build_clean_verify_oracle_command(
         worktree_path=child_worktree,
-        session_dir=child_session_dir,
-        attempt_index=1,
-        workspace_paths=paths,
-        instruction=instruction,
+        verify_scope="subtree",
+        repair_packet_path=packet_path,
     )
+    source_branch = str(conflict_packet.get("source_branch") or "")
+    target_branch = str(conflict_packet.get("target_branch") or parent_integration_branch)
+    if not source_branch:
+        from otto.v5_branching import child_branch_name
+
+        source_branch = child_branch_name(child_task_id)
+    base_ref = _git_capture(project_dir, ["merge-base", target_branch, source_branch])
+    attempt_history = _packet_attempt_history(packet_path)
+    attempt_history.append({
+        "type": "merge_conflict_detected",
+        "detail": original_detail,
+        "conflict_packet": conflict_packet_path,
+        "unmerged_paths": paths,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    packet = RepairPacket(
+        repair_unit={
+            "id": repair_slug,
+            "worktree": str(child_worktree),
+            "branch": _git_capture(child_worktree, ["branch", "--show-current"]),
+            "task_id": child_task_id,
+            "phase": "merge",
+            "repair_phase": "merge",
+            "allowed_paths": paths,
+            "scope_policy": "allowed_paths" if paths else "unrestricted",
+        },
+        acceptance_oracle={
+            "verify_scope": "subtree",
+            "command": oracle_command.command,
+            "env": oracle_command.env,
+            "timeout_s": int(config.get("merge_repair_oracle_timeout_s") or 300),
+            "expected_artifact_paths": [conflict_packet_path] if conflict_packet_path else [],
+            "success_criteria": {
+                "clean_deploy": True,
+                "composite_gate": True,
+                "merge_retry": True,
+                "three_way_conflicts_resolved": True,
+                "no_whole_side_checkout": True,
+            },
+        },
+        latest_oracle_result=_make_initial_oracle_payload(
+            worktree=child_worktree,
+            scope="subtree",
+            oracle_command=oracle_command,
+            issue_kind="merge_conflict",
+            issue_message=original_detail,
+            step_id="merge_retry",
+            paths=paths,
+        ),
+        product_contract={
+            **_worktree_product_contract(worktree=child_worktree),
+            "contract_deltas": {
+                "target_to_source_diff_stat": _git_diff_stat_for_ref_range(
+                    project_dir,
+                    target_branch,
+                    source_branch,
+                ),
+                "source_to_target_diff_stat": _git_diff_stat_for_ref_range(
+                    project_dir,
+                    source_branch,
+                    target_branch,
+                ),
+            },
+        },
+        integration_context={
+            "parent_integration_branch": parent_integration_branch,
+            "original_detail": original_detail,
+            "conflict_packet_path": conflict_packet_path,
+            "conflict_packet": conflict_packet,
+            "merge_refs": {
+                "base_ref": base_ref,
+                "ours_ref": target_branch,
+                "theirs_ref": source_branch,
+            },
+            "merge_safety": {
+                "resolve_on_source_child_branch": True,
+                "analyze_base_ours_theirs_per_path": True,
+                "forbid_whole_side_checkout": True,
+                "forbidden_commands": [
+                    "git checkout --ours -- <whole-file>",
+                    "git checkout --theirs -- <whole-file>",
+                ],
+            },
+            "child_diff": {
+                "stat": _git_diff_stat_for_ref_range(project_dir, base_ref, source_branch),
+                "name_only": paths,
+            },
+        },
+        attempt_history=attempt_history,
+        current_state={
+            "git_status": _git_status_short(child_worktree),
+            "head": _git_capture(child_worktree, ["rev-parse", "HEAD"]),
+            "branch": _git_capture(child_worktree, ["branch", "--show-current"]),
+        },
+        budget=_repair_budget_from_config(
+            config,
+            prefix="merge_repair",
+            default_agent_turns=1,
+            default_oracle_invocations=3,
+        ),
+        packet_dir=packet_dir,
+    )
+    packet.capture_scope_baseline()
     _emit(on_event, {
         "event": "merge_conflict_repair_agent_start",
         "task_id": child_task_id,
         "paths": list(paths),
-        "conflict_packet": packet_path,
+        "conflict_packet": conflict_packet_path,
+        "repair_packet": str(packet.packet_path),
     })
-    repair = await _run_preflight_repair_agent(
-        request=request,
-        task_id=child_task_id,
-        project_dir=project_dir,
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
+        from otto.v5_branching import commit_worktree
+
+        return commit_worktree(
+            worktree_path=child_worktree,
+            message=f"v5 merge conflict repair: {child_task_id}",
+        )
+
+    repair = await run_oracle_repair_agent(
+        packet,
         config=config,
-        integration_branch=parent_integration_branch,
-        on_event=on_event,
+        commit_hook=commit_hook,
     )
     _emit(on_event, {
         "event": "merge_conflict_repair_agent_done",
         "task_id": child_task_id,
-        "ok": repair.ok,
+        "ok": repair.verdict == "pass",
         "summary": repair.summary,
+        "repair_packet": repair.packet_path,
     })
-    return repair.ok, repair.summary
+    return repair.verdict == "pass", repair.summary
 
 
 async def _run_lead_with_fallback(
