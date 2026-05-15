@@ -10,8 +10,9 @@ import pytest
 from otto.lead import LeadResult, _canonicalize_verdict_payload, run_lead
 from otto.queue.task_graph import get_task, read_graph, record_task, set_verdict
 from otto.spec_compile_flat import StructuredSpecValidationError, compile_flat_spec
-from otto.v5_clean_verify import CleanVerifyResult
+from otto.v5_clean_verify import CleanOracleIssue, CleanOracleResult, CleanOracleStepResult, Scope
 from otto.v5_preflight import check_scaffold_compiles, smoke_clean_deploy
+from otto.v5_preflight_repair import OracleRepairResult, RepairPacket
 from otto.v5_runner import _run_child
 
 
@@ -22,6 +23,44 @@ def _pass_verdict_payload() -> dict[str, Any]:
         "journeys": [{"id": "smoke", "passed": True, "detail": "ran smoke"}],
         "evidence": ["pytest tests/smoke -q"],
     }
+
+
+def _clean_oracle_result(
+    tmp_path: Path,
+    *,
+    passed: bool,
+    scope: Scope,
+    kind: str = "build_failed",
+    message: str = "failed",
+) -> CleanOracleResult:
+    step = CleanOracleStepResult(
+        id="check",
+        status="passed" if passed else "failed",
+        return_code=0 if passed else 1,
+        command_identity="python -m otto.cli clean-verify",
+        command=["python", "-m", "otto.cli", "clean-verify"],
+        cwd=str(tmp_path),
+        env={},
+    )
+    issue = CleanOracleIssue(
+        kind=kind,
+        severity="block",
+        message=message,
+        step_id=step.id,
+        command_identity=step.command_identity,
+        return_code=step.return_code,
+    )
+    return CleanOracleResult.from_parts(
+        passed=passed,
+        scope=scope,
+        issues=[] if passed else [issue],
+        steps=[step],
+        artifact_path_refs=[],
+        command=step.command,
+        env=step.env,
+        project_dir=tmp_path,
+        temp_dir=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -56,25 +95,14 @@ async def test_unverified_child_runs_verify_repair_before_merge(
 
     async def fake_run_lead(**kwargs: Any) -> LeadResult:
         lead_calls.append(kwargs)
-        if len(lead_calls) == 1:
-            set_verdict(project, task_id, "unverified", cost_usd=0.1)
-            return LeadResult(
-                task_id=task_id,
-                verdict="unverified",
-                cost_usd=0.1,
-                decomposition="inline",
-                verify_called=True,
-                verify_result={"verdict": "unverified", "summary": "no journey proof"},
-            )
-        (child_worktree / "fixed.txt").write_text("verified\n", encoding="utf-8")
-        set_verdict(project, task_id, "pass", cost_usd=0.2)
+        set_verdict(project, task_id, "unverified", cost_usd=0.1)
         return LeadResult(
             task_id=task_id,
-            verdict="pass",
-            cost_usd=0.2,
+            verdict="unverified",
+            cost_usd=0.1,
             decomposition="inline",
             verify_called=True,
-            verify_result=_pass_verdict_payload(),
+            verify_result={"verdict": "unverified", "summary": "no journey proof"},
         )
 
     def fake_merge_child_into_integration(
@@ -88,7 +116,27 @@ async def test_unverified_child_runs_verify_repair_before_merge(
         return True, "merged"
 
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", lambda *_a, **_k: [])
+    async def fake_smoke_preflight(**_kwargs: Any) -> dict[str, Any]:
+        return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
+
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight_with_repair", fake_smoke_preflight)
+    repair_packets: list[RepairPacket] = []
+
+    async def fake_oracle_repair_agent(packet: RepairPacket, **_kwargs: Any) -> OracleRepairResult:
+        repair_packets.append(packet)
+        (child_worktree / "fixed.txt").write_text("verified\n", encoding="utf-8")
+        verdict_path = Path(packet.repair_unit["canonical_verdict_path"])
+        verdict_path.parent.mkdir(parents=True, exist_ok=True)
+        verdict_path.write_text(json.dumps(_pass_verdict_payload()), encoding="utf-8")
+        return OracleRepairResult(
+            verdict="pass",
+            summary="child verify repair passed",
+            cost_usd=0.1,
+            packet_path=str(packet.packet_path),
+            composite_gate={"passed": True},
+        )
+
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
     monkeypatch.setattr(
         "otto.v5_branching.setup_child_worktree",
         lambda **_kwargs: child_worktree,
@@ -115,8 +163,9 @@ async def test_unverified_child_runs_verify_repair_before_merge(
     )
 
     assert result.verdict == "pass"
-    assert len(lead_calls) == 2
-    assert "VERIFY/REPAIR BEFORE MERGE" in lead_calls[1]["intent"]
+    assert len(lead_calls) == 1
+    assert len(repair_packets) == 1
+    assert repair_packets[0].repair_unit["phase"] == "child_verify"
     assert merge_calls == [task_id]
     assert (get_task(project, task_id) or {}).get("verdict") == "pass"
 
@@ -245,15 +294,16 @@ def test_scaffold_unknown_verify_kind_blocks_for_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_verify_from_clean(*_args: Any, **_kwargs: Any) -> CleanVerifyResult:
-        return CleanVerifyResult(
+    def fake_verify_from_clean(*_args: Any, **_kwargs: Any) -> CleanOracleResult:
+        return _clean_oracle_result(
+            tmp_path,
             passed=False,
             scope="scaffold",
-            failure_kind=cast(Any, "new_unknown_failure"),
-            failure_message="new provider failure shape",
+            kind=cast(Any, "new_unknown_failure"),
+            message="new provider failure shape",
         )
 
-    monkeypatch.setattr("otto.v5_clean_verify.verify_from_clean", fake_verify_from_clean)
+    monkeypatch.setattr("otto.v5_clean_verify.verify_from_clean_oracle", fake_verify_from_clean)
 
     issues = check_scaffold_compiles(tmp_path, architect_task_id="v5-arch")
 
@@ -267,15 +317,16 @@ def test_scaffold_copy_failure_blocks_for_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_verify_from_clean(*_args: Any, **_kwargs: Any) -> CleanVerifyResult:
-        return CleanVerifyResult(
+    def fake_verify_from_clean(*_args: Any, **_kwargs: Any) -> CleanOracleResult:
+        return _clean_oracle_result(
+            tmp_path,
             passed=False,
             scope="scaffold",
-            failure_kind="copy_failed",
-            failure_message="could not copy repo",
+            kind="copy_failed",
+            message="could not copy repo",
         )
 
-    monkeypatch.setattr("otto.v5_clean_verify.verify_from_clean", fake_verify_from_clean)
+    monkeypatch.setattr("otto.v5_clean_verify.verify_from_clean_oracle", fake_verify_from_clean)
 
     issues = check_scaffold_compiles(tmp_path, architect_task_id="v5-arch")
 
@@ -291,15 +342,16 @@ def test_clean_deploy_unknown_verify_kind_blocks_for_repair(
 ) -> None:
     (tmp_path / "start.sh").write_text("#!/usr/bin/env bash\necho ok\n", encoding="utf-8")
 
-    def fake_verify_from_clean(*_args: Any, **_kwargs: Any) -> CleanVerifyResult:
-        return CleanVerifyResult(
+    def fake_verify_from_clean(*_args: Any, **_kwargs: Any) -> CleanOracleResult:
+        return _clean_oracle_result(
+            tmp_path,
             passed=False,
             scope="subtree",
-            failure_kind=cast(Any, "surprise_runtime_kind"),
-            failure_message="runtime verifier failed oddly",
+            kind=cast(Any, "surprise_runtime_kind"),
+            message="runtime verifier failed oddly",
         )
 
-    monkeypatch.setattr("otto.v5_clean_verify.verify_from_clean", fake_verify_from_clean)
+    monkeypatch.setattr("otto.v5_clean_verify.verify_from_clean_oracle", fake_verify_from_clean)
 
     issues = smoke_clean_deploy(tmp_path)
 

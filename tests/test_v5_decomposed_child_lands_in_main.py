@@ -221,7 +221,7 @@ class LeadStub:
             verdict = (
                 "merge_blocked"
                 if any(s.get("verdict") == "merge_blocked" for s in child_summaries)
-                else "partial"
+                else "pass"
             )
             worktree = _lead_worktree(kwargs["project_dir"], kwargs["session_dir"])
             _write_file(
@@ -291,8 +291,12 @@ async def _run_process_children(
     captured_events = events if events is not None else []
     child_results: dict[str, LeadResult] = {}
     integration_results: dict[str, LeadResult] = {}
+
+    async def fake_smoke_preflight(**_kwargs: Any) -> dict[str, Any]:
+        return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
+
     monkeypatch.setattr(v5_runner, "run_lead", stub)
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", lambda *a, **k: [])
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight_with_repair", fake_smoke_preflight)
 
     await _process_children(
         project_dir=repo,

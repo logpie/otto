@@ -202,7 +202,7 @@ def test_integration_smoke_exception_is_typed_blocking_oracle_infra(
     def boom(*_args: Any, **_kwargs: Any) -> list[Any]:
         raise RuntimeError("browser runner unavailable")
 
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", boom)
+    monkeypatch.setattr(v5_runner, "verify_from_clean_oracle", boom)
 
     payload = v5_runner._run_integration_smoke_preflight(
         worktree_path=tmp_path,

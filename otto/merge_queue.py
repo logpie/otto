@@ -118,6 +118,46 @@ class MergeBudget:
     per_slice_wall_s: int = 15 * 60  # 15 min per slice for merge repair
 
 
+@dataclass(frozen=True)
+class MergeOracleDelta:
+    """Typed merge/check oracle state for progress decisions."""
+
+    phase: str
+    index: int
+    check_type: str
+    passed: bool
+    detail: str
+    exit_code: str
+    artifacts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MergeRepairState:
+    """Canonical state compared across repair attempts."""
+
+    merge_status: str
+    merge_detail_kind: str
+    deltas: tuple[MergeOracleDelta, ...] = ()
+
+    def to_jsonable(self) -> dict[str, Any]:
+        return {
+            "merge_status": self.merge_status,
+            "merge_detail_kind": self.merge_detail_kind,
+            "deltas": [
+                {
+                    "phase": delta.phase,
+                    "index": delta.index,
+                    "check_type": delta.check_type,
+                    "passed": delta.passed,
+                    "detail": delta.detail,
+                    "exit_code": delta.exit_code,
+                    "artifacts": list(delta.artifacts),
+                }
+                for delta in self.deltas
+            ],
+        }
+
+
 def _group_result_has_reviewed_partial(result: GroupResult) -> bool:
     self_check = result.self_check if isinstance(result.self_check, dict) else {}
     return (
@@ -781,7 +821,7 @@ async def _process_candidate(
     cost_total = 0.0
     repair_attempts = 0
     last_failure = ""
-    last_repair_failure_fingerprint = ""
+    last_repair_state: MergeRepairState | None = None
     progress_repair_extensions_used = 0
     repair_session_id = ""
     repair_scope_baseline: dict[str, tuple[bool, str]] | None = None
@@ -816,6 +856,8 @@ async def _process_candidate(
         # the integrated post-merge state → rollback if checks fail.
         group_evidence: list[Evidence] = []
         cross_evidence: list[Evidence] = []
+        slice_pairs: list[tuple[Any, Evidence]] = []
+        cross_pairs: list[tuple[Any, Evidence]] = []
         outcome = _merge_group_branch(
             git,
             merge_worktree,
@@ -961,10 +1003,11 @@ async def _process_candidate(
                 failure_summaries=[*slice_failed_summaries, *cross_failed_summaries],
                 artifacts=_evidence_artifact_refs([*group_evidence, *cross_evidence]),
             )
-        current_failure_fingerprint = _merge_failure_fingerprint(
-            last_failure,
-            slice_failed_summaries,
-            cross_failed_summaries,
+        current_repair_state = _merge_repair_state(
+            merge_status=merge_status,
+            merge_conflict=merge_conflict,
+            slice_pairs=slice_pairs,
+            cross_pairs=cross_pairs,
         )
 
         # If we have no agent or no repair retries left → BLOCKED.
@@ -983,9 +1026,8 @@ async def _process_candidate(
         if repair_attempts >= budget.per_slice_repair_retries:
             progressed = (
                 repair_attempts > 0
-                and current_failure_fingerprint
-                and last_repair_failure_fingerprint
-                and current_failure_fingerprint != last_repair_failure_fingerprint
+                and last_repair_state is not None
+                and current_repair_state != last_repair_state
             )
             if (
                 not progressed
@@ -1013,8 +1055,12 @@ async def _process_candidate(
                     "merge repair produced a different verification failure; "
                     "granting one bounded extra repair attempt"
                 ),
-                previous_failure=last_repair_failure_fingerprint,
-                current_failure=current_failure_fingerprint,
+                previous_state=(
+                    last_repair_state.to_jsonable()
+                    if last_repair_state is not None
+                    else None
+                ),
+                current_state=current_repair_state.to_jsonable(),
                 extensions_used=progress_repair_extensions_used,
                 extensions_allowed=budget.per_slice_progress_repair_extensions,
             )
@@ -1028,7 +1074,7 @@ async def _process_candidate(
         # same conflict. Checkout the slice's branch first, repair,
         # commit on the slice branch, then let the next loop iteration
         # re-merge.
-        last_repair_failure_fingerprint = current_failure_fingerprint
+        last_repair_state = current_repair_state
         repair_attempts += 1
         repair_scope_baseline = None
         on_slice_branch = False
@@ -1080,6 +1126,9 @@ async def _process_candidate(
             context_packet_path=raw_log_dir / f"repair-attempt-{repair_attempts:02d}" / "context-packet.json",
             full_spec_path=_default_spec_path(session_dir),
             contract_deltas=tuple(candidate.contract_deltas),
+            failure_artifact_paths=tuple(
+                Path(path) for path in _evidence_artifact_refs([*group_evidence, *cross_evidence])
+            ),
         )
         if agent_input.context_packet_path:
             _write_build_context_packet(agent_input, agent_input.context_packet_path)
@@ -1605,14 +1654,58 @@ def _failed_evidence_summaries(evidence: list[Evidence]) -> list[str]:
     return [_evidence_failure_summary(ev) for ev in evidence if not ev.passed]
 
 
-def _merge_failure_fingerprint(
-    last_failure: str,
-    slice_failed_summaries: list[str],
-    cross_failed_summaries: list[str],
-) -> str:
-    """Return a stable enough signature for merge-repair progress detection."""
-    text = "\n".join([last_failure, *slice_failed_summaries, *cross_failed_summaries])
-    return " ".join(text.lower().split())[:2000]
+def _merge_repair_state(
+    *,
+    merge_status: MergeStatus,
+    merge_conflict: bool,
+    slice_pairs: list[tuple[Any, Evidence]],
+    cross_pairs: list[tuple[Any, Evidence]],
+) -> MergeRepairState:
+    failed_deltas = [
+        *_merge_oracle_deltas("slice", slice_pairs),
+        *_merge_oracle_deltas("cross", cross_pairs),
+    ]
+    if merge_conflict:
+        detail_kind = "merge_conflict"
+    elif failed_deltas:
+        detail_kind = "oracle_check_failed"
+    elif merge_status == MergeStatus.BLOCKED:
+        detail_kind = "merge_blocked"
+    else:
+        detail_kind = "unknown"
+    return MergeRepairState(
+        merge_status=merge_status.value,
+        merge_detail_kind=detail_kind,
+        deltas=tuple(failed_deltas),
+    )
+
+
+def _merge_oracle_deltas(
+    phase: str,
+    pairs: list[tuple[Any, Evidence]],
+) -> list[MergeOracleDelta]:
+    deltas: list[MergeOracleDelta] = []
+    for index, (check, evidence) in enumerate(pairs):
+        if evidence.passed:
+            continue
+        raw = evidence.raw or {}
+        exit_code = raw.get("exit_code")
+        if exit_code is None:
+            exit_code = raw.get("return_code")
+        if exit_code is None:
+            exit_code = raw.get("result")
+        deltas.append(
+            MergeOracleDelta(
+                phase=phase,
+                index=int(raw.get("check_index", index) or index),
+                check_type=type(check).__name__,
+                passed=evidence.passed,
+                detail=evidence.detail,
+                exit_code="" if exit_code is None else str(exit_code),
+                artifacts=tuple(_evidence_artifact_refs([evidence])),
+            )
+        )
+    return deltas
 
 
 def _evidence_artifact_refs(evidence: list[Evidence]) -> list[str]:
@@ -1637,13 +1730,16 @@ def _default_spec_path(session_dir: Path) -> Path | None:
 
 def _evidence_failure_summary(evidence: Evidence) -> str:
     detail = evidence.detail or "check failed"
+    artifact_refs = _evidence_artifact_refs([evidence])
+    if artifact_refs:
+        detail += " (full artifacts: " + ", ".join(artifact_refs[:5]) + ")"
     raw = evidence.raw or {}
     stdout = str(raw.get("stdout") or "")
     stderr = str(raw.get("stderr") or "")
     excerpt = _interesting_failure_excerpt(stdout + "\n" + stderr)
     if not excerpt:
         return detail
-    return f"{detail} — {excerpt}"
+    return f"{detail} — advisory excerpt: {excerpt}"
 
 
 def _interesting_failure_excerpt(output: str) -> str:

@@ -46,12 +46,9 @@ from otto.safe_slug import safe_slug
 from otto.v5_preflight import (
     filter_blocked_descendants,
     run_preflight,
-    smoke_clean_deploy,
+    preflight_issues_from_clean_oracle,
 )
 from otto.v5_preflight_repair import (
-    AgentRepairRequest,
-    AgentRepairResult,
-    PreflightRepairController,
     RepairBudget,
     RepairPacket,
     run_oracle_repair_agent,
@@ -414,28 +411,21 @@ async def _run_startup_port_cleanup_with_repair(
     if not _integration_smoke_blocks(first):
         return first
 
-    controller = PreflightRepairController(
-        session_dir=session_dir,
+    return await _run_preflight_payload_repair_session(
+        initial_payload=first,
+        run_once=run_once,
+        project_dir=project_dir,
         worktree_path=project_dir,
-        agent_repair=lambda request: _run_preflight_repair_agent(
-            request=request,
-            task_id=ROOT_TASK_ID,
-            project_dir=project_dir,
-            config=config,
-            integration_branch=None,
-            on_event=on_event,
-        ),
+        session_dir=session_dir,
+        config=config,
+        task_id=ROOT_TASK_ID,
+        repair_phase="startup_port_cleanup",
+        event_prefix="startup_port_cleanup",
+        integration_branch=None,
+        verify_scope="subtree",
+        on_event=on_event,
+        integration_context={"cleanup": first.get("cleanup") or {}},
     )
-    result = await controller.repair_until_clean(run_once, initial_payload=first)
-    payload = result.preflight_payload
-    payload["repair"] = result.to_jsonable()
-    _emit(on_event, {
-        "event": "startup_port_cleanup_repair_done",
-        "terminal_state": result.terminal_state,
-        "attempts": len(result.attempts),
-        "log_path": str(controller.log_path),
-    })
-    return payload
 
 
 def _git_diff_stat(project_dir: Path) -> str:
@@ -637,6 +627,94 @@ def _make_initial_oracle_payload(
     return result.to_jsonable()
 
 
+def _blocking_payload_issues(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for issue in payload.get("issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        if issue.get("severity") not in ("error", "block"):
+            continue
+        issues.append(issue)
+    if issues:
+        return issues
+    if payload.get("passed") is False:
+        return [
+            {
+                "kind": str(payload.get("error") or payload.get("check") or "preflight_failed"),
+                "severity": "block",
+                "message": str(payload.get("error") or "preflight failed without issue detail"),
+            }
+        ]
+    return []
+
+
+def _clean_oracle_payload_from_preflight_payload(
+    *,
+    payload: dict[str, Any],
+    worktree: Path,
+    scope: Scope,
+    oracle_command: Any,
+    step_id: str,
+) -> dict[str, Any]:
+    clean_oracle = payload.get("clean_oracle_result")
+    if isinstance(clean_oracle, dict) and isinstance(clean_oracle.get("issues"), list):
+        return clean_oracle
+
+    issues: list[CleanOracleIssue] = []
+    issue_payloads = _blocking_payload_issues(payload)
+    for raw_issue in issue_payloads:
+        raw_severity = str(raw_issue.get("severity") or "block")
+        severity = raw_severity if raw_severity in {"warn", "error", "block"} else "block"
+        ports: list[int] = []
+        for raw_port in raw_issue.get("ports") or []:
+            try:
+                ports.append(int(raw_port))
+            except (TypeError, ValueError):
+                continue
+        issues.append(
+            CleanOracleIssue(
+                kind=str(raw_issue.get("kind") or payload.get("check") or "preflight_failed"),
+                severity=cast(Any, severity),
+                message=str(raw_issue.get("message") or payload.get("error") or ""),
+                step_id=str(raw_issue.get("step_id") or step_id),
+                paths=[str(path) for path in (raw_issue.get("paths") or [])],
+                ports=ports,
+                command_identity=getattr(oracle_command, "command_identity", "clean-verify"),
+                return_code=(
+                    int(raw_issue["return_code"])
+                    if isinstance(raw_issue.get("return_code"), int)
+                    else 1
+                ),
+            )
+        )
+
+    message = "; ".join(issue.message for issue in issues) or str(
+        payload.get("error") or "preflight failed"
+    )
+    step = CleanOracleStepResult(
+        id=step_id,
+        status="failed",
+        return_code=1,
+        command_identity=getattr(oracle_command, "command_identity", "clean-verify"),
+        command=list(getattr(oracle_command, "command", []) or []),
+        cwd=str(worktree),
+        env=dict(getattr(oracle_command, "env", {}) or {}),
+        reason=message,
+    )
+    result = CleanOracleResult.from_parts(
+        passed=False,
+        scope=scope,
+        issues=issues,
+        steps=[step],
+        artifact_path_refs=[],
+        command=step.command,
+        env=step.env,
+        project_dir=worktree,
+        temp_dir=None,
+    )
+    return result.to_jsonable()
+
+
 def _worktree_product_contract(
     *,
     worktree: Path,
@@ -652,6 +730,195 @@ def _worktree_product_contract(
     else:
         contract["spec"] = _read_json_artifact(worktree / "spec.json")
     return contract
+
+
+def _repair_result_payload(
+    *,
+    repair_phase: str,
+    repair: Any,
+    terminal_state: str,
+    final_payload: dict[str, Any],
+) -> dict[str, Any]:
+    repaired = terminal_state == "continued"
+    attempt_outcome = "repaired" if repaired else "escalated"
+    return {
+        "terminal_state": terminal_state,
+        "repaired": repaired,
+        "repair_phase": repair_phase,
+        "oracle_verdict": getattr(repair, "verdict", ""),
+        "summary": getattr(repair, "summary", ""),
+        "cost_usd": float(getattr(repair, "cost_usd", 0.0) or 0.0),
+        "agent_turns_used": int(getattr(repair, "agent_turns_used", 0) or 0),
+        "oracle_invocations": int(getattr(repair, "oracle_invocations", 0) or 0),
+        "packet_path": str(getattr(repair, "packet_path", "") or ""),
+        "composite_gate": getattr(repair, "composite_gate", None),
+        "escalation": getattr(repair, "escalation", None),
+        "final_preflight_passed": not _integration_smoke_blocks(final_payload),
+        "attempts": [
+            {
+                "action": "agent",
+                "outcome": attempt_outcome,
+                "repair_phase": repair_phase,
+                "repair_packet": str(getattr(repair, "packet_path", "") or ""),
+                "summary": getattr(repair, "summary", ""),
+                "cost_usd": float(getattr(repair, "cost_usd", 0.0) or 0.0),
+            }
+        ],
+    }
+
+
+async def _run_preflight_payload_repair_session(
+    *,
+    initial_payload: dict[str, Any],
+    run_once: Any,
+    project_dir: Path,
+    worktree_path: Path,
+    session_dir: Path,
+    config: dict[str, Any],
+    task_id: str,
+    repair_phase: str,
+    event_prefix: str,
+    integration_branch: str | None,
+    verify_scope: Scope = "subtree",
+    on_event: Any = None,
+    integration_context: dict[str, Any] | None = None,
+    allowed_paths: list[str] | None = None,
+    scope_policy: str = "unrestricted",
+) -> dict[str, Any]:
+    repair_slug = safe_slug(
+        f"{task_id}-{repair_phase}-{initial_payload.get('phase') or initial_payload.get('check') or 'repair'}",
+        max_len=64,
+    )
+    packet_dir = session_dir / "repair" / repair_slug
+    packet_path = packet_dir / "repair_packet.json"
+    packet_dir.mkdir(parents=True, exist_ok=True)
+    link_path = packet_dir / "worktree"
+    if not link_path.exists():
+        try:
+            link_path.symlink_to(worktree_path)
+        except OSError:
+            pass
+    oracle_command = build_clean_verify_oracle_command(
+        worktree_path=worktree_path,
+        verify_scope=verify_scope,
+        repair_packet_path=packet_path,
+    )
+    attempt_history = _packet_attempt_history(packet_path)
+    attempt_history.append({
+        "type": "preflight_blocking_payload",
+        "repair_phase": repair_phase,
+        "payload": initial_payload,
+        "git_status": _git_status_short(worktree_path),
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    branch = _git_capture(worktree_path, ["branch", "--show-current"])
+    packet = RepairPacket(
+        repair_unit={
+            "id": repair_slug,
+            "worktree": str(worktree_path),
+            "branch": branch or integration_branch or "",
+            "task_id": task_id,
+            "phase": "preflight",
+            "repair_phase": repair_phase,
+            "allowed_paths": list(allowed_paths or []),
+            "scope_policy": scope_policy,
+        },
+        acceptance_oracle={
+            "verify_scope": verify_scope,
+            "command": oracle_command.command,
+            "env": oracle_command.env,
+            "timeout_s": int(config.get(f"{repair_phase}_repair_oracle_timeout_s") or 300),
+            "expected_artifact_paths": [],
+            "success_criteria": {
+                "clean_deploy": True,
+                "composite_gate": True,
+                "preflight_operation": initial_payload.get("check") or repair_phase,
+            },
+        },
+        latest_oracle_result=_clean_oracle_payload_from_preflight_payload(
+            payload=initial_payload,
+            worktree=worktree_path,
+            scope=verify_scope,
+            oracle_command=oracle_command,
+            step_id=str(initial_payload.get("check") or repair_phase),
+        ),
+        product_contract=_worktree_product_contract(worktree=worktree_path),
+        integration_context={
+            "integration_branch": integration_branch,
+            "project_dir": str(project_dir),
+            "initial_preflight": initial_payload,
+            **dict(integration_context or {}),
+        },
+        attempt_history=attempt_history,
+        current_state={
+            "git_status": _git_status_short(worktree_path),
+            "head": _git_capture(worktree_path, ["rev-parse", "HEAD"]),
+            "branch": branch,
+        },
+        budget=_repair_budget_from_config(
+            config,
+            prefix=f"{repair_phase}_repair",
+            default_agent_turns=1,
+            default_oracle_invocations=3,
+        ),
+        packet_dir=packet_dir,
+    )
+    packet.capture_scope_baseline()
+    _emit(on_event, {
+        "event": f"{event_prefix}_repair_start",
+        "task_id": task_id,
+        "repair_phase": repair_phase,
+        "repair_packet": str(packet.packet_path),
+    })
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
+        from otto.v5_branching import commit_integration_worktree
+
+        commit_ok, commit_detail = commit_integration_worktree(
+            worktree_path=worktree_path,
+            task_id=f"{task_id}-{repair_phase}",
+        )
+        _emit(on_event, {
+            "event": (
+                f"{event_prefix}_repair_commit"
+                if commit_ok
+                else f"{event_prefix}_repair_commit_failed"
+            ),
+            "task_id": task_id,
+            "repair_phase": repair_phase,
+            "worktree": str(worktree_path),
+            "detail": commit_detail,
+        })
+        return commit_ok, commit_detail
+
+    repair = await run_oracle_repair_agent(
+        packet,
+        config=config,
+        commit_hook=commit_hook,
+    )
+    if repair.verdict == "pass":
+        final_payload = run_once()
+    else:
+        final_payload = dict(initial_payload)
+    terminal_state = (
+        "continued"
+        if repair.verdict == "pass" and not _integration_smoke_blocks(final_payload)
+        else "escalated"
+    )
+    final_payload["repair"] = _repair_result_payload(
+        repair_phase=repair_phase,
+        repair=repair,
+        terminal_state=terminal_state,
+        final_payload=final_payload,
+    )
+    _emit(on_event, {
+        "event": f"{event_prefix}_repair_done",
+        "task_id": task_id,
+        "terminal_state": terminal_state,
+        "repair_phase": repair_phase,
+        "repair_packet": getattr(repair, "packet_path", str(packet.packet_path)),
+    })
+    return final_payload
 
 
 async def _checkout_v5_branch_clean_with_repair(
@@ -689,30 +956,26 @@ async def _checkout_v5_branch_clean_with_repair(
     first = run_once()
     if not _integration_smoke_blocks(first):
         return first
-    controller = PreflightRepairController(
-        session_dir=session_dir,
+    return await _run_preflight_payload_repair_session(
+        initial_payload=first,
+        run_once=run_once,
+        project_dir=project_dir,
         worktree_path=project_dir,
-        agent_repair=lambda request: _run_preflight_repair_agent(
-            request=request,
-            task_id=task_id,
-            project_dir=project_dir,
-            config=config,
-            integration_branch=integration_branch,
-            on_event=on_event,
-        ),
+        session_dir=session_dir,
+        config=config,
+        task_id=task_id,
+        repair_phase="checkout_clean",
+        event_prefix="checkout",
+        integration_branch=integration_branch,
+        verify_scope="subtree",
+        on_event=on_event,
+        integration_context={
+            "checkout": {
+                "branch": branch,
+                "context": context,
+            }
+        },
     )
-    result = await controller.repair_until_clean(run_once, initial_payload=first)
-    payload = result.preflight_payload
-    payload["repair"] = result.to_jsonable()
-    _emit(on_event, {
-        "event": "checkout_repair_done",
-        "task_id": task_id,
-        "phase": context,
-        "terminal_state": result.terminal_state,
-        "attempts": len(result.attempts),
-        "log_path": str(controller.log_path),
-    })
-    return payload
 
 
 def _integration_restore_branch(
@@ -2937,11 +3200,17 @@ def _run_integration_smoke_preflight(
             phase,
             worktree_path,
         )
-        smoke_issues = smoke_clean_deploy(
+        clean_oracle_result = verify_from_clean_oracle(
             worktree_path,
+            scope="subtree",
             timeout_s=90,
             port_wait_s=12,
             logger_fn=lambda m: logger.info("preflight: %s", m),
+        )
+        payload["clean_oracle_result"] = clean_oracle_result.to_jsonable()
+        smoke_issues = preflight_issues_from_clean_oracle(
+            clean_oracle_result,
+            surface="clean_deploy",
         )
         payload["issues"] = [_preflight_issue_payload(issue) for issue in smoke_issues]
         payload["passed"] = not smoke_issues
@@ -3014,30 +3283,23 @@ async def _run_integration_smoke_preflight_with_repair(
     if not _integration_smoke_blocks(first):
         return first
 
-    controller = PreflightRepairController(
-        session_dir=session_dir,
+    return await _run_preflight_payload_repair_session(
+        initial_payload=first,
+        run_once=run_once,
+        project_dir=project_dir,
         worktree_path=worktree_path,
-        agent_repair=lambda request: _run_preflight_repair_agent(
-            request=request,
-            task_id=task_id,
-            project_dir=project_dir,
-            config=config,
-            integration_branch=integration_branch,
-            on_event=on_event,
-        ),
+        session_dir=session_dir,
+        config=config,
+        task_id=task_id,
+        repair_phase="integration_smoke",
+        event_prefix="integration_smoke",
+        integration_branch=integration_branch,
+        verify_scope="subtree",
+        on_event=on_event,
+        integration_context={
+            "smoke_phase": phase,
+        },
     )
-    result = await controller.repair_until_clean(run_once, initial_payload=first)
-    payload = result.preflight_payload
-    payload["repair"] = result.to_jsonable()
-    _emit(on_event, {
-        "event": "integration_smoke_repair_done",
-        "task_id": task_id,
-        "phase": phase,
-        "terminal_state": result.terminal_state,
-        "attempts": len(result.attempts),
-        "log_path": str(controller.log_path),
-    })
-    return payload
 
 
 def _integration_smoke_blocks(payload: dict[str, Any]) -> bool:
@@ -3086,157 +3348,6 @@ def _preflight_blocking_summary(prefix: str, payload: dict[str, Any]) -> str:
         and issue.get("severity") in ("error", "block")
     ]
     return prefix + (": " + "; ".join(messages) if messages else "")
-
-
-async def _run_preflight_repair_agent(
-    *,
-    request: AgentRepairRequest,
-    task_id: str,
-    project_dir: Path,
-    config: dict[str, Any],
-    integration_branch: str | None,
-    on_event: Any = None,
-) -> AgentRepairResult:
-    """Compatibility adapter for legacy preflight repair callers."""
-    repair_slug = safe_slug(
-        f"{task_id}-preflight-{request.failure_kind}-{request.attempt_index}",
-        max_len=48,
-    )
-    repair_session_dir = request.session_dir / "preflight-repair" / repair_slug
-    repair_session_dir.mkdir(parents=True, exist_ok=True)
-    link_path = repair_session_dir / "worktree"
-    if not link_path.exists():
-        try:
-            link_path.symlink_to(request.worktree_path)
-        except OSError:
-            pass
-
-    packet_dir = request.session_dir / "repair" / repair_slug
-    packet_path = packet_dir / "repair_packet.json"
-    oracle_command = build_clean_verify_oracle_command(
-        worktree_path=request.worktree_path,
-        verify_scope="subtree",
-        repair_packet_path=packet_path,
-    )
-    latest_oracle_result = {
-        "passed": False,
-        "scope": "subtree",
-        "issues": [
-            {
-                "kind": str(request.issue.get("kind") or request.failure_kind),
-                "severity": str(request.issue.get("severity") or "block"),
-                "message": str(request.issue.get("message") or ""),
-                "step_id": str(request.issue.get("step_id") or "legacy_preflight"),
-                "paths": [str(path) for path in (request.issue.get("paths") or [])],
-                "ports": [int(port) for port in (request.issue.get("ports") or [])],
-                "command_identity": "legacy smoke_clean_deploy",
-                "return_code": None,
-            }
-        ],
-        "steps": [],
-        "artifact_path_refs": [],
-        "command": oracle_command.command,
-        "env": oracle_command.env,
-        "digest": "",
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    packet = RepairPacket(
-        repair_unit={
-            "id": repair_slug,
-            "worktree": str(request.worktree_path),
-            "branch": integration_branch or "",
-            "task_id": task_id,
-            "phase": "preflight",
-            "allowed_paths": [],
-            "scope_policy": "unrestricted",
-            "legacy_failure_kind": request.failure_kind,
-            "legacy_workspace_paths": list(request.workspace_paths),
-            "legacy_instruction": request.instruction,
-        },
-        acceptance_oracle={
-            "verify_scope": "subtree",
-            "command": oracle_command.command,
-            "env": oracle_command.env,
-            "timeout_s": int(config.get("preflight_repair_oracle_timeout_s") or 300),
-            "expected_artifact_paths": [],
-            "success_criteria": {
-                "clean_deploy": True,
-                "composite_gate": True,
-            },
-        },
-        latest_oracle_result=latest_oracle_result,
-        product_contract={
-            "config_path": str(request.worktree_path / "otto.yaml"),
-            "charter_path": str(request.worktree_path / "CHARTER.md"),
-        },
-        integration_context={
-            "integration_branch": integration_branch,
-            "legacy_issue": request.issue,
-        },
-        attempt_history=[],
-        current_state={
-            "git_status": _git_status_short(request.worktree_path),
-        },
-        budget=RepairBudget(
-            agent_turns=1,
-            oracle_invocations=2,
-            provider_max_turns=int(config.get("max_turns_per_call") or 1),
-            closeout_agent_turns=0,
-        ),
-        packet_dir=packet_dir,
-    )
-    _emit(on_event, {
-        "event": "preflight_repair_agent_start",
-        "task_id": task_id,
-        "failure_kind": request.failure_kind,
-        "workspace_paths": list(request.workspace_paths),
-        "session_dir": str(repair_session_dir),
-        "repair_packet": str(packet.packet_path),
-    })
-
-    async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
-        if request.failure_kind == "merge_conflict":
-            from otto.v5_branching import commit_worktree
-
-            commit_ok, commit_detail = commit_worktree(
-                worktree_path=request.worktree_path,
-                message=f"v5 merge conflict repair: {task_id}",
-            )
-        else:
-            from otto.v5_branching import commit_integration_worktree
-
-            commit_ok, commit_detail = commit_integration_worktree(
-                worktree_path=request.worktree_path,
-                task_id=f"{task_id}-preflight-{request.failure_kind}",
-            )
-        _emit(on_event, {
-            "event": "preflight_repair_commit" if commit_ok else "preflight_repair_commit_failed",
-            "task_id": task_id,
-            "failure_kind": request.failure_kind,
-            "worktree": str(request.worktree_path),
-            "detail": commit_detail,
-        })
-        return commit_ok, commit_detail
-
-    result = await run_oracle_repair_agent(
-        packet,
-        config=config,
-        commit_hook=commit_hook,
-    )
-    ok = result.verdict == "pass"
-    _emit(on_event, {
-        "event": "preflight_repair_agent_done",
-        "task_id": task_id,
-        "failure_kind": request.failure_kind,
-        "verdict": result.verdict,
-        "cost_usd": result.cost_usd,
-        "repair_packet": result.packet_path,
-    })
-    return AgentRepairResult(
-        ok=ok,
-        cost_usd=result.cost_usd,
-        summary=result.summary,
-    )
 
 
 def _git_status_short(worktree_path: Path) -> str:
@@ -3397,28 +3508,23 @@ async def _prepare_integration_worktree_with_repair(
     if not _integration_smoke_blocks(first):
         return prepared_path, first
 
-    controller = PreflightRepairController(
-        session_dir=integration_session_dir,
+    payload = await _run_preflight_payload_repair_session(
+        initial_payload=first,
+        run_once=run_once,
+        project_dir=project_dir,
         worktree_path=project_dir,
-        agent_repair=lambda request: _run_preflight_repair_agent(
-            request=request,
-            task_id=task_id,
-            project_dir=project_dir,
-            config=config,
-            integration_branch=integration_branch,
-            on_event=on_event,
-        ),
+        session_dir=integration_session_dir,
+        config=config,
+        task_id=task_id,
+        repair_phase="integration_worktree_setup",
+        event_prefix="integration_worktree_setup",
+        integration_branch=integration_branch,
+        verify_scope="subtree",
+        on_event=on_event,
+        integration_context={
+            "integration_branch": integration_branch,
+        },
     )
-    result = await controller.repair_until_clean(run_once, initial_payload=first)
-    payload = result.preflight_payload
-    payload["repair"] = result.to_jsonable()
-    _emit(on_event, {
-        "event": "integration_worktree_setup_repair_done",
-        "task_id": task_id,
-        "terminal_state": result.terminal_state,
-        "attempts": len(result.attempts),
-        "log_path": str(controller.log_path),
-    })
     return prepared_path, payload
 
 

@@ -12,10 +12,12 @@ inside a Group. Layer 2 (this module) handles LLM-judged Feature
 failures across Groups. No Layer 3 — after Layer 2 cap exhaustion,
 the Run lands honestly with `verdict=partial` or `blocked`.
 
-Caps come from `otto/defaults.py`:
+Budgets come from `otto/defaults.py` and are enforced as a per-group
+repair session:
 - `retries.audit_loop.max_repair_attempts_per_run`: maximum actionable Feature
-  repairs in one run
-- `retries.audit_loop.max_audit_passes_per_run`: total audit passes including original
+  repair turns in one run
+- `retries.audit_loop.max_audit_passes_per_run`: oracle invocations including
+  original audit
 
 Per-Feature quality findings with severity `critical` flip that Feature verdict
 to `partial` and trigger Layer 2 repair. Product-wide quality findings can also
@@ -76,6 +78,14 @@ class RepairResult:
     @property
     def still_failing_feature_ids(self) -> list[str]:
         return [a.feature_id for a in self.attempts if not a.succeeded]
+
+
+@dataclass(frozen=True)
+class AuditRepairBudget:
+    """Budget visible to the layer-2 repair session controller."""
+
+    agent_turns: int
+    oracle_invocations: int
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +368,6 @@ async def repair_failing_features(
         if max_attempts_per_run is not None
         else _repair_cap_default()
     )
-    remaining_attempts = max(1, int(cap))
     audit_cap = (
         max_audit_passes
         if max_audit_passes is not None
@@ -369,6 +378,11 @@ async def repair_failing_features(
         if re_audit is not None
         else int(audit_cap)
     )
+    budget = AuditRepairBudget(
+        agent_turns=max(1, int(cap)),
+        oracle_invocations=effective_audit_cap,
+    )
+    remaining_attempts = budget.agent_turns
     current_verdicts = feature_verdicts
     attempt_numbers_by_feature: dict[str, int] = {}
 
@@ -383,10 +397,24 @@ async def repair_failing_features(
             if not result.attempts:
                 result.halted_reason = "no_failing_features"
             return result
+        emit("audit.repair_session.started", {
+            "feature_ids": [item.feature_id for item in selected],
+            "group_ids": sorted({
+                group.id
+                for item in selected
+                for group in [group_for_feature(spec, item.feature_id)]
+                if group is not None
+            }),
+            "budget": {
+                "agent_turns_remaining": remaining_attempts,
+                "oracle_invocations_allowed": budget.oracle_invocations,
+                "oracle_invocations_used": result.audit_passes_run,
+            },
+        })
 
         if not can_run_another_audit_pass(
             audit_passes_run=result.audit_passes_run,
-            max_audit_passes=effective_audit_cap,
+            max_audit_passes=budget.oracle_invocations,
         ):
             # No budget for re-audit: do not dispatch hidden fixes that
             # cannot be verified in this run. Earlier behavior attempted
@@ -470,6 +498,7 @@ async def repair_failing_features(
             for attempt in successful_attempts
             for feature_id in related_ids_by_attempt.get(attempt.feature_id, [attempt.feature_id])
         }
+        oracle_state_before = _feature_verdict_signature(current_verdicts, attempted_ids)
         emit("audit.re_audit.started", {"feature_ids": attempted_ids})
         try:
             new_verdicts = await re_audit(attempted_ids)
@@ -482,6 +511,7 @@ async def repair_failing_features(
             "feature_ids": attempted_ids,
             "verdict_count": len(new_verdicts),
         })
+        oracle_state_after = _feature_verdict_signature(new_verdicts, attempted_ids)
 
         # Backfill each RepairAttempt.new_verdict from the re-audit output.
         by_id: dict[str, str] = {}
@@ -512,6 +542,18 @@ async def repair_failing_features(
                 a.succeeded = a.new_verdict == "passed"
             else:
                 a.succeeded = False
+        emit("audit.repair_session.oracle_gate", {
+            "feature_ids": attempted_ids,
+            "passed": all(
+                attempt.succeeded
+                for attempt in pass_attempts
+                if attempt.feature_id in {
+                    successful.feature_id for successful in successful_attempts
+                }
+            ),
+            "state_before": oracle_state_before,
+            "state_after": oracle_state_after,
+        })
 
         # Merge re-audit payloads back into the latest known verdict set.
         # A re-audit callback is allowed to return only the attempted
@@ -539,6 +581,16 @@ async def repair_failing_features(
             if fid not in merged_payload_by_id:
                 ordered_ids.append(fid)
             merged_payload_by_id[fid] = v
+        if oracle_state_after == oracle_state_before:
+            result.halted_reason = "no_progress:oracle_state_unchanged"
+            emit("audit.repair_session.no_progress", {
+                "reason": result.halted_reason,
+                "feature_ids": attempted_ids,
+                "state_before": oracle_state_before,
+                "state_after": oracle_state_after,
+            })
+            emit("audit.repair_loop.halted", {"reason": result.halted_reason})
+            return result
 
         # Retry only:
         # - features that were not selected in this pass, and still fail, or
@@ -565,6 +617,28 @@ async def repair_failing_features(
             return result
 
     return result
+
+
+def _feature_verdict_signature(
+    verdicts: list[dict[str, Any]],
+    feature_ids: list[str],
+) -> list[dict[str, Any]]:
+    wanted = set(feature_ids)
+    by_id: dict[str, dict[str, Any]] = {}
+    for verdict in verdicts:
+        if not isinstance(verdict, dict):
+            continue
+        feature_id = str(verdict.get("feature_id") or "")
+        if feature_id not in wanted:
+            continue
+        refs = verdict.get("evidence_refs") or []
+        by_id[feature_id] = {
+            "feature_id": feature_id,
+            "verdict": str(verdict.get("verdict") or ""),
+            "detail": str(verdict.get("detail") or ""),
+            "evidence_refs": [str(ref) for ref in refs] if isinstance(refs, list) else [],
+        }
+    return [by_id[feature_id] for feature_id in feature_ids if feature_id in by_id]
 
 
 def _unique_feature_ids(feature_ids: Iterable[str]) -> list[str]:

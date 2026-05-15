@@ -64,37 +64,44 @@ honestly and escalates rather than declaring premature victory.
 | Severity | What | Loop response |
 |---|---|---|
 | **soft** | Minor, mechanical (vocabulary leak post-A0, missing test for new code, lint nit, missed grep pattern) | Auto-fix in same tick. Log as `info` to `drift-log.md`. Continue. |
-| **hard** | Real bug, understood (failing test, scope-leak file, false-positive verdict, magic-number leak, RUA wireframe divergence, single-fixture Bench A failure) | Auto-repair attempt up to 3 ticks. Track in `loop-config.json:repair_attempts`. Resolved → `auto-resolved` info entry. Three failed attempts → upgrade to catastrophic. |
-| **catastrophic** | 3+ repair attempts on same drift, repair-fail loop, plan-vs-impl divergence requiring design-doc change, honest-failure regression, two phases of regression, wall cap | Halt loop. Write full diagnostic. Escalate to user. |
+| **hard** | Real bug, understood (failing test, scope-leak file, false-positive verdict, magic-number leak, RUA wireframe divergence, single-fixture Bench A failure) | Start a durable repair session with a typed oracle packet, budget, attempt journal, baseline scope, and composite gate. Continue only when oracle state improves and the composite gate passes. |
+| **catastrophic** | Budget exhausted, no-progress oracle state, repair-fail loop, plan-vs-impl divergence requiring design-doc change, honest-failure regression, two phases of regression, wall cap | Halt loop. Write full diagnostic. Escalate to user. |
 
-### Auto-repair playbook (per drift kind)
+### Durable repair session model
 
-Each drift has a deterministic repair path. The loop tries it; if it
-doesn't work after 3 attempts, escalates.
+Repairs are not per-symptom playbooks with small retry counts. The loop
+creates one repair packet for the failing unit and drives the same agent
+session until a typed oracle accepts the result or the budget/no-progress
+gate stops it. Deterministic local actions may run first only when they
+are provably idempotent, such as clearing an Otto-owned port, but they
+hand off to the packet session when the oracle remains red.
 
 | Drift kind | Repair playbook |
 |---|---|
-| Vocabulary leak (post-A0) | grep occurrences; rename via Edit; rerun scan |
-| Magic-number leak | identify constant; add to `otto/defaults.py`; replace literal with `defaults.get(...)`; rerun scan |
-| Failing unit test | read test + diff; fix the *code* not the test (unless test asserts wrong contract per research.md, in which case fix test with explicit reference) |
-| Failing integration test | same as unit, allow up to 3 repair attempts (often a chain of small bugs) |
-| False-positive verdict (E2E sweep found "passed" with empty evidence) | trace back to producing stage (Audit tagging? Render aggregation?); fix at root; rerun the same E2E intent; confirm verdict honest |
-| Scope-leak file (modified file outside current phase) | revert the change. If the change is intentional and design-aligned: catastrophic (phase scope changes need plan.md update; loop can't do that) |
-| Honest-failure regression (injected failure produced "passed") | fix at the verdict-producing stage; rerun all four honest-failure injections |
-| RUA wireframe divergence | fix component to match wireframe; re-screenshot; diff again |
-| Bench A failure (one fixture intent's E2E fails) | classify by stage (compile/build/audit/render); fix at the stage; rerun bench A on that fixture |
+| Vocabulary leak (post-A0) | Packet includes grep output, affected paths, and the vocabulary scan command as the oracle. |
+| Magic-number leak | Packet includes the scan hit, target defaults file, allowed scope, and the scan command as the oracle. |
+| Failing unit/integration test | Packet includes full test command, full artifact paths, current diff/baseline, and the composite scope gate. |
+| False-positive verdict | Packet targets the verdict-producing stage and requires a typed re-run of the same E2E/audit oracle before pass. |
+| Scope-leak file | Composite gate blocks out-of-scope writes relative to the packet baseline unless the contract explicitly permits the shared edit. |
+| Honest-failure regression | Packet preserves the injected failure and requires the expected blocked/partial verdict from the oracle. |
+| RUA wireframe divergence | Packet includes screenshots/artifacts as evidence paths; verdict comes from the visual/a11y oracle, not excerpts. |
+| Bench A failure | Packet classifies by stage only for routing, then reruns the named benchmark oracle with full artifacts. |
 
-Every repair attempt:
+Every repair session:
 1. Writes a failing test that reproduces the issue (if not already
    covered).
 2. Implements the root-cause fix (NOT the symptom).
-3. Confirms the test passes.
-4. Greps for similar patterns elsewhere in the codebase; fixes all.
-5. Reruns the failing scan/test.
-6. Logs to `drift-log.md` as `auto-resolved` with severity downgrade.
+3. Runs the packet oracle and records the typed result, digest, artifacts,
+   and event journal.
+4. Runs the composite gate: clean oracle, dirty/conflict checks,
+   baseline-relative scope, verdict consistency, and graph integrity.
+5. Continues only if oracle state improves under budget; unchanged
+   state writes a structured no-progress escalation.
+6. Logs to `drift-log.md` as `auto-resolved` with severity downgrade
+   only after the oracle and composite gate pass.
 
-After 3 failed attempts on the same drift, severity bumps to
-catastrophic. The loop halts with a full diagnostic.
+After budget exhaustion or no-progress on the same repair unit, severity
+bumps to catastrophic. The loop halts with a full diagnostic.
 
 ### Anti-slop guardrails (tick-end self-audit)
 
@@ -109,7 +116,7 @@ Any violation → catastrophic; halt; do not commit; do not update progress.md.
 - **Never special-case a fixture project** in production code.
 - **Never edit `otto_logs/` or `bench-results/`** as a "fix."
 - **Never declare a phase `[✓]`** when honest-failure injection produces false-positive.
-- **Never silently retry past 3 attempts.** Escalate honestly.
+- **Never silently retry outside the repair packet budget.** Escalate honestly.
 
 These are checked on every tick before progress.md is updated.
 
@@ -117,7 +124,7 @@ These are checked on every tick before progress.md is updated.
 
 The loop halts only when continuing would lie:
 
-- 3-attempt repair-cap exceeded on the same hard drift
+- Repair packet budget exhausted on the same hard drift
 - Same drift recurs across 3 different repair attempts (going in circles)
 - Plan-vs-impl divergence requires research.md or plan.md edits
 - Honest-failure regression unfixable in one tick

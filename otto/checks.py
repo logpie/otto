@@ -2048,6 +2048,8 @@ def run_checks(
             base_url=base_url,
             raw_log_path=raw_log_path,
         )
+        if raw_log_path is not None and raw_log_path.exists() and raw_log_path not in evidence.artifacts:
+            evidence.artifacts.append(raw_log_path)
         results.append((check, evidence))
     return results
 

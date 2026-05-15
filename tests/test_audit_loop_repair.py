@@ -302,6 +302,7 @@ def test_re_audit_still_partial_does_not_flip_succeeded() -> None:
     spec = _spec("f1")
     fix_agent, _ = _make_fix_agent(succeed=True)
     re_audit, _ = _make_re_audit({"f1": "partial"})
+    events: list[tuple[str, dict[str, Any]]] = []
 
     result = asyncio.run(
         repair_failing_features(
@@ -311,6 +312,7 @@ def test_re_audit_still_partial_does_not_flip_succeeded() -> None:
             re_audit=re_audit,
             max_attempts_per_run=1,
             max_audit_passes=10,
+            on_event=lambda kind, payload: events.append((kind, payload)),
         )
     )
     assert len(result.attempts) == 1
@@ -320,7 +322,9 @@ def test_re_audit_still_partial_does_not_flip_succeeded() -> None:
     # is not enough to mark the repair succeeded when audit still says
     # partial.
     assert a.succeeded is False
-    assert result.halted_reason == "repair_attempts_cap_exhausted"
+    assert result.halted_reason == "no_progress:oracle_state_unchanged"
+    assert any(kind == "audit.repair_session.no_progress" for kind, _payload in events)
+    assert any(kind == "audit.repair_session.oracle_gate" for kind, _payload in events)
 
 
 def test_repair_loop_retries_feature_that_reaudit_keeps_partial() -> None:
@@ -380,10 +384,10 @@ def test_repair_loop_preserves_unattempted_failures_when_reaudit_is_scoped() -> 
         )
     )
 
-    assert [feature_id for feature_id, _ in fix_calls] == ["f1", "f2", "f1"]
-    assert re_audit_calls == [["f1", "f2"], ["f1"]]
-    assert result.audit_passes_run == 3
-    assert result.halted_reason == "repair_attempts_cap_exhausted"
+    assert [feature_id for feature_id, _ in fix_calls] == ["f1", "f2"]
+    assert re_audit_calls == [["f1", "f2"]]
+    assert result.audit_passes_run == 2
+    assert result.halted_reason == "no_progress:oracle_state_unchanged"
     by_feature = {a.feature_id: a for a in result.attempts}
     assert by_feature["f2"].new_verdict == "partial"
     assert by_feature["f2"].succeeded is False

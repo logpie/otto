@@ -18,15 +18,10 @@ from otto.audit_loop import (
 from otto.build import BuildAgentInput, BuildAgentOutput, GroupStatus, run_build
 from otto.lead import LeadResult
 from otto.spec_compile import Feature, Group, RepoTestCheck, Spec
-from otto.v5_clean_verify import CleanVerifyResult
+from otto.v5_clean_verify import CleanOracleIssue, CleanOracleResult, CleanOracleStepResult, Scope
 from otto.v5_context_slicer import ChildScope, write_context_slice_for_child
 from otto.v5_preflight import check_scaffold_compiles
-from otto.v5_preflight_repair import (
-    AgentRepairRequest,
-    AgentRepairResult,
-    OracleRepairResult,
-    PreflightRepairController,
-)
+from otto.v5_preflight_repair import OracleRepairResult, RepairPacket
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -60,14 +55,6 @@ def _blocking_payload(kind: str, message: str) -> dict[str, Any]:
 
 def _passing_payload() -> dict[str, Any]:
     return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
-
-
-def _log_events(session_dir: Path) -> list[dict[str, Any]]:
-    return [
-        json.loads(line)
-        for line in (session_dir / "preflight-repair.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
 
 
 def _spec_by_group(feature_to_group: dict[str, str]) -> Spec:
@@ -119,19 +106,58 @@ def _passing_check() -> RepoTestCheck:
     return RepoTestCheck(command=("python", "-c", "print('ok')"), timeout_s=10)
 
 
+def _clean_oracle_result(
+    tmp_path: Path,
+    *,
+    passed: bool,
+    scope: Scope = "scaffold",
+    kind: str = "build_failed",
+    message: str = "failed",
+) -> CleanOracleResult:
+    step = CleanOracleStepResult(
+        id="check",
+        status="passed" if passed else "failed",
+        return_code=0 if passed else 1,
+        command_identity="python -m otto.cli clean-verify",
+        command=["python", "-m", "otto.cli", "clean-verify"],
+        cwd=str(tmp_path),
+        env={},
+    )
+    issue = CleanOracleIssue(
+        kind=kind,
+        severity="block",
+        message=message,
+        step_id=step.id,
+        command_identity=step.command_identity,
+        return_code=step.return_code,
+    )
+    return CleanOracleResult.from_parts(
+        passed=passed,
+        scope=scope,
+        issues=[] if passed else [issue],
+        steps=[step],
+        artifact_path_refs=[],
+        command=step.command,
+        env=step.env,
+        project_dir=tmp_path,
+        temp_dir=None,
+    )
+
+
 def test_scaffold_missing_required_runtime_blocks_for_repair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_verify_from_clean(*_args: Any, **_kwargs: Any) -> CleanVerifyResult:
-        return CleanVerifyResult(
+    def fake_verify_from_clean(*_args: Any, **_kwargs: Any) -> CleanOracleResult:
+        return _clean_oracle_result(
+            tmp_path,
             passed=False,
             scope="scaffold",
-            failure_kind="no_npm",
-            failure_message="npm not on PATH",
+            kind="no_npm",
+            message="npm not on PATH",
         )
 
-    monkeypatch.setattr("otto.v5_clean_verify.verify_from_clean", fake_verify_from_clean)
+    monkeypatch.setattr("otto.v5_clean_verify.verify_from_clean_oracle", fake_verify_from_clean)
 
     issues = check_scaffold_compiles(tmp_path, architect_task_id="v5-arch")
 
@@ -147,74 +173,22 @@ def test_scaffold_timeout_retries_once_with_larger_budget(
 ) -> None:
     timeouts: list[int] = []
 
-    def fake_verify_from_clean(*_args: Any, **kwargs: Any) -> CleanVerifyResult:
+    def fake_verify_from_clean(*_args: Any, **kwargs: Any) -> CleanOracleResult:
         timeouts.append(int(kwargs["timeout_s"]))
         if len(timeouts) == 1:
-            return CleanVerifyResult(
+            return _clean_oracle_result(
+                tmp_path,
                 passed=False,
                 scope="scaffold",
-                failure_kind="build_timeout",
-                failure_message="build timed out",
+                kind="build_timeout",
+                message="build timed out",
             )
-        return CleanVerifyResult(passed=True, scope="scaffold")
+        return _clean_oracle_result(tmp_path, passed=True, scope="scaffold")
 
-    monkeypatch.setattr("otto.v5_clean_verify.verify_from_clean", fake_verify_from_clean)
+    monkeypatch.setattr("otto.v5_clean_verify.verify_from_clean_oracle", fake_verify_from_clean)
 
     assert check_scaffold_compiles(tmp_path, timeout_s=5) == []
     assert timeouts == [5, 65]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("kind", "message", "detail"),
-    [
-        ("filename_too_long", "File name too long: generated label", {"renamed": []}),
-        ("clean_deploy_script_valid_failed", "start.sh is not executable", {"chmod_x": []}),
-    ],
-)
-async def test_preflight_autofix_noop_falls_back_to_agent(
-    tmp_path: Path,
-    kind: str,
-    message: str,
-    detail: dict[str, Any],
-) -> None:
-    session_dir = tmp_path / "session"
-    worktree = tmp_path / "repo"
-    session_dir.mkdir()
-    worktree.mkdir()
-    requests: list[AgentRepairRequest] = []
-    runs = 0
-
-    def run_preflight() -> dict[str, Any]:
-        nonlocal runs
-        runs += 1
-        if requests:
-            return _passing_payload()
-        return _blocking_payload(kind, message)
-
-    async def repair(request: AgentRepairRequest) -> AgentRepairResult:
-        requests.append(request)
-        return AgentRepairResult(ok=True, summary="agent fixed deterministic no-op")
-
-    controller = PreflightRepairController(
-        session_dir=session_dir,
-        worktree_path=worktree,
-        filename_repair=lambda *_args: detail,
-        chmod_repair=lambda *_args: detail,
-        agent_repair=repair,
-    )
-
-    result = await controller.repair_until_clean(run_preflight)
-
-    assert result.terminal_state == "continued"
-    assert runs == 2
-    assert len(requests) == 1
-    events = _log_events(session_dir)
-    assert any(event.get("outcome") == "no_op_agent_fallback" for event in events)
-    assert not any(
-        event.get("action") == "auto_fix" and event.get("outcome") == "repaired"
-        for event in events
-    )
 
 
 def test_stale_port_cleanup_reports_still_bound_after_kill(
@@ -246,9 +220,10 @@ async def test_startup_port_cleanup_still_bound_routes_to_repair(
 ) -> None:
     from otto import v5_clean_verify
 
+    _init_repo(tmp_path)
     cleanup_result_type = getattr(v5_clean_verify, "PortCleanupResult")
     calls = 0
-    repairs: list[AgentRepairRequest] = []
+    repairs: list[RepairPacket] = []
 
     def fake_cleanup(*_args: Any, **_kwargs: Any) -> Any:
         nonlocal calls
@@ -257,21 +232,12 @@ async def test_startup_port_cleanup_still_bound_routes_to_repair(
             return cleanup_result_type(killed_ports=[19001], still_bound_ports=[19001])
         return cleanup_result_type()
 
-    async def fake_repair(
-        *,
-        request: AgentRepairRequest,
-        task_id: str,
-        project_dir: Path,
-        config: dict[str, Any],
-        integration_branch: str | None,
-        on_event: Any = None,
-    ) -> AgentRepairResult:
-        del task_id, project_dir, config, integration_branch, on_event
-        repairs.append(request)
-        return AgentRepairResult(ok=True, summary="made start.sh avoid busy port")
+    async def fake_repair(packet: RepairPacket, **_kwargs: Any) -> OracleRepairResult:
+        repairs.append(packet)
+        return OracleRepairResult(verdict="pass", summary="made start.sh avoid busy port")
 
     monkeypatch.setattr("otto.v5_clean_verify.cleanup_stale_declared_ports", fake_cleanup)
-    monkeypatch.setattr(v5_runner, "_run_preflight_repair_agent", fake_repair)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_repair)
 
     payload = await v5_runner._run_startup_port_cleanup_with_repair(
         project_dir=tmp_path,
@@ -281,7 +247,11 @@ async def test_startup_port_cleanup_still_bound_routes_to_repair(
 
     assert payload["passed"] is True
     assert calls == 2
-    assert [request.failure_kind for request in repairs] == ["port_busy"]
+    assert [packet.repair_unit["repair_phase"] for packet in repairs] == [
+        "startup_port_cleanup"
+    ]
+    issues = repairs[0].latest_oracle_result["issues"]
+    assert issues[0]["kind"] == "clean_deploy_port_busy"
 
 
 @pytest.mark.asyncio
@@ -298,11 +268,14 @@ async def test_integration_worktree_setup_failure_blocks_without_project_dir_fal
             integration_calls.append(kwargs)
         return LeadResult(task_id=kwargs["task_id"], verdict="catastrophic", cost_usd=0.0)
 
-    async def fake_repair(**_kwargs: Any) -> AgentRepairResult:
-        return AgentRepairResult(ok=False, summary="worktree setup still broken")
+    repair_packets: list[RepairPacket] = []
+
+    async def fake_repair(packet: RepairPacket, **_kwargs: Any) -> OracleRepairResult:
+        repair_packets.append(packet)
+        return OracleRepairResult(verdict="merge_blocked", summary="worktree setup still broken")
 
     monkeypatch.setattr(v5_runner, "_setup_integration_worktree_once", lambda **_kwargs: (None, "boom"))
-    monkeypatch.setattr(v5_runner, "_run_preflight_repair_agent", fake_repair)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_repair)
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
 
     result = await v5_runner._run_integration(
@@ -316,6 +289,9 @@ async def test_integration_worktree_setup_failure_blocks_without_project_dir_fal
 
     assert result.verdict == "merge_blocked"
     assert integration_calls == []
+    assert [packet.repair_unit["repair_phase"] for packet in repair_packets] == [
+        "integration_worktree_setup"
+    ]
 
 
 @pytest.mark.asyncio
@@ -356,8 +332,11 @@ async def test_child_merge_conflict_dispatches_agent_then_gates_on_smoke(
         assert ok, detail
         return OracleRepairResult(verdict="pass", summary="repaired", cost_usd=0.1)
 
+    async def fake_smoke_preflight(**_kwargs: Any) -> dict[str, Any]:
+        return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
+
     monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight_with_repair", fake_smoke_preflight)
 
     result = LeadResult(task_id="v5-child", verdict="pass", cost_usd=0.1)
     await v5_runner._merge_child_branch(

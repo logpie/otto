@@ -183,8 +183,11 @@ async def test_root_frontend_grandchildren_reach_main(git_repo: Path, monkeypatc
 
     from otto import v5_runner
 
+    async def fake_smoke_preflight(**_kwargs):
+        return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
+
     monkeypatch.setattr(v5_runner, "run_lead", FakeLead(git_repo))
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight_with_repair", fake_smoke_preflight)
 
     child_results: dict[str, LeadResult] = {}
     integration_results: dict[str, LeadResult] = {}

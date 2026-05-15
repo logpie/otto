@@ -1,14 +1,16 @@
-"""Deterministic fixtures for v6.5 preflight repair classes."""
+"""Smoke fixtures for the packet-native preflight repair path."""
 
 from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from otto import v5_clean_verify, v5_runner
 from otto.lead import (
     _read_agent_verdict,
     _read_agent_verdict_with_rewrite,
@@ -16,363 +18,152 @@ from otto.lead import (
 )
 from otto.merge_queue import _merge_raw_log_dir
 from otto.safe_slug import safe_slug
-from otto import v5_clean_verify
-from otto.v5_preflight_repair import (
-    AgentRepairRequest,
-    AgentRepairResult,
-    PreflightRepairController,
-)
+from otto.v5_clean_verify import CleanOracleIssue, CleanOracleResult, CleanOracleStepResult
+from otto.v5_preflight_repair import OracleRepairResult, RepairBudget, RepairPacket, run_oracle_repair_agent
 
 
 pytestmark = pytest.mark.smoke
 
 
-def _blocking_payload(kind: str, message: str) -> dict[str, Any]:
-    return {
-        "check": "smoke_clean_deploy",
-        "passed": False,
-        "issues": [{"kind": kind, "severity": "block", "message": message}],
-    }
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
-def _passing_payload() -> dict[str, Any]:
-    return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
+def _init_repo(repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@e.st")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text("otto_logs/\n.otto/\n", encoding="utf-8")
+    (repo / "README.md").write_text("init\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init", "--no-verify")
 
 
-def _log_events(session_dir: Path) -> list[dict[str, Any]]:
-    return [
-        json.loads(line)
-        for line in (session_dir / "preflight-repair.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+def _oracle_result(repo: Path, *, passed: bool, kind: str = "start_failed") -> CleanOracleResult:
+    step = CleanOracleStepResult(
+        id="start",
+        status="passed" if passed else "failed",
+        return_code=0 if passed else 1,
+        command_identity="python -m otto.cli clean-verify",
+        command=["python", "-m", "otto.cli", "clean-verify"],
+        cwd=str(repo),
+        env={},
+    )
+    issue = CleanOracleIssue(
+        kind=kind,
+        severity="block",
+        message=f"{kind} remained",
+        step_id=step.id,
+        command_identity=step.command_identity,
+        return_code=step.return_code,
+    )
+    return CleanOracleResult.from_parts(
+        passed=passed,
+        scope="subtree",
+        issues=[] if passed else [issue],
+        steps=[step],
+        artifact_path_refs=[],
+        command=step.command,
+        env=step.env,
+        project_dir=repo,
+        temp_dir=None,
+    )
+
+
+def _packet(tmp_path: Path, repo: Path, *, budget: RepairBudget | None = None) -> RepairPacket:
+    return RepairPacket(
+        repair_unit={
+            "id": "smoke-unit",
+            "worktree": str(repo),
+            "branch": "main",
+            "task_id": "smoke",
+            "phase": "preflight",
+            "repair_phase": "integration_smoke",
+            "allowed_paths": [],
+            "scope_policy": "unrestricted",
+        },
+        acceptance_oracle={
+            "verify_scope": "subtree",
+            "command": ["python", "-m", "otto.cli", "clean-verify"],
+            "env": {},
+            "timeout_s": 30,
+        },
+        latest_oracle_result=_oracle_result(repo, passed=False).to_jsonable(),
+        product_contract={},
+        integration_context={},
+        attempt_history=[],
+        current_state={},
+        budget=budget or RepairBudget(agent_turns=1, oracle_invocations=2),
+        packet_dir=tmp_path / "session" / "repair" / "smoke-unit",
+    )
 
 
 @pytest.mark.asyncio
-async def test_port_busy_autofix_fires_and_continues(tmp_path: Path) -> None:
-    session_dir = tmp_path / "session"
-    worktree = tmp_path / "repo"
-    session_dir.mkdir()
-    worktree.mkdir()
-    calls: list[str] = []
-    runs = 0
+async def test_packet_repair_budget_escalates_with_journal(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(tmp_path, repo, budget=RepairBudget(agent_turns=1, oracle_invocations=2))
 
-    def run_preflight() -> dict[str, Any]:
-        nonlocal runs
-        runs += 1
-        if runs == 1:
-            return _blocking_payload("clean_deploy_port_busy", "Declared ports [18080] already bound")
-        return _passing_payload()
+    async def fake_agent(*_args: Any, **_kwargs: Any) -> tuple[str, float, str, dict[str, Any]]:
+        return "still failing", 0.01, "sess-smoke", {}
 
-    def cleanup(_worktree: Path, issue: dict[str, Any]) -> dict[str, Any]:
-        calls.append(issue["kind"])
-        return {"killed_ports": [18080]}
+    async def fake_oracle(_packet: RepairPacket) -> CleanOracleResult:
+        return _oracle_result(repo, passed=False, kind="ports_not_listening")
 
-    controller = PreflightRepairController(
-        session_dir=session_dir,
-        worktree_path=worktree,
-        original_budget_usd=100.0,
-        port_cleanup=cleanup,
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=fake_agent,
+        oracle_runner=fake_oracle,
     )
 
-    result = await controller.repair_until_clean(run_preflight)
-
-    assert result.terminal_state == "continued"
-    assert calls == ["clean_deploy_port_busy"]
-    assert runs == 2
-    events = _log_events(session_dir)
-    assert events[0]["event"] == "repair_attempt"
-    assert events[0]["failure_kind"] == "port_busy"
-    assert events[0]["action"] == "auto_fix"
-    assert events[0]["outcome"] == "repaired"
-    assert "_written_at" in events[0]
+    assert result.verdict == "merge_blocked"
+    assert result.escalation is not None
+    assert result.escalation["reason"] == "budget_exhausted"
+    events = packet.events()
+    assert [event["seq"] for event in events] == [1, 2, 3]
+    assert events[-1]["event"]["reason"] == "budget_exhausted"
 
 
 @pytest.mark.asyncio
-async def test_port_busy_cleanup_noop_falls_back_to_agent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session_dir = tmp_path / "session"
-    worktree = tmp_path / "repo"
-    session_dir.mkdir()
-    worktree.mkdir()
-    (worktree / "CHARTER.md").write_text("- app: 127.0.0.1:18080\n", encoding="utf-8")
-    requests: list[AgentRepairRequest] = []
-    killed: list[int] = []
-    runs = 0
+async def test_startup_port_cleanup_routes_to_packet_repair(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    cleanup_result_type = getattr(v5_clean_verify, "PortCleanupResult")
+    calls = 0
+    packets: list[RepairPacket] = []
 
-    monkeypatch.setattr(v5_clean_verify, "_pids_for_port", lambda _port: [4444])
-    monkeypatch.setattr(v5_clean_verify, "_is_otto_owned_process", lambda *_args: False)
-    monkeypatch.setattr(v5_clean_verify, "_terminate_pid", lambda pid: killed.append(pid))
-    monkeypatch.setattr(v5_clean_verify, "_check_ports_free", lambda _ports: [18080])
+    def fake_cleanup(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return cleanup_result_type(killed_ports=[18080], still_bound_ports=[18080])
+        return cleanup_result_type()
 
-    def run_preflight() -> dict[str, Any]:
-        nonlocal runs
-        runs += 1
-        if requests:
-            return _passing_payload()
-        return _blocking_payload("clean_deploy_port_busy", "Declared ports [18080] already bound")
+    async def fake_repair(packet: RepairPacket, **_kwargs: Any) -> OracleRepairResult:
+        packets.append(packet)
+        return OracleRepairResult(verdict="pass", summary="fixed", packet_path=str(packet.packet_path))
 
-    async def repair(request: AgentRepairRequest) -> AgentRepairResult:
-        requests.append(request)
-        return AgentRepairResult(ok=True, cost_usd=0.4, summary="made start.sh pick a free port")
+    monkeypatch.setattr("otto.v5_clean_verify.cleanup_stale_declared_ports", fake_cleanup)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_repair)
 
-    controller = PreflightRepairController(
-        session_dir=session_dir,
-        worktree_path=worktree,
-        original_budget_usd=100.0,
-        agent_repair=repair,
+    payload = await v5_runner._run_startup_port_cleanup_with_repair(
+        project_dir=repo,
+        session_dir=tmp_path / "session",
+        config={"max_turns_per_call": 1},
     )
 
-    result = await controller.repair_until_clean(run_preflight)
-
-    assert result.terminal_state == "continued"
-    assert killed == []
-    assert runs == 2
-    assert len(requests) == 1
-    assert requests[0].failure_kind == "port_busy"
-    assert "deterministic port cleanup" in requests[0].instruction.lower()
-    assert "18080" in requests[0].instruction
-    events = _log_events(session_dir)
-    assert not any(
-        event.get("action") == "auto_fix" and event.get("outcome") == "repaired"
-        for event in events
-    )
-    assert any(
-        event.get("action") == "auto_fix" and event.get("outcome") == "no_op_agent_fallback"
-        for event in events
-    )
-    assert events[-1]["action"] == "agent"
-    assert events[-1]["outcome"] == "repaired"
-
-
-@pytest.mark.asyncio
-async def test_filename_too_long_autofix_fires_and_continues(tmp_path: Path) -> None:
-    session_dir = tmp_path / "session"
-    worktree = tmp_path / "repo"
-    session_dir.mkdir()
-    worktree.mkdir()
-    calls: list[str] = []
-    runs = 0
-    label = "curl verification: " + "GET /api/health?include=everything " * 8
-
-    def run_preflight() -> dict[str, Any]:
-        nonlocal runs
-        runs += 1
-        if runs == 1:
-            return _blocking_payload("filename_too_long", f"File name too long: {label}")
-        return _passing_payload()
-
-    def rename(_worktree: Path, issue: dict[str, Any]) -> dict[str, Any]:
-        calls.append(issue["message"])
-        return {"renamed": [{"from": label, "to": safe_slug(label)}]}
-
-    controller = PreflightRepairController(
-        session_dir=session_dir,
-        worktree_path=worktree,
-        original_budget_usd=100.0,
-        filename_repair=rename,
-    )
-
-    result = await controller.repair_until_clean(run_preflight)
-
-    assert result.terminal_state == "continued"
-    assert len(calls) == 1
-    assert _log_events(session_dir)[0]["failure_kind"] == "filename_too_long"
-
-
-@pytest.mark.asyncio
-async def test_non_executable_shell_script_autochmod_fires_and_continues(tmp_path: Path) -> None:
-    session_dir = tmp_path / "session"
-    worktree = tmp_path / "repo"
-    session_dir.mkdir()
-    worktree.mkdir()
-    script = worktree / "start.sh"
-    script.write_text("#!/usr/bin/env bash\necho ok\n", encoding="utf-8")
-    script.chmod(0o644)
-    runs = 0
-
-    def run_preflight() -> dict[str, Any]:
-        nonlocal runs
-        runs += 1
-        if runs == 1:
-            return _blocking_payload("clean_deploy_script_valid_failed", "start.sh is not executable")
-        return _passing_payload()
-
-    controller = PreflightRepairController(
-        session_dir=session_dir,
-        worktree_path=worktree,
-        original_budget_usd=100.0,
-    )
-
-    result = await controller.repair_until_clean(run_preflight)
-
-    assert result.terminal_state == "continued"
-    assert script.stat().st_mode & 0o111
-    assert _log_events(session_dir)[0]["failure_kind"] == "permission_chmod"
-
-
-@pytest.mark.asyncio
-async def test_non_autofix_failure_spawns_repair_agent_and_continues(tmp_path: Path) -> None:
-    session_dir = tmp_path / "session"
-    worktree = tmp_path / "repo"
-    session_dir.mkdir()
-    worktree.mkdir()
-    requests: list[AgentRepairRequest] = []
-    runs = 0
-
-    def run_preflight() -> dict[str, Any]:
-        nonlocal runs
-        runs += 1
-        if runs == 1:
-            return _blocking_payload(
-                "scaffold_compile_failed",
-                "frontend/src/App.tsx(12,7): error TS2304: Cannot find name 'Widget'.",
-            )
-        return _passing_payload()
-
-    async def repair(request: AgentRepairRequest) -> AgentRepairResult:
-        requests.append(request)
-        return AgentRepairResult(ok=True, cost_usd=0.25, summary="fixed App.tsx")
-
-    controller = PreflightRepairController(
-        session_dir=session_dir,
-        worktree_path=worktree,
-        original_budget_usd=10.0,
-        agent_repair=repair,
-    )
-
-    result = await controller.repair_until_clean(run_preflight)
-
-    assert result.terminal_state == "continued"
-    assert [request.failure_kind for request in requests] == ["scaffold_compile_failed"]
-    assert requests[0].workspace_paths == ("frontend/src/App.tsx",)
-    assert _log_events(session_dir)[0]["action"] == "agent"
-
-
-@pytest.mark.asyncio
-async def test_script_valid_failure_uses_agent_default_and_continues(tmp_path: Path) -> None:
-    session_dir = tmp_path / "session"
-    worktree = tmp_path / "repo"
-    session_dir.mkdir()
-    worktree.mkdir()
-    requests: list[AgentRepairRequest] = []
-    runs = 0
-
-    def run_preflight() -> dict[str, Any]:
-        nonlocal runs
-        runs += 1
-        if runs == 1:
-            return _blocking_payload("clean_deploy_script_valid_failed", "bash -n start.sh failed")
-        return _passing_payload()
-
-    async def repair(request: AgentRepairRequest) -> AgentRepairResult:
-        requests.append(request)
-        return AgentRepairResult(ok=True, cost_usd=0.1, summary="fixed start.sh")
-
-    controller = PreflightRepairController(
-        session_dir=session_dir,
-        worktree_path=worktree,
-        original_budget_usd=10.0,
-        agent_repair=repair,
-    )
-
-    result = await controller.repair_until_clean(run_preflight)
-
-    assert result.terminal_state == "continued"
-    assert [request.failure_kind for request in requests] == ["clean_deploy_script_valid_failed"]
-    assert requests[0].workspace_paths == ("start.sh",)
-
-
-@pytest.mark.asyncio
-async def test_repeated_issue_exits_by_budget_without_looping(tmp_path: Path) -> None:
-    session_dir = tmp_path / "session"
-    worktree = tmp_path / "repo"
-    session_dir.mkdir()
-    worktree.mkdir()
-
-    def run_preflight() -> dict[str, Any]:
-        return _blocking_payload("clean_deploy_port_busy", "Declared ports [18080] already bound")
-
-    controller = PreflightRepairController(
-        session_dir=session_dir,
-        worktree_path=worktree,
-        original_budget_usd=100.0,
-        port_cleanup=lambda *_args: {"killed_ports": [18080]},
-    )
-
-    result = await controller.repair_until_clean(run_preflight)
-
-    assert result.terminal_state == "escalated"
-    events = _log_events(session_dir)
-    assert events[-1]["event"] == "repair_escalated"
-    assert events[-1]["reason"] == "budget_exhausted"
-
-
-@pytest.mark.asyncio
-async def test_progressing_preflight_repairs_do_not_hit_old_total_cap(tmp_path: Path) -> None:
-    session_dir = tmp_path / "session"
-    worktree = tmp_path / "repo"
-    session_dir.mkdir()
-    worktree.mkdir()
-    repairs: list[str] = []
-    payloads = [
-        _blocking_payload("clean_deploy_start_failed", "npm run build failed in frontend: TS2339"),
-        _blocking_payload(
-            "clean_deploy_ports_not_listening",
-            "After clean-state deploy, ports [5173, 8000, 8001] did not bind within 102s. Listening: none.",
-        ),
-        _blocking_payload(
-            "clean_deploy_port_busy",
-            "Declared ports [8000, 8001] already bound (likely zombies from prior runs). Cannot run clean-deploy.",
-        ),
-        _blocking_payload(
-            "clean_deploy_ports_not_listening",
-            "After clean-state deploy, ports [5173] did not bind within 102s. Listening: [8000, 8001].",
-        ),
-        _passing_payload(),
-    ]
-
-    def run_preflight() -> dict[str, Any]:
-        return payloads.pop(0)
-
-    async def repair(request: AgentRepairRequest) -> AgentRepairResult:
-        repairs.append(request.failure_kind)
-        return AgentRepairResult(ok=True, summary=f"fixed {request.failure_kind}")
-
-    controller = PreflightRepairController(
-        session_dir=session_dir,
-        worktree_path=worktree,
-        agent_repair=repair,
-        port_cleanup=lambda *_args: {"killed_ports": [8000], "bound_after": [], "repaired": True},
-    )
-
-    result = await controller.repair_until_clean(run_preflight)
-
-    assert result.terminal_state == "continued"
-    assert len(result.attempts) == 4
-    assert repairs == [
-        "clean_deploy_start_failed",
-        "clean_deploy_ports_not_listening",
-        "clean_deploy_ports_not_listening",
-    ]
-    events = _log_events(session_dir)
-    assert not any(event.get("reason") == "total_attempt_cap" for event in events)
-
-    no_progress_session = tmp_path / "no-progress-session"
-    no_progress_session.mkdir()
-    no_progress = PreflightRepairController(
-        session_dir=no_progress_session,
-        worktree_path=worktree,
-        port_cleanup=lambda *_args: {"killed_ports": [18080], "bound_after": [], "repaired": True},
-    )
-
-    stuck = await no_progress.repair_until_clean(
-        lambda: _blocking_payload("clean_deploy_port_busy", "Declared ports [18080] already bound")
-    )
-
-    assert stuck.terminal_state == "escalated"
-    assert _log_events(no_progress_session)[-1]["reason"] == "budget_exhausted"
+    assert payload["passed"] is True
+    assert calls == 2
+    assert packets[0].repair_unit["repair_phase"] == "startup_port_cleanup"
+    assert packets[0].current_state["scope_baseline"] is not None
 
 
 def test_safe_slug_handles_270_char_curl_verification_label(tmp_path: Path) -> None:

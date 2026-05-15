@@ -440,11 +440,10 @@ class BuildResult:
 class BuildAgentInput:
     """Input passed to a build-agent callable for one attempt on one slice.
 
-    ``feature_id`` is the Layer 2 narrowing hook: when non-empty, the
-    rendered prompt includes a "FIX ONLY THIS FEATURE" preamble pointing
-    the build agent at one Feature inside the Group instead of the whole
-    Group surface. Empty (default) means "build/repair the whole Group"
-    — the original Phase A behaviour.
+    ``feature_id`` is the Layer 2 audit-repair hook: when non-empty, the
+    rendered prompt names the failing acceptance cluster inside the Group.
+    Empty (default) means "build/repair the whole Group" — the original
+    Phase A behaviour.
     """
 
     spec: Spec
@@ -455,7 +454,7 @@ class BuildAgentInput:
     attempt: int  # 1-indexed
     last_failure_narrative: str = ""  # empty on first attempt
     log_dir: Path | None = None  # if set, agent writes narrative there
-    feature_id: str = ""  # Layer 2 narrowing: fix only this feature in the slice
+    feature_id: str = ""  # Layer 2 audit repair representative feature
     related_feature_ids: tuple[str, ...] = ()  # Layer 2 cluster repair scope
     agent_session_id: str = ""  # resume same provider conversation across attempts
     config: dict[str, Any] = field(default_factory=dict)
@@ -463,6 +462,7 @@ class BuildAgentInput:
     full_spec_path: Path | None = None
     merge_repair: bool = False  # true when merge_queue asks this slice to integrate
     contract_deltas: tuple[ContractDelta, ...] = ()
+    failure_artifact_paths: tuple[Path, ...] = ()
     timeout_s: int | None = None  # wall timeout for this provider attempt
 
 
@@ -2128,6 +2128,7 @@ async def _run_slice(
     """
     slice_t0 = time.monotonic()
     last_failure = initial_failure_narrative
+    last_failure_artifact_paths: tuple[Path, ...] = ()
     last_evidence: list[Evidence] = []
     accumulated_scope_warnings: list[str] = []
     accumulated_contract_deltas: list[ContractDelta] = []
@@ -2340,6 +2341,7 @@ async def _run_slice(
             config=config,
             context_packet_path=prompt_dir / "context-packet.json",
             full_spec_path=full_spec_path if full_spec_path.exists() else None,
+            failure_artifact_paths=last_failure_artifact_paths,
             timeout_s=max(1, int(math.ceil(budget.per_group_wall_s - elapsed))),
         )
 
@@ -2683,6 +2685,7 @@ async def _run_slice(
             evidence_pairs,
             raw_log_dir / f"attempt-{attempt:02d}",
         )
+        last_failure_artifact_paths = _failed_check_artifact_paths(evidence_pairs)
         emit(
             session_dir,
             "group.check.feedback",
@@ -2917,7 +2920,10 @@ def _write_build_context_packet(
         "model": build_routing.get("model"),
         "effort": build_routing.get("effort"),
         "agent_routing": routing_snapshot,
-        "repair_feature_ids": list(agent_input.related_feature_ids),
+        "repair_feature_ids": list(
+            agent_input.related_feature_ids
+            or ((agent_input.feature_id,) if agent_input.feature_id else ())
+        ),
         "full_spec_path": str(agent_input.full_spec_path or ""),
         "group": group,
         "features_for_group": features,
@@ -2930,6 +2936,9 @@ def _write_build_context_packet(
         "shared_contracts": spec_dict.get("shared_contracts", []),
         "contract_deltas": [
             delta.to_dict() for delta in (agent_input.contract_deltas or ())
+        ],
+        "failure_artifact_paths": [
+            str(path) for path in agent_input.failure_artifact_paths
         ],
         "behavior_journeys": spec_dict.get("behavior_journeys", []),
         "cross_group_checks": spec_dict.get("cross_group_checks", []),
@@ -2999,29 +3008,33 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         ]
         if narrowed_features:
             cluster_repair = len(repair_feature_ids) > 1
-            lines.append(
-                "## FIX THE FAILING FEATURE CLUSTER"
-                if cluster_repair
-                else "## FIX ONLY THE FAILING FEATURE"
-            )
+            lines.append("## Repair the failing acceptance cluster")
             lines.append("")
             if cluster_repair:
                 lines.append(
                     f"This is a Layer 2 repair dispatch for {len(repair_feature_ids)} "
                     f"currently failing features inside group `{s.id}`. Repair the "
-                    "shared group behavior coherently in one pass. Preserve unrelated "
-                    "or already-working behavior, but do not treat failing sibling "
-                    "features as off-limits."
+                    "shared acceptance cluster coherently in one pass. Preserve "
+                    "unrelated or already-working behavior, but do not treat failing "
+                    "sibling features as off-limits."
                 )
             else:
                 narrowed = narrowed_features[0]
                 lines.append(
                     f"This is a Layer 2 repair dispatch for feature "
                     f"`{narrowed.name}` (id=`{narrowed.id}`) inside group "
-                    f"`{s.id}`. Touch only the code paths required to make this "
-                    "feature pass its acceptance criteria while preserving unrelated "
-                    "behavior."
+                    f"`{s.id}`. Repair the failing acceptance cluster represented "
+                    "by this feature while preserving unrelated behavior. The root "
+                    "cause may be shared group behavior, so do not over-narrow the "
+                    "fix to a single assertion when the evidence points at a shared "
+                    "contract or workflow."
                 )
+            lines.append(
+                "shared-contract edits are allowed when this group's contract, "
+                "owned paths, shared scaffold, or recorded contract deltas permit "
+                "them; preserve the declared scope and document why the shared "
+                "surface had to change."
+            )
             lines.append("")
             lines.append("**Repair feature scope:**")
             for feature in narrowed_features:
@@ -3605,6 +3618,19 @@ def _result_can_continue_degraded(
     return _worktree_has_product_changes(worktree) and _failed_checks_are_non_structural(evidence_pairs)
 
 
+def _failed_check_artifact_paths(
+    evidence_pairs: list[tuple[CheckKind, Evidence]],
+) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for _check, evidence in evidence_pairs:
+        if evidence.passed:
+            continue
+        for artifact in evidence.artifacts:
+            if artifact not in paths:
+                paths.append(artifact)
+    return tuple(paths)
+
+
 def _failed_check_repair_narrative(
     attempt: int,
     evidence_pairs: list[tuple[CheckKind, Evidence]],
@@ -3659,8 +3685,8 @@ def _failed_check_repair_narrative(
                 lines.append(f"    - {path}: {dimensions}{metrics_text}; {diagnostic}")
         excerpt = _failed_check_log_excerpt(raw_log_path)
         if excerpt:
-            lines.append(f"  Otto check log: `{raw_log_path}`")
-            lines.append("  Log excerpt:")
+            lines.append(f"  Otto check log: `{raw_log_path}` (authoritative full artifact)")
+            lines.append("  Advisory log excerpt:")
             for log_line in excerpt.splitlines():
                 lines.append(f"    {log_line}")
     return "\n".join(lines)

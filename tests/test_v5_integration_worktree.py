@@ -57,6 +57,35 @@ def _seed_integration_task(repo: Path, task_id: str) -> str:
     return own_integration
 
 
+def _smoke_payload(
+    *,
+    path: Path,
+    task_id: str,
+    phase: str,
+    issues: list[PreflightIssue],
+) -> dict[str, Any]:
+    return {
+        "check": "smoke_clean_deploy",
+        "task_id": task_id,
+        "phase": phase,
+        "cwd": str(path),
+        "passed": not issues,
+        "issues": [
+            {
+                "kind": issue.kind,
+                "severity": issue.severity,
+                "message": issue.message,
+            }
+            for issue in issues
+        ],
+        "error": None if not issues else "; ".join(issue.message for issue in issues),
+    }
+
+
+async def _passing_smoke_preflight(**_kwargs: Any) -> dict[str, Any]:
+    return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
+
+
 def test_integration_prompt_renders_smoke_preflight_payload(tmp_path: Path) -> None:
     rendered = _render_prompt(
         kind="integration",
@@ -252,7 +281,11 @@ async def test_nested_integration_restores_project_dir_to_parent_branch(
         )
 
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", lambda *a, **k: [])
+    monkeypatch.setattr(
+        v5_runner,
+        "_run_integration_smoke_preflight_with_repair",
+        _passing_smoke_preflight,
+    )
 
     result = await v5_runner._run_integration(
         project_dir=repo,
@@ -410,15 +443,26 @@ async def test_root_integration_repairs_clean_deploy_preflight_before_payload(
         [],
     ]
 
-    def fake_smoke(path: Path, *_args: Any, **_kwargs: Any) -> list[PreflightIssue]:
-        assert path == repo
-        return smoke_results.pop(0)
+    def fake_smoke_preflight(
+        *,
+        worktree_path: Path,
+        task_id: str,
+        phase: str,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        assert worktree_path == repo
+        return _smoke_payload(
+            path=worktree_path,
+            task_id=task_id,
+            phase=phase,
+            issues=smoke_results.pop(0),
+        )
 
     monkeypatch.setattr(v5_runner, "compile_flat_spec", fake_compile_flat_spec)
     monkeypatch.setattr(v5_runner, "_process_children", fake_process_children)
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
     monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", fake_smoke)
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight", fake_smoke_preflight)
 
     result = await v5_runner.run_v5_pipeline(
         project_dir=repo,
@@ -438,7 +482,7 @@ async def test_root_integration_repairs_clean_deploy_preflight_before_payload(
     assert payload["passed"] is True
     assert payload["issues"] == []
     assert payload["repair"]["terminal_state"] == "continued"
-    assert payload["repair"]["attempts"][0]["failure_kind"] == "clean_deploy_start_failed"
+    assert payload["repair"]["attempts"][0]["repair_phase"] == "integration_smoke"
 
 
 @pytest.mark.asyncio
@@ -484,7 +528,11 @@ async def test_runner_commits_integration_product_files_and_excludes_runtime_fil
         )
 
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", lambda *a, **k: [])
+    monkeypatch.setattr(
+        v5_runner,
+        "_run_integration_smoke_preflight_with_repair",
+        _passing_smoke_preflight,
+    )
 
     result = await v5_runner._run_integration(
         project_dir=repo,
@@ -536,9 +584,20 @@ async def test_integration_smoke_failure_runs_repair_on_resolved_worktree(
     ]
     lead_kwargs: list[dict[str, Any]] = []
 
-    def fake_smoke(path: Path, *_args: Any, **_kwargs: Any) -> list[PreflightIssue]:
-        smoke_calls.append(Path(path))
-        return smoke_results.pop(0)
+    def fake_smoke_preflight(
+        *,
+        worktree_path: Path,
+        task_id: str,
+        phase: str,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        smoke_calls.append(Path(worktree_path))
+        return _smoke_payload(
+            path=worktree_path,
+            task_id=task_id,
+            phase=phase,
+            issues=smoke_results.pop(0),
+        )
 
     async def fake_run_lead(**kwargs: Any) -> LeadResult:
         lead_kwargs.append(kwargs)
@@ -564,7 +623,7 @@ async def test_integration_smoke_failure_runs_repair_on_resolved_worktree(
         assert ok, detail
         return OracleRepairResult(verdict="pass", summary="fixed start.sh", cost_usd=0.05)
 
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", fake_smoke)
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight", fake_smoke_preflight)
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
     monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
 
@@ -598,7 +657,7 @@ async def test_integration_smoke_failure_runs_repair_on_resolved_worktree(
     assert payload["cwd"] == str(smoke_calls[0])
     assert payload["passed"] is True
     assert payload["issues"] == []
-    assert payload["repair"]["attempts"][0]["failure_kind"] == "clean_deploy_start_failed"
+    assert payload["repair"]["attempts"][0]["repair_phase"] == "integration_smoke"
     packet_path = Path(integration_calls[0]["integration_packet_path"])
     packet = json.loads(packet_path.read_text(encoding="utf-8"))
     assert packet["parent_task_id"] == task_id
@@ -629,9 +688,20 @@ async def test_integration_repeat_smoke_failure_downgrades_merge_blocked(
     )
     smoke_calls: list[Path] = []
 
-    def fake_smoke(path: Path, *_args: Any, **_kwargs: Any) -> list[PreflightIssue]:
-        smoke_calls.append(Path(path))
-        return [blocking_issue]
+    def fake_smoke_preflight(
+        *,
+        worktree_path: Path,
+        task_id: str,
+        phase: str,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        smoke_calls.append(Path(worktree_path))
+        return _smoke_payload(
+            path=worktree_path,
+            task_id=task_id,
+            phase=phase,
+            issues=[blocking_issue],
+        )
 
     async def fake_run_lead(**kwargs: Any) -> LeadResult:
         return LeadResult(
@@ -646,7 +716,7 @@ async def test_integration_repeat_smoke_failure_downgrades_merge_blocked(
         return OracleRepairResult(verdict="pass", summary="claimed fixed", cost_usd=0.1)
 
     events: list[dict[str, Any]] = []
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", fake_smoke)
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight", fake_smoke_preflight)
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
     monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
 

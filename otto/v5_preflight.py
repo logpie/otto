@@ -191,7 +191,7 @@ def run_preflight(
     return issues
 
 
-def _verify_from_clean_with_timeout_retry(
+def _verify_from_clean_oracle_with_timeout_retry(
     project_dir: Path,
     *,
     scope: Literal["scaffold", "subtree", "full"],
@@ -199,16 +199,17 @@ def _verify_from_clean_with_timeout_retry(
     port_wait_s: int | None = None,
     logger_fn: Any = None,
 ) -> Any:
-    """Run verify_from_clean, retrying timeout failures once with more budget."""
-    from otto.v5_clean_verify import verify_from_clean
+    """Run the typed clean oracle, retrying timeout failures once."""
+    from otto.v5_clean_verify import verify_from_clean_oracle
 
     kwargs: dict[str, Any] = {"scope": scope, "timeout_s": timeout_s}
     if port_wait_s is not None:
         kwargs["port_wait_s"] = port_wait_s
     if logger_fn is not None:
         kwargs["logger_fn"] = logger_fn
-    result = verify_from_clean(project_dir, **kwargs)
-    if result.passed or result.failure_kind not in _TIMEOUT_FAILURE_KINDS:
+    result = verify_from_clean_oracle(project_dir, **kwargs)
+    timeout_kinds = {issue.kind for issue in result.issues} & _TIMEOUT_FAILURE_KINDS
+    if result.passed or not timeout_kinds:
         return result
 
     retry_timeout = max(timeout_s * 2, timeout_s + 60)
@@ -216,10 +217,88 @@ def _verify_from_clean_with_timeout_retry(
     retry_kwargs["timeout_s"] = retry_timeout
     if logger_fn is not None:
         logger_fn(
-            f"verify_from_clean: {result.failure_kind} after {timeout_s}s; "
+            f"verify_from_clean: {sorted(timeout_kinds)[0]} after {timeout_s}s; "
             f"retrying once with {retry_timeout}s"
         )
-    return verify_from_clean(project_dir, **retry_kwargs)
+    return verify_from_clean_oracle(project_dir, **retry_kwargs)
+
+
+def preflight_issues_from_clean_oracle(
+    result: Any,
+    *,
+    surface: Literal["scaffold", "clean_deploy"],
+    architect_task_id: str | None = None,
+) -> list[PreflightIssue]:
+    """Map typed clean-oracle issues to legacy display/event issue names.
+
+    Repair scope must use ``CleanOracleResult`` directly. These names exist
+    only for old event consumers and UI text that still expect
+    ``PreflightIssue.kind`` values.
+    """
+    if result.passed:
+        return []
+    raw_issues = list(result.issues or [])
+    if not raw_issues:
+        raw_issues = [{
+            "kind": "internal_error",
+            "message": "clean oracle failed without issue detail",
+        }]
+
+    mapped: list[PreflightIssue] = []
+    for issue in raw_issues:
+        if isinstance(issue, dict):
+            kind = str(issue.get("kind") or "internal_error")
+            message = str(issue.get("message") or "clean-deploy failed")
+        else:
+            kind = str(getattr(issue, "kind", "") or "internal_error")
+            message = str(getattr(issue, "message", "") or "clean-deploy failed")
+        if surface == "scaffold":
+            if kind == "script_valid_failed":
+                legacy_kind = "script_valid_failed"
+            elif kind in {"build_timeout", "install_timeout", "py_compile_timeout"}:
+                legacy_kind = "scaffold_compile_timeout"
+            else:
+                legacy_kind = "scaffold_compile_failed"
+                if kind not in {
+                    "build_failed",
+                    "install_failed",
+                    "py_compile_failed",
+                    "copy_failed",
+                    "no_npm",
+                    "no_python",
+                } and message:
+                    message = f"{kind}: {message}"
+            mapped.append(
+                PreflightIssue(
+                    kind=legacy_kind,
+                    severity="block",
+                    message=message,
+                    task_id=architect_task_id,
+                )
+            )
+            continue
+
+        if kind == "script_valid_failed":
+            legacy_kind = "clean_deploy_script_valid_failed"
+        elif kind == "port_busy":
+            legacy_kind = "clean_deploy_port_busy"
+        elif kind == "copy_failed":
+            legacy_kind = "clean_deploy_copy_failed"
+        elif kind in {"install_failed", "build_failed", "py_compile_failed", "start_failed"}:
+            legacy_kind = "clean_deploy_start_failed"
+        elif kind == "ports_not_listening":
+            legacy_kind = "clean_deploy_ports_not_listening"
+        else:
+            legacy_kind = "clean_deploy_smoke_error"
+            message = f"{kind}: {message}" if message else kind
+        mapped.append(
+            PreflightIssue(
+                kind=legacy_kind,
+                severity="block",
+                message=message,
+            )
+        )
+    return mapped
 
 
 def check_scaffold_compiles(
@@ -240,79 +319,14 @@ def check_scaffold_compiles(
     architect's own self-verify and this preflight reach the same
     verdict on the same input.
     """
-    result = _verify_from_clean_with_timeout_retry(
+    result = _verify_from_clean_oracle_with_timeout_retry(
         project_dir, scope="scaffold", timeout_s=timeout_s
     )
-    if result.passed:
-        return []
-
-    # Map primitive failure kinds to the preflight-visible kind names
-    # (preserved for back-compat with existing event consumers).
-    kind = result.failure_kind or "internal_error"
-    if kind == "script_valid_failed":
-        return [
-            PreflightIssue(
-                kind="script_valid_failed",
-                severity="block",
-                message=result.failure_message
-                or "root shell script validation failed",
-                task_id=architect_task_id,
-            )
-        ]
-    if kind in ("build_failed", "install_failed", "py_compile_failed"):
-        return [
-            PreflightIssue(
-                kind="scaffold_compile_failed",
-                severity="block",
-                message=result.failure_message
-                or "scaffold compile failed",
-                task_id=architect_task_id,
-            )
-        ]
-    if kind in ("build_timeout", "install_timeout", "py_compile_timeout"):
-        return [
-            PreflightIssue(
-                kind="scaffold_compile_timeout",
-                severity="block",
-                message=result.failure_message
-                or "scaffold compile timed out",
-                task_id=architect_task_id,
-            )
-        ]
-    if kind == "copy_failed":
-        return [
-            PreflightIssue(
-                kind="scaffold_compile_failed",
-                severity="block",
-                message=result.failure_message
-                or "scaffold compile could not copy the project into a clean verifier",
-                task_id=architect_task_id,
-            )
-        ]
-    if kind in ("no_npm", "no_python"):
-        return [
-            PreflightIssue(
-                kind="scaffold_compile_failed",
-                severity="block",
-                message=result.failure_message
-                or f"scaffold compile missing required runtime: {kind}",
-                task_id=architect_task_id,
-            )
-        ]
-    # internal_error or any unexpected kind: trigger repair/re-dispatch. Unknown
-    # verification failures are not informational.
-    return [
-        PreflightIssue(
-            kind="scaffold_compile_failed",
-            severity="block",
-            message=(
-                f"{kind}: {result.failure_message}"
-                if result.failure_message
-                else f"scaffold compile inconclusive: {kind}"
-            ),
-            task_id=architect_task_id,
-        )
-    ]
+    return preflight_issues_from_clean_oracle(
+        result,
+        surface="scaffold",
+        architect_task_id=architect_task_id,
+    )
 
 
 def smoke_clean_deploy(
@@ -344,80 +358,14 @@ def smoke_clean_deploy(
         log("clean-deploy: no start.sh; skipping")
         return issues
 
-    result = _verify_from_clean_with_timeout_retry(
+    result = _verify_from_clean_oracle_with_timeout_retry(
         project_dir,
         scope="subtree",
         timeout_s=timeout_s,
         port_wait_s=port_wait_s,
         logger_fn=lambda m: log(f"clean-deploy: {m}"),
     )
-    if result.passed:
-        return issues
-
-    kind = result.failure_kind or "internal_error"
-    message = result.failure_message or "clean-deploy failed"
-
-    # Map primitive failure kinds to preflight event names.
-    if kind == "script_valid_failed":
-        issues.append(
-            PreflightIssue(
-                kind="clean_deploy_script_valid_failed",
-                severity="block",
-                message=message,
-            )
-        )
-    elif kind == "port_busy":
-        issues.append(
-            PreflightIssue(
-                kind="clean_deploy_port_busy",
-                severity="block",
-                message=message,
-            )
-        )
-    elif kind == "copy_failed":
-        issues.append(
-            PreflightIssue(
-                kind="clean_deploy_copy_failed",
-                severity="block",
-                message=message,
-            )
-        )
-    elif kind in ("install_failed", "build_failed", "py_compile_failed"):
-        # Install/build problems happen here BEFORE start.sh is even
-        # attempted. Surface as start_failed since they block deployment.
-        issues.append(
-            PreflightIssue(
-                kind="clean_deploy_start_failed",
-                severity="block",
-                message=message,
-            )
-        )
-    elif kind == "start_failed":
-        issues.append(
-            PreflightIssue(
-                kind="clean_deploy_start_failed",
-                severity="block",
-                message=message,
-            )
-        )
-    elif kind == "ports_not_listening":
-        issues.append(
-            PreflightIssue(
-                kind="clean_deploy_ports_not_listening",
-                severity="block",
-                message=message,
-            )
-        )
-    else:
-        # internal_error, no_npm, no_python, timeouts, and newly introduced
-        # verifier kinds are repair triggers unless explicitly handled above.
-        issues.append(
-            PreflightIssue(
-                kind="clean_deploy_smoke_error",
-                severity="block",
-                message=f"{kind}: {message}",
-            )
-        )
+    issues.extend(preflight_issues_from_clean_oracle(result, surface="clean_deploy"))
     return issues
 
 

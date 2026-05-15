@@ -163,8 +163,9 @@ The protocol going forward:
   with error + git status + relevant paths + bounded scope. Let it
   decide what to commit/stash/fix/retry. Cap by attempts × cost.
 - **Escalate (genuine hard stops only):** disk full, network down,
-  repeated-same-fingerprint after N agent attempts. NOT "I don't have
-  a hardcoded handler for this failure kind."
+  repair packet budget exhausted, or a typed oracle/no-progress gate
+  says the same repair unit is not improving. NOT "I don't have a
+  hardcoded handler for this failure kind."
 
 When tempted to add a classifier, prompt instruction, or rigid schema
 check, ask: "could a coding agent figure this out from context?"
@@ -305,40 +306,32 @@ never saw the bug. So we lost autonomous repair for a one-line shell
 fix; final verdict was `partial` on a product whose frontend code
 never landed in `main`.
 
-The earlier draft of this entry proposed a separate `preflight-repair`
-agent. Discarded — over-segmentation. The integration agent has the
-right context, authority, and worktree; it just lacked the preflight
-error as input. One-session repair is the correct design.
+The legacy draft proposed a separate per-symptom preflight repair agent.
+That is now obsolete. Preflight failures use the same durable
+`RepairPacket` session as other repair units: typed clean-oracle result,
+baseline scope, attempt journal, budget, commit hook, and composite gate.
 
 **v6 work:** in `_run_integration()`:
 1. Resolve integration worktree (NOT `project_dir` — `project_dir`
    may be on `main` while merged children live on
    `i2p/integ/<task>`)
-2. Run `smoke_clean_deploy()` on the integration worktree
-3. Spawn integration agent with task input that includes:
+2. Run the typed clean oracle on the integration worktree
+3. Spawn repair/integration agent with a packet that includes:
    - children's verdicts (today)
-   - structured smoke result (NEW): failure_kind, offending_file,
-     error_excerpt, classification (`trivially_fixable` |
-     `escalate`)
-4. Agent reconciles + applies small repairs within its existing
-   50-LOC scope
-5. Runner re-runs `smoke_clean_deploy()` after agent returns;
-   downgrades to `merge_blocked` if still red
+   - typed clean-oracle issues and full artifact paths
+   - scope baseline and allowed paths/contracts
+4. Agent reconciles + applies repairs within the packet scope
+5. Runner re-runs the clean oracle and composite gate after each agent
+   turn; result stays `merge_blocked` if still red
 
-Keep classification + structured preflight result modular (might be
-reused later for per-leaf preflight or post-deploy repair). Do NOT
-add a new prompt file by default.
-
-**Trivially-fixable criteria** (by *kind of change*, not LOC):
+**Deterministic fast-path criteria** (provably local and idempotent):
 
 ELIGIBLE — bug class + scope of change:
-- Failure classes: `clean_deploy_start_failed`, `script_valid_failed`,
-  `missing_env_var`, `wrong_file_permissions`, `import_path_typo`
-- Allowed file edits: launch scripts (start.sh), env config files
-  (.env.example, vite.config, tsconfig), shell glue, missing imports,
-  wire-shape glue when integration finds child mismatches
-- Examples: bad shell substitution, missing shebang/chmod, wrong env
-  var name, undefined import, port allocation defaults
+- Clear an Otto-owned stale port before the packet repair session.
+- Normalize filenames or permissions when the oracle identifies one
+  exact path and the change is deterministic.
+- Re-run the packet oracle immediately; if still red, hand off to the
+  durable repair session.
 
 NOT ELIGIBLE — anything that adds product surface:
 - New API endpoints, routes, types, entities, dependencies
@@ -349,12 +342,9 @@ NOT ELIGIBLE — anything that adds product surface:
   browser unavailable, install failures across many files)
 - Repeated same failure (already tried once)
 
-LOC heuristic (soft, in prompt only — NOT a runner-side gate):
-"Small fixes typically 10-30 lines. If exceeding ~50, that's a sign
-you're out of scope — escalate as merge_blocked."
-
-The hard gate is by file type + bug class. The LOC number is just
-a self-check signal to the agent.
+The hard gate is the repair packet: budget, typed oracle result, full
+artifacts, and baseline-relative composite scope. Excerpts and legacy
+display names are advisory only.
 
 **Why this matters:** Otto v3 had repair loops via the certifier
 ("round 1 fail → round 2 fix"). v5 hierarchical traded that for
@@ -365,16 +355,15 @@ full certifier loop's complexity. Cost per repair attempt: ~$0.05 and
 30 seconds. Cost of NOT having it (today): hours of wasted compute
 + user-visible "broken" final state.
 
-### CRITICAL: Repair classifier too narrow (let the agent decide)
+### CRITICAL: Legacy repair classifier too narrow (deleted)
 **State:** v6d hit `merge_worktree_dirty` — backend's merge blocked
 because `decisions.md` had uncommitted appends from an earlier
-phase. The PreflightRepairController classified this as
-"unknown" → escalate, even though a coding agent could
-trivially handle it (commit the file, retry).
+phase. The legacy symptom controller classified this as "unknown" and
+escalated even though a coding agent could handle it.
 
-The current classifier (otto/v5_preflight_repair.py) only knows 4
-failure kinds: port_busy, filename_too_long, typescript_error,
-script_valid_failed. Everything else escalates without trying.
+The current implementation removed that controller. Repair scope is now
+derived from the typed `RepairPacket` and clean-oracle result, not from
+legacy display issue names.
 
 This is the same anti-pattern we keep hitting: over-prescriptive
 classification when the agent can decide.
