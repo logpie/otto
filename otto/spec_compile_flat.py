@@ -32,6 +32,13 @@ from typing import Any
 
 from otto import __version__ as OTTO_VERSION
 from otto.agent import make_agent_options
+from otto.journey_contracts import (
+    PASS_MODEL_KEYS,
+    PROBE_KINDS,
+    VERIFICATION_LEVELS,
+    VerificationContractError,
+    normalize_journey_contracts,
+)
 from otto.observability import save_rendered_prompt, sha256_text, update_input_provenance
 from otto.paths import session_intent
 from otto.token_usage import token_usage_from_mapping
@@ -43,7 +50,7 @@ from otto.v5_spec_cache import (
 
 logger = logging.getLogger("otto.spec_compile_flat")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 INTENT_CLAIMS_MAX = 30
 ROOT_SPEC_ARTIFACT_FILENAMES = frozenset({
     "product-contract.json",
@@ -290,6 +297,15 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
     repair product interpretation from context, while tests protect behavior.
     """
     spec_payload = _coerce_spec(spec)
+    try:
+        spec_payload = normalize_journey_contracts(
+            spec_payload,
+            current_schema_version=SCHEMA_VERSION,
+        )
+    except VerificationContractError as exc:
+        if strict:
+            raise StructuredSpecValidationError(str(exc)) from exc
+        return [str(exc)]
     warnings: list[str] = []
     errors: list[str] = []
 
@@ -473,13 +489,39 @@ Use this shape. Keep it compact; empty arrays are fine when a field is not usefu
       "description": "User-language steps describing what happens.",
       "covers_primary_actions": ["entity.action"],
       "start_state": "unauthenticated",
-      "entry_route": "/"
+      "entry_route": "/",
+      "pass_model": {{
+        "start_state": "unauthenticated",
+        "setup": [],
+        "actions": [
+          {{
+            "id": "entity.action.effect",
+            "description": "Use the visible UI to perform entity.action.",
+            "state_changing": true,
+            "covers_primary_actions": ["entity.action"],
+            "success_observables": [
+              {{"kind": "persisted_data_visible", "primary_action_id": "entity.action", "description": "The created/changed entity appears in the UI after the action."}}
+            ],
+            "network_expectations": []
+          }}
+        ],
+        "success_observables": [
+          {{"kind": "persisted_data_visible", "primary_action_id": "entity.action", "description": "The created/changed entity appears in the UI after the action."}}
+        ],
+        "ready_policy": {{"route": "/", "wait_for": "interactive"}},
+        "settle_policy": {{"after_action": "dom_or_network_effect", "timeout_ms": 5000}},
+        "network_expectations": [],
+        "final_dom_assertions": [
+          {{"kind": "persisted_data_visible", "primary_action_id": "entity.action", "description": "The created/changed entity appears in the UI after the action."}}
+        ]
+      }}
     }}
   ]
 }}
 
 Guidance:
-- Behavior journeys are illustrative user-language samples, not the full contract.
+- Behavior journeys are representative user-language samples and must include a concrete pass_model for UI effects.
+- Do not use route-loaded, HTTP-200, body-present, skeleton, or generic text as the only success observable.
 - Use at most 5 representative critical flows; avoid selectors, data-testids, or DOM APIs.
 - IDs should be terse and stable, e.g. `issue.create` or `report.export`.
 - Consolidate repeated or low-priority claims; intent_claims cap <= 30.
@@ -698,6 +740,22 @@ async def compile_flat_spec(
                                 },
                                 "start_state": {"type": "string"},
                                 "entry_route": {"type": "string"},
+                                "api_only": {"type": "boolean"},
+                                "verification_level": {
+                                    "type": "string",
+                                    "enum": list(VERIFICATION_LEVELS),
+                                },
+                                "probe_kind": {
+                                    "type": "string",
+                                    "enum": list(PROBE_KINDS),
+                                },
+                                "pass_model": {
+                                    "type": "object",
+                                    "properties": {
+                                        key: {"type": ["array", "object", "string"]}
+                                        for key in PASS_MODEL_KEYS
+                                    },
+                                },
                             },
                             "required": [
                                 "id",
@@ -864,9 +922,44 @@ async def compile_flat_spec(
                     ],
                     "start_state": str(j.get("start_state") or ""),
                     "entry_route": str(j.get("entry_route") or ""),
+                    **({"api_only": bool(j.get("api_only"))} if "api_only" in j else {}),
+                    **({"pass_model": dict(j["pass_model"])} if isinstance(j.get("pass_model"), dict) else {}),
+                    **(
+                        {"verification_level": str(j.get("verification_level") or "")}
+                        if "verification_level" in j
+                        else {}
+                    ),
+                    **({"probe_kind": str(j.get("probe_kind") or "")} if "probe_kind" in j else {}),
                 }
                 for j in journeys_raw
                 if isinstance(j, dict)
+            ],
+        )
+        try:
+            normalized_preview = normalize_journey_contracts(
+                asdict(preview),
+                current_schema_version=SCHEMA_VERSION,
+            )
+        except VerificationContractError as exc:
+            _cleanup_root_spec_artifacts(project_dir)
+            raise StructuredSpecValidationError(str(exc)) from exc
+        preview = FlatSpec(
+            schema_version=SCHEMA_VERSION,
+            intent=str(normalized_preview.get("intent") or intent),
+            intent_hash=str(normalized_preview.get("intent_hash") or intent_h),
+            project_kind=str(normalized_preview.get("project_kind") or "webapp"),
+            product_overview=_as_dict(normalized_preview.get("product_overview")),
+            intent_claims=[dict(j) for j in _as_list(normalized_preview.get("intent_claims")) if isinstance(j, dict)],
+            core_entities=[dict(j) for j in _as_list(normalized_preview.get("core_entities")) if isinstance(j, dict)],
+            cold_start_states=[
+                dict(j) for j in _as_list(normalized_preview.get("cold_start_states")) if isinstance(j, dict)
+            ],
+            permissions=[dict(j) for j in _as_list(normalized_preview.get("permissions")) if isinstance(j, dict)],
+            quality_constraints=[
+                dict(j) for j in _as_list(normalized_preview.get("quality_constraints")) if isinstance(j, dict)
+            ],
+            behavior_journeys=[
+                dict(j) for j in _as_list(normalized_preview.get("behavior_journeys")) if isinstance(j, dict)
             ],
         )
         warnings = lint_spec(preview)
@@ -1196,6 +1289,13 @@ def _serialize_spec(spec: FlatSpec) -> str:
 def load_flat_spec(spec_path: Path) -> FlatSpec:
     """Load a previously-compiled flat spec from disk."""
     data = json.loads(spec_path.read_text(encoding="utf-8"))
+    try:
+        data = normalize_journey_contracts(
+            data,
+            current_schema_version=SCHEMA_VERSION,
+        )
+    except VerificationContractError as exc:
+        raise StructuredSpecValidationError(str(exc)) from exc
     return FlatSpec(
         schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
         intent=str(data.get("intent", "")),

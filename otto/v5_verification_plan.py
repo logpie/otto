@@ -12,10 +12,14 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from otto.journey_contracts import VerificationContractError, normalize_journey_contracts
+from otto.journey_scope_policy import ExecutionScope, infer_execution_scope
+from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdicts
+from otto.spec_compile_flat import SCHEMA_VERSION as FLAT_SPEC_SCHEMA_VERSION
 from otto.v5_capability_inventory import parse_information_architecture_contract
 
 CHECK_KINDS = (
@@ -93,6 +97,7 @@ class RunnerVerificationOutcome:
     verification_plan: dict[str, Any]
     runner_checks_summary: list[dict[str, Any]]
     journey_failures: list[str]
+    verification_contract_failures: list[dict[str, Any]] = field(default_factory=list)
 
 
 def validate_lead_verdict(
@@ -104,10 +109,30 @@ def validate_lead_verdict(
     initial_verdict: str,
     node_kind: str = "leaf",
     matrix_scope: str = "leaf",
+    execution_scope: ExecutionScope | None = None,
 ) -> RunnerVerificationOutcome:
     """Run deterministic checks and compute the runner-adjusted verdict."""
     spec_path = session_dir / "spec" / "spec.json"
     spec = _coerce_spec(_load_json(spec_path))
+    resolved_execution_scope = execution_scope or infer_execution_scope(
+        kind="integration" if node_kind == "integration" else "plan_or_inline",
+        integration_branch=None,
+    )
+    verification_contract_failures: list[dict[str, Any]] = []
+    if spec:
+        try:
+            spec = normalize_journey_contracts(
+                spec,
+                current_schema_version=FLAT_SPEC_SCHEMA_VERSION,
+            )
+        except VerificationContractError as exc:
+            verification_contract_failures.append({
+                "kind": exc.code,
+                "id": exc.path,
+                "status": "fail",
+                "detail": exc.message,
+                "repair_domain": "spec_contract",
+            })
     charter_path = _find_charter(worktree_dir, project_dir)
     ia = parse_information_architecture_contract(charter_path) if charter_path else None
     node_kind = "integration" if node_kind == "integration" else "leaf"
@@ -146,10 +171,21 @@ def validate_lead_verdict(
         agent_verdict=agent_verdict,
     ))
 
-    journey_failures = _missing_passed_journeys(spec, agent_verdict) if spec and full_matrix else []
+    journey_verdicts = (
+        _journey_verdicts_from_sink(
+            spec,
+            agent_verdict,
+            execution_scope=resolved_execution_scope,
+        )
+        if spec and full_matrix and not verification_contract_failures
+        else []
+    )
+    journey_failures = failed_journey_ids(journey_verdicts) if journey_verdicts else []
     failed_required = [c for c in checks if c.get("required", True) and c.get("status") == "fail"]
 
     final_verdict = initial_verdict
+    if verification_contract_failures:
+        final_verdict = "partial" if final_verdict == "pass" else final_verdict
     if final_verdict == "pass" and failed_required:
         final_verdict = "partial"
     if final_verdict == "pass" and journey_failures:
@@ -161,12 +197,15 @@ def validate_lead_verdict(
         "spec_path": str(spec_path) if spec_path.exists() else "",
         "charter_path": str(charter_path) if charter_path else "",
         "node_kind": node_kind,
+        "execution_scope": resolved_execution_scope,
         "matrix_scope": matrix_scope,
         "full_matrix": full_matrix,
         "agent_verdict": initial_verdict,
         "final_verdict": final_verdict,
         "checks": checks,
         "advisories": advisories,
+        "journey_verdicts": journey_verdicts,
+        "verification_contract_failures": verification_contract_failures,
         "journey_failures": journey_failures,
         "summary": {
             "total": len(checks),
@@ -199,12 +238,14 @@ def validate_lead_verdict(
             "status": "fail",
             "detail": "required behavior_journey has no passed verdict entry",
         })
+    runner_summary.extend(verification_contract_failures)
 
     return RunnerVerificationOutcome(
         final_verdict=final_verdict,
         verification_plan=plan,
         runner_checks_summary=runner_summary,
         journey_failures=journey_failures,
+        verification_contract_failures=verification_contract_failures,
     )
 
 
@@ -854,20 +895,44 @@ def _check_local_scope_evidence(agent_verdict: dict[str, Any]) -> list[dict[str,
     )]
 
 
-def _missing_passed_journeys(spec: dict[str, Any], agent_verdict: dict[str, Any]) -> list[str]:
-    expected = [
-        str(j.get("id"))
-        for j in spec.get("behavior_journeys") or []
-        if isinstance(j, dict) and j.get("id")
+def _journey_verdicts_from_sink(
+    spec: dict[str, Any],
+    agent_verdict: dict[str, Any],
+    *,
+    execution_scope: ExecutionScope,
+) -> list[dict[str, Any]]:
+    journeys = [
+        journey
+        for journey in spec.get("behavior_journeys") or []
+        if isinstance(journey, dict)
     ]
-    if not expected:
-        return []
-    passed = {
-        str(j.get("id"))
-        for j in agent_verdict.get("journeys") or []
-        if isinstance(j, dict) and j.get("passed") is True and j.get("id")
-    }
-    return [jid for jid in expected if jid not in passed]
+    return resolve_journey_verdicts(
+        journeys=journeys,
+        execution_scope=execution_scope,
+        legacy_results=_legacy_agent_journey_results(agent_verdict),
+    )
+
+
+def _legacy_agent_journey_results(agent_verdict: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": str(journey.get("id") or ""),
+            "passed": journey.get("passed") is True,
+            "detail": str(journey.get("detail") or ""),
+        }
+        for journey in agent_verdict.get("journeys") or []
+        if isinstance(journey, dict) and journey.get("id")
+    ]
+
+
+def _missing_passed_journeys(spec: dict[str, Any], agent_verdict: dict[str, Any]) -> list[str]:
+    return failed_journey_ids(
+        _journey_verdicts_from_sink(
+            spec,
+            agent_verdict,
+            execution_scope="root_integration",
+        )
+    )
 
 
 def _coverage_label(item: Any) -> str:

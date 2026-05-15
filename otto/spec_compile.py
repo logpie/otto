@@ -48,6 +48,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from otto.journey_contracts import (
+    VerificationContractError,
+    normalize_journey_contracts,
+    synthesize_ui_pass_model,
+)
 from otto.spec_warnings import ValidationWarning, WarningCollector
 
 if TYPE_CHECKING:
@@ -55,7 +60,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("otto.spec_compile")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Schema v1 → v2 (round-3 audit gap 4): the redesign added Feature,
 # Component, Guardrail, dispatch_plan, audit_fixtures, shared_paths,
 # non_goals, done_means, amendments + 3 new CheckKinds, plus the
@@ -77,7 +82,7 @@ SCHEMA_LEGACY_GROUP_FIELDS_V1: tuple[str, ...] = (
 SPEC_FILENAME = "spec.json"
 COMPILE_PROMPT = "compile-spec.md"
 COMPILE_PROMPT_BROWNFIELD = "compile-spec-brownfield.md"
-PROJECT_KINDS: tuple[str, ...] = ("webapp", "cli", "library", "api")
+PROJECT_KINDS: tuple[str, ...] = ("webapp", "cli", "library", "api", "service")
 BROWNFIELD_MODES: tuple[str, ...] = ("baseline", "target")
 AUDIT_FIXTURE_KINDS: tuple[str, ...] = ("user", "channel", "follow", "data")
 SCHEMAS_DIR = Path(__file__).parent / "spec_schemas"
@@ -95,6 +100,7 @@ DEFAULT_EVIDENCE_KINDS_PER_KIND: dict[str, tuple[str, ...]] = {
     "api": ("ApiProbe", "StateInvariant", "RepoTestCheck"),
     "library": ("ImportCheck", "TypeCheck", "RepoTestCheck"),
     "cli": ("CLIProbe", "RepoTestCheck"),
+    "service": ("ApiProbe", "StateInvariant", "RepoTestCheck"),
 }
 
 _WEBAPP_SCAFFOLD_SCOPE_PATHS: tuple[str, ...] = (
@@ -426,6 +432,12 @@ class BehaviorJourney:
     description: str = ""
     surface: str = "web"
     deterministic: bool = True
+    start_state: str = ""
+    entry_route: str = ""
+    api_only: bool = False
+    verification_level: str = ""
+    probe_kind: str = ""
+    pass_model: dict[str, Any] = field(default_factory=dict)
     feature_ids: list[str] = field(default_factory=list)
     steps: list[BehaviorStep] = field(default_factory=list)
 
@@ -2252,6 +2264,14 @@ def _behavior_journey_from_dict(payload: dict[str, Any]) -> BehaviorJourney:
         description=str(payload.get("description") or ""),
         surface=str(payload.get("surface") or "web"),
         deterministic=bool(payload.get("deterministic", True)),
+        start_state=str(payload.get("start_state") or ""),
+        entry_route=str(payload.get("entry_route") or ""),
+        api_only=bool(payload.get("api_only") is True),
+        verification_level=str(payload.get("verification_level") or ""),
+        probe_kind=str(payload.get("probe_kind") or ""),
+        pass_model=dict(payload.get("pass_model") or {})
+        if isinstance(payload.get("pass_model"), dict)
+        else {},
         feature_ids=[str(item) for item in (payload.get("feature_ids") or [])],
         steps=steps,
     )
@@ -2264,9 +2284,42 @@ def _behavior_journey_to_dict(journey: BehaviorJourney) -> dict[str, Any]:
         "description": journey.description,
         "surface": journey.surface,
         "deterministic": journey.deterministic,
+        "start_state": journey.start_state,
+        "entry_route": journey.entry_route,
+        "api_only": journey.api_only,
+        "verification_level": journey.verification_level,
+        "probe_kind": journey.probe_kind,
+        "pass_model": dict(journey.pass_model),
         "feature_ids": list(journey.feature_ids),
         "steps": [dataclasses.asdict(step) for step in journey.steps],
     }
+
+
+def _normalize_behavior_journey_contracts(
+    spec: Spec,
+    collector: WarningCollector | None = None,
+) -> None:
+    payload = {
+        "schema_version": spec.schema_version,
+        "project_kind": spec.project_kind,
+        "behavior_journeys": [_behavior_journey_to_dict(j) for j in spec.behavior_journeys],
+    }
+    try:
+        normalized = normalize_journey_contracts(
+            payload,
+            current_schema_version=SCHEMA_VERSION,
+        )
+    except VerificationContractError as exc:
+        if collector is not None:
+            collector.add(code=exc.code, path=exc.path, message=exc.message)
+            return
+        raise
+    spec.schema_version = int(normalized.get("schema_version") or SCHEMA_VERSION)
+    spec.behavior_journeys = [
+        _behavior_journey_from_dict(item)
+        for item in normalized.get("behavior_journeys") or []
+        if isinstance(item, dict)
+    ]
 
 
 def _shared_contract_from_dict(payload: dict[str, Any]) -> SharedContract:
@@ -3170,6 +3223,7 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
         behavior_journeys=behavior_journeys_parsed,
         shared_contracts=shared_contracts_parsed,
     )
+    _normalize_behavior_journey_contracts(spec, collector)
     return spec, list(collector.warnings)
 
 
@@ -3310,10 +3364,22 @@ def _ensure_webapp_behavior_journeys(spec: Spec) -> list[str]:
             ),
             surface="web",
             deterministic=True,
+            start_state="empty_workspace",
+            entry_route="/",
             feature_ids=feature_ids,
             steps=steps,
         )
     )
+    spec.behavior_journeys[-1].pass_model = synthesize_ui_pass_model(
+        {
+            "id": spec.behavior_journeys[-1].id,
+            "description": spec.behavior_journeys[-1].description,
+            "start_state": spec.behavior_journeys[-1].start_state,
+            "entry_route": spec.behavior_journeys[-1].entry_route,
+            "covers_primary_actions": feature_ids,
+        }
+    )
+    spec.behavior_journeys[-1].verification_level = "ui"
     return [
         "webapp behavior journeys normalized: synthesized planned-main-user-flow "
         "from feature acceptance details"
@@ -3799,7 +3865,7 @@ def _load_kind_schema(project_kind: str) -> dict[str, Any] | None:
         return None
 
 
-def _validate_against_schema(payload: dict[str, Any], schema: dict[str, Any], path: str = "") -> list[str]:
+def _validate_against_schema(payload: Any, schema: dict[str, Any], path: str = "") -> list[str]:
     """Tiny schema validator — supports the subset we use.
 
     Skips the `jsonschema` package dependency on purpose; the schemas we
@@ -3946,6 +4012,12 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
                 "does not match a group/component id"
             )
         warnings.extend(_shared_contract_owned_path_overlap_warnings(contract, spec))
+
+    if spec.behavior_journeys:
+        try:
+            _normalize_behavior_journey_contracts(spec)
+        except VerificationContractError as exc:
+            errors.append(str(exc))
 
     for journey in spec.behavior_journeys:
         if not journey.steps:

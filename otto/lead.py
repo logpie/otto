@@ -33,6 +33,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from otto.journey_scope_policy import (
+    ExecutionScope,
+    infer_execution_scope,
+    node_kind_for_scope,
+)
 from otto.queue.task_graph import (
     add_cost as graph_add_cost,
     record_task,
@@ -95,6 +100,7 @@ async def run_lead(
     context_slice_note: str = "",
     decomp_runtime_context: dict[str, Any] | None = None,
     integration_packet_path: str = "",
+    execution_scope: ExecutionScope | None = None,
 ) -> LeadResult:
     """Run one Lead session for one task. The single v5 build primitive.
 
@@ -114,6 +120,10 @@ async def run_lead(
             scoped session artifacts. Empty means use full repo context.
     """
     started = time.monotonic()
+    resolved_execution_scope = execution_scope or infer_execution_scope(
+        kind=kind,
+        integration_branch=integration_branch,
+    )
     record_task_kwargs: dict[str, Any] = {
         "task_id": task_id,
         "intent": intent,
@@ -146,6 +156,7 @@ async def run_lead(
             project_dir=project_dir,
             session_dir=session_dir,
             integration_branch=integration_branch,
+            execution_scope=resolved_execution_scope,
         )
         try:
             existing_mcp = dict(getattr(options, "mcp_servers", {}) or {})
@@ -280,8 +291,9 @@ async def run_lead(
                     session_dir=session_dir,
                     agent_verdict=result.verify_result,
                     initial_verdict=result.verdict,
-                    node_kind=("integration" if is_integration else "leaf"),
+                    node_kind=node_kind_for_scope(resolved_execution_scope),
                     matrix_scope=_verification_matrix_scope(config),
+                    execution_scope=resolved_execution_scope,
                 )
                 previous_verdict = result.verdict
                 if runner_outcome.final_verdict in (

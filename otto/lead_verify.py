@@ -28,8 +28,13 @@ import os
 import shutil
 import subprocess
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
+
+from otto.journey_scope_policy import ExecutionScope
+from otto.journey_verdict_sink import resolve_journey_verdicts
+from otto.spec_compile_flat import StructuredSpecValidationError, load_flat_spec
 
 logger = logging.getLogger("otto.lead_verify")
 
@@ -43,6 +48,7 @@ async def run_verify_for_lead(
     project_dir: Path,
     session_dir: Path,
     feature_scope_ids: list[str],
+    execution_scope: ExecutionScope = "leaf",
     timeout_s: int = 600,
 ) -> dict[str, Any]:
     """Run real verification against the running product.
@@ -81,7 +87,7 @@ async def run_verify_for_lead(
             f"spec has {len(spec.get('behavior_journeys') or [])} total)"
         )
 
-    journey_results: list[dict[str, Any]] = []
+    legacy_journey_results: list[dict[str, Any]] = []
     evidence: list[str] = []
 
     # ---- Layer 1: native test runner (npm test / pytest / cargo test / ...) ----
@@ -120,7 +126,7 @@ async def run_verify_for_lead(
         jid = journey.get("id") or "<unnamed>"
         # If both layers passed, journey passes. Otherwise it's flagged.
         if overall_native_passed and overall_browser_passed:
-            journey_results.append({
+            legacy_journey_results.append({
                 "id": jid,
                 "passed": True,
                 "detail": (
@@ -143,12 +149,17 @@ async def run_verify_for_lead(
                     f"browser journey {browser_outcome.get('status', '?')}: "
                     f"{browser_outcome.get('summary', '?')}"
                 )
-            journey_results.append({
+            legacy_journey_results.append({
                 "id": jid,
                 "passed": False,
                 "detail": "; ".join(failure_reasons),
             })
 
+    journey_results = resolve_journey_verdicts(
+        journeys=journeys_in_scope,
+        execution_scope=execution_scope,
+        legacy_results=legacy_journey_results,
+    )
     passed = sum(1 for r in journey_results if r["passed"])
     total = len(journey_results)
     if test_outcome["status"] == "no_tests" and (
@@ -373,10 +384,8 @@ def _load_flat_spec_for_session(session_dir: Path) -> dict[str, Any] | None:
     if not spec_path.exists():
         return None
     try:
-        with spec_path.open(encoding="utf-8") as f:
-            data: dict[str, Any] = json.load(f)
-        return data
-    except (OSError, json.JSONDecodeError):
+        return asdict(load_flat_spec(spec_path))
+    except (OSError, json.JSONDecodeError, StructuredSpecValidationError):
         return None
 
 

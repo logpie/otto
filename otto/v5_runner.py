@@ -41,6 +41,7 @@ from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 from otto import paths as _paths
+from otto.journey_scope_policy import ExecutionScope
 from otto.lead import LeadKind, LeadResult, run_lead
 from otto.safe_slug import safe_slug
 from otto.v5_preflight import (
@@ -1784,6 +1785,7 @@ async def run_v5_pipeline(
                     child_summaries=child_summaries,
                     preflight_result=preflight_result,
                     integration_packet_path=str(integration_packet_path),
+                    execution_scope="root_integration",
                 )
                 _commit_integration_agent_changes(
                     project_dir=project_dir,
@@ -3032,6 +3034,7 @@ async def _run_lead_with_fallback(
     context_slice_note: str = "",
     decomp_runtime_context: dict[str, Any] | None = None,
     on_event: Any = None,
+    execution_scope: ExecutionScope = "leaf",
 ) -> LeadResult:
     """Run a Lead with task-level provider fallback.
 
@@ -3070,6 +3073,7 @@ async def _run_lead_with_fallback(
         child_summaries=child_summaries,
         context_slice_note=context_slice_note,
         decomp_runtime_context=decomp_runtime_context,
+        execution_scope=execution_scope,
     )
     duration_a = _time.monotonic() - started
     append_attempt(
@@ -3120,6 +3124,7 @@ async def _run_lead_with_fallback(
         child_summaries=child_summaries,
         context_slice_note=context_slice_note,
         decomp_runtime_context=decomp_runtime_context,
+        execution_scope=execution_scope,
     )
     append_attempt(
         session_dir / "summary.json",
@@ -3609,6 +3614,7 @@ async def _run_integration(
             child_summaries=summaries,
             preflight_result=preflight_result,
             integration_packet_path=str(integration_packet_path),
+            execution_scope="subtree_integration",
         )
         _commit_integration_agent_changes(
             project_dir=project_dir,

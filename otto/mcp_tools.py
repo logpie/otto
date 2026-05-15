@@ -33,7 +33,9 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+from otto.journey_scope_policy import ExecutionScope
 
 logger = logging.getLogger("otto.mcp_tools")
 
@@ -162,6 +164,7 @@ def create_otto_mcp_server(
     project_dir: Path,
     session_dir: Path,
     integration_branch: str | None,
+    execution_scope: str = "leaf",
 ):
     """Build the in-process MCP server for one Lead session.
 
@@ -306,6 +309,7 @@ def create_otto_mcp_server(
                 project_dir=project_dir,
                 session_dir=session_dir,
                 feature_scope_ids=scope_ids,
+                execution_scope=cast(ExecutionScope, execution_scope),
             )
             return _ok(result)
         except Exception as exc:  # noqa: BLE001 — best-effort
