@@ -999,3 +999,22 @@ Verification:
 - Touched-file type check: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error ...`
   passed: 0 errors, 0 warnings, 0 notes.
 - `git diff --check` passed.
+
+## Implementation Gate — 2026-05-15 — agent-native repair protocol (4 protocol commits + fixes)
+
+### Round 1 — Codex (REVISE)
+- [CRITICAL] composite gate ran after commit_hook → post-commit bypass — fixed by Codex (ed70bc5cc): pre-commit gate on working tree + post-commit gate via pre_repair_head..HEAD
+- [CRITICAL] dict(os.environ) serialized into packet/result/CLI → secret leak — fixed by Codex: serialized-env allowlist; runtime exec keeps live env
+- [IMPORTANT] AgentCallError escaped run_oracle_repair_agent — fixed: caught → structured merge_blocked escalation, session/cost preserved
+- [IMPORTANT] budgets reset on packet replay; cost/idle/closeout unenforced — fixed: budget reconciled from events.jsonl under lock; closeout implemented
+- [IMPORTANT] agent-run oracle pass ignored if controller oracle budget exhausted — fixed: packet reloaded after each agent turn, freshest oracle evaluated before escalation
+- [REFACTOR] RepairPacket construction duplicated x4 — fixed: shared _build_repair_packet (env-allowlist + baseline + budget-replay live once)
+
+### Round 2 — Codex re-reviewed fixes (REVISE — both CRITICALs confirmed fixed; 2 new IMPORTANT)
+- [IMPORTANT] CRITICAL-1 fix introduced a glob-ownership regression (literal-only _path_allowed false-blocks owned globs like src/features/foo/**) — fixed by Codex (8169f042e): extracted shared otto/path_ownership.py; build.py delegates (test_build 73 passed, no drift); _path_allowed gains globs, keeps literal-prefix
+- [IMPORTANT] closeout still dispatched a provider call after hard cost/wall/idle exhaustion — fixed: _CLOSEOUT_AGENT_REASONS = {budget_exhausted, oracle_budget_exhausted} only; cost/wall/idle/diff → packet-derived escalation, no agent turn
+
+### Round 3 — Codex re-reviewed round-2 fixes
+- APPROVED. No new CRITICAL/IMPORTANT. Shared matcher preserves build._matches_any semantics (no import cycle, no drift); closeout reason-gate complete; both CRITICALs remain fixed.
+
+Plan Gate: 4 rounds (11+7+3 findings) → APPROVED. Implementation Gate: 3 rounds (5+2 findings) → APPROVED.
