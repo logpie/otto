@@ -78,10 +78,13 @@ async def test_root_integration_step0b_recovery_flips_final_verdict_to_pass(
             emitted_subtask_ids=[child_id],
         )
 
+    async def fake_smoke_preflight(**_kwargs: Any) -> dict[str, Any]:
+        return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
+
     monkeypatch.setattr(v5_runner, "compile_flat_spec", fake_compile_flat_spec)
     monkeypatch.setattr(v5_runner, "_process_children", fake_process_children)
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", lambda *a, **k: [])
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight_with_repair", fake_smoke_preflight)
 
     result = await v5_runner.run_v5_pipeline(
         project_dir=repo,

@@ -78,9 +78,12 @@ async def test_four_root_children_reach_main_before_root_integration(
         set_verdict(repo, task_id, "pass")
         return LeadResult(task_id=task_id, verdict="pass", decomposition="inline")
 
+    async def fake_smoke_preflight(**_kwargs):
+        return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
+
     monkeypatch.setattr(v5_runner, "compile_flat_spec", fake_compile_flat_spec)
     monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", lambda *a, **k: [])
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight_with_repair", fake_smoke_preflight)
 
     result = await v5_runner.run_v5_pipeline(
         project_dir=repo,

@@ -173,3 +173,135 @@ broken foundations) — leave it for user decision.
   fix the nested-integration worktree/checkout bug + regression
   test + smoke; then re-run 08 to confirm before iTracker.
   ScheduleWakeup heartbeat continues.
+- 02:20 PDT — Codex FIXED root cause. v5_branching.py
+  merge_branch_into(): discover branch's owning worktree via
+  `git worktree list --porcelain`, merge inside it (skip the
+  colliding checkout), per-target flock to serialize concurrent
+  child→subtree merges. General fix, not 08-specific. Regression
+  test red→green. 306 smoke / 113 hardening / 37 merge-worktree
+  green. Claude reviewed concurrency-critical path. Committed
+  89d4bad54. e4696 = separate runner-check nuance (follow-up,
+  non-blocking); bc66f = correct dependency-block (not a bug).
+- 02:24 PDT — relaunched 08-data-platform (fix/relaunch cycle 1/3)
+  to confirm fix live. Driver PID 56126, run dir
+  /Users/yuxuan/otto-projects/field-tests/20260515-092442.
+  Monitor re-armed. iTracker gate: clears when 08-rerun shows
+  depth=3 dual recursion with NO checkout-already-used-by-worktree
+  failure (honest pass/partial OK; the checkout bug must be gone).
+- 02:26 PDT — heartbeat fired early; 08-rerun only 1.5min in (spec-compile stage), no checkout bug, nothing to evaluate yet. Monitor b0bspb0ml armed for completion. Re-scheduled heartbeat.
+- 02:43 PDT — 08-rerun DONE: verdict=partial, checkout_worktree_bug=0
+  (FIX CONFIRMED — was 5+ before), depth=3, merge_blocked=0. Recursed
+  subtree v5-6fcdc5d2f192: 3/3 grandchildren pass. Two None-verdict
+  children (722b24,4f386) correctly dependency-blocked by the partial
+  subtree (Pass-4 gate, = Codex's bc66f determination, NOT orphaning).
+  "Subtree partial despite passing grandchildren" = the known
+  runner-check/product-test divergence Codex flagged earlier
+  (non-blocking follow-up, logged for wake report). The HARD blocker
+  (checkout-worktree fatal) is genuinely fixed.
+- iTracker GATE: CLEARED. 07✓ 06✓ 09✓ 08✓ (root bug fixed+confirmed,
+  no unresolved root regression; subtree-partial-divergence is a
+  noted non-blocking follow-up, not a crash/corruption/false-pass).
+- 02:44 PDT — iTracker capstone LAUNCHED. Canonical v6e Linear-lite
+  intent (74 lines). Dir /Users/yuxuan/otto-projects/v5-itracker-
+  overnight-024432, session 2026-05-15-094440-2cd91c, otto v5 run
+  PID 61081, --provider claude --budget 5400 --max-parallel 4
+  --tier modular. Depth-aware monitor armed. Evaluating E2E:
+  compile→decomp→child verdicts→nested integration→boot smoke→
+  final verdict; watch checkout-worktree-bug must stay 0.
+
+## Known non-blocking follow-ups (for wake report)
+- Runner-check/product-test divergence: a recursed subtree whose
+  grandchildren all PASS can still be refused upward as 'partial'
+  because runner-level checks are stricter than product acceptance
+  (seen on 08 e4696/6fcdc5). Honest (no false pass) but costs a
+  clean pass. Codex-identified; needs a dedicated pass.
+- task_graph verdict bookkeeping staleness: a grandchild recovered
+  via integration-level repair can remain merge_blocked in
+  task_graph.json while git shows it reached pass (seen 06 auth).
+  Observability/honest-state issue, not correctness.
+- 03:15 PDT — iTracker @30min: spec attempt-1 (13 advisory), root emit=5, scaffold child v5-1ff1e82163e5 PASS, 4 vertical leaves (bd433492/5928c7/ab8f88/3e49b5) building in parallel, all inline (modular depth-2: scaffold+4 leaves, no recursion chosen for this product — expected). checkout-worktree bug=0 during parallel build. Integration phase (real test of fix 89d4bad54 at scale) still ahead.
+- 03:22 PDT — iTracker @37min: scaffold PASS, v5-3e49b5d57293 PASS, v5-ab8f88e9e318 partial, v5-5928c7f67ece building, v5-bd433492f6d1 → MERGE_BLOCKED via correct P0 path: log says 'Child remained partial after verify/repair; refusing upward merge' = agentic repair fired + honest containment (NOT cold block, NOT silent merge — same correct behavior as 09 vault-export). checkout-worktree bug=0 at scale during parallel build. No root bug. Integration phase still ahead.
+- 03:27 PDT — iTracker @43min: 3/5 children PASS (scaffold/3e49b5/5928c7), 2 MERGE_BLOCKED via correct P0 honest-containment (bd433492+ab8f88: 'remained partial after verify/repair; refusing upward merge' — agentic repair fired, not silent merge). checkout-worktree bug=0 at scale (fix 89d4bad54 holds). Integration clean-deploy hit cross-leaf TS drift (User.notification_prefs missing across leaves + vite/vitest config). PREFLIGHT REPAIR LOOP RECOVERED IT: repair agent added notification_prefs to User interface, fixed vite.config import → tsc clean + vite build OK. 2nd repair lead working start.sh/WS_PORT. = post-hardening agentic repair recovering real decomposition-boundary bugs autonomously at scale. STRONG positive E2E evidence. Run continuing (47min budget left).
+
+## FINAL WAKE REPORT (03:36 PDT, mission complete)
+
+### Recursion verdict — VALIDATED (round 6, 4 scenarios)
+- 07-lang-toolchain (CLI, no boot oracle): depth=3, all leaves pass.
+- 06-saas-platform (web): depth=3 + LIVE agentic repair — an auth
+  grandchild hit merge_blocked, was recovered to pass and merged up
+  the nested chain (commit fa58a81 in that run's repo).
+- 08-data-platform (dual concurrent recursion): exposed a REAL root
+  bug (nested-integration git-checkout of a branch already bound to
+  its dedicated integ worktree). Codex root-fixed it; 08-rerun
+  confirmed clean: depth=3, checkout bug 0, 0 merge_blocked.
+- 09-failing-slice: HONEST failure propagation — 3 agentic-repair
+  dispatches, broken slices refused upward merge, working slices on
+  main, honest terminal verdict, no hang.
+
+### Failure-propagation verdict — VALIDATED
+09 + iTracker both showed: verify/repair fires, unrecoverable work
+is refused upward (never silent-merged), honest terminal verdict,
+no false pass, no hang.
+
+### Codex fixes this session (commit hashes)
+- b18e21b9d P0 (verdict/merge integrity)
+- 21b0f715d P1 (router-defaults-lenient)
+- 146f2a889 P2 (over-classification)
+- 2cb5f8503 P4 + standing brittleness guardrail
+- 89d4bad54 nested-integration → merge in branch's OWNING worktree
+  + per-target flock (THE overnight find from 08; the key fix
+  validated at scale by iTracker)
+- bb7155d65 forced recursion/failure scenarios (test assets)
+
+### iTracker capstone E2E — merge_blocked, but a POSITIVE result
+- Verdict merge_blocked. Cost $16.23. Wall 2930s (~49m of 90m —
+  terminated honestly, did NOT hang or exhaust budget).
+- checkout-worktree bug: **0 across the entire 49-min run at
+  scale** → fix 89d4bad54 definitively holds. (Primary goal.)
+- 0 Tracebacks. No crash. No false pass. No silent broken merge.
+- Decomp: root emit=5 (scaffold + 4 vertical leaves), modular
+  depth-2 (planner chose flat for this product; recursion was
+  force-validated in round 6).
+- 3/5 children PASS and landed on main (scaffold v5-1ff1e82163e5,
+  v5-3e49b5d57293, v5-5928c7f67ece). 2 leaves (Auth bd433492,
+  Cycles ab8f88) → merge_blocked via CORRECT P0 honest containment
+  ("remained partial after verify/repair; refusing upward merge").
+- Agentic repair WORKED at scale: preflight repair loop fixed a
+  real cross-leaf TS contract drift (added User.notification_prefs,
+  fixed vite/vitest config → build clean, committed d5b2a03) AND a
+  WS-port wiring bug (committed cb39870); structured merge-driver
+  auto-resolved 3 conflicts (commit feb8415).
+- WHY merge_blocked (honest): 2 leaves the repair loop couldn't
+  fully fix within budget + clean-deploy port contention on
+  8000/8001 from prior-run zombies (test-harness hygiene, NOT an
+  Otto bug). The product was genuinely not fully deployable, so
+  Otto correctly refused to claim pass.
+
+### Bottom line — is post-hardening v5 working smoothly E2E?
+YES for what the hardening targeted. v5 does not one-shot a
+production-grade product flawlessly, but it is now HONEST and
+SELF-RECOVERING: zero checkout bug at scale, zero silent broken
+merges, zero false passes, zero hangs/crashes, and autonomous
+recovery of real decomposition-boundary bugs (type drift, port
+wiring, merge conflicts) committed to main. The merge_blocked is
+the system correctly declining to claim success on an
+incompletely-deployable product — exactly the behavior P0–P4 were
+built to produce. The brittleness class is contained behind the
+standing guardrail.
+
+### Known non-blocking follow-ups for user review
+1. Runner-check vs product-test divergence: a subtree whose
+   grandchildren all PASS can still be refused as 'partial'
+   because runner checks are stricter than product acceptance
+   (seen 08 e4696/6fcdc5; likely why iTracker Auth/Cycles stayed
+   partial). Needs a dedicated pass — could be the difference
+   between iTracker merge_blocked vs pass.
+2. task_graph verdict bookkeeping staleness (06 auth grandchild
+   showed merge_blocked in graph while git showed recovered→pass).
+3. Test-harness port hygiene: iTracker default ports
+   8000/8001/5173 are NOT auto-reaped across runs (contributed to
+   the merge_blocked). Recommend a pre-run reaper covering default
+   ports too, not just the field-test 19xxx range.
+4. Worth targeted investigation: why Auth (bd433492) + Cycles
+   (ab8f88) leaves stayed partial after verify/repair — product
+   complexity vs budget vs follow-up #1.

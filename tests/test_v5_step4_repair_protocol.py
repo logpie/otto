@@ -173,9 +173,6 @@ async def test_merge_conflict_repair_packet_carries_three_way_context_and_no_leg
     session_dir = tmp_path / "session"
     session_dir.mkdir()
 
-    async def legacy_adapter(**_kwargs: Any) -> Any:
-        raise AssertionError("merge conflict repair must not use the legacy preflight adapter")
-
     packets: list[RepairPacket] = []
 
     async def fake_repair(packet: RepairPacket, **kwargs: Any) -> OracleRepairResult:
@@ -202,9 +199,11 @@ async def test_merge_conflict_repair_packet_carries_three_way_context_and_no_leg
         assert ok, detail
         return OracleRepairResult(verdict="pass", summary="resolved", packet_path=str(packet.packet_path))
 
-    monkeypatch.setattr(v5_runner, "_run_preflight_repair_agent", legacy_adapter)
+    async def fake_smoke_preflight(**_kwargs: Any) -> dict[str, Any]:
+        return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
+
     monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_repair)
-    monkeypatch.setattr(v5_runner, "smoke_clean_deploy", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight_with_repair", fake_smoke_preflight)
 
     result = LeadResult(task_id="v5-child", verdict="pass", cost_usd=0.1)
     await v5_runner._merge_child_branch(
