@@ -1,3 +1,37 @@
+# Agent-Native Repair Protocol Findings
+
+_written_at: 2026-05-15T00:00:00Z
+
+## Current State
+
+- `otto/v5_preflight_repair.py` owns `RepairPacket`, the clean-oracle repair loop, packet journaling, composite gate evaluation, and baseline capture.
+- `run_oracle_repair_agent` reloaded an existing packet, persisted it, initialized `cost_usd`, `agent_turns_used`, and `oracle_invocations` to zero, then looped through agent turn -> controller oracle -> optional commit -> composite gate.
+- `_evaluate_composite_gate` derived changed paths from `git status --porcelain`. After a commit hook committed the repair, porcelain became clean, so committed out-of-scope changes and committed conflict markers were invisible.
+- `build_clean_verify_oracle_command` serialized `dict(os.environ)` into `CleanVerifyOracleCommand.env`; that env was copied into `RepairPacket.acceptance_oracle.env` and `CleanOracleResult.env`.
+- Agent-side `clean-verify --json --repair-packet ...` calls `append_repair_packet_oracle_event`, which writes the latest oracle result into the packet and appends an `oracle_run` event.
+- `otto/v5_runner.py` constructed repair packets in four places: integration preflight, child verify, scaffold, and merge-conflict repair. The construction shape was nearly identical but not centralized.
+
+## Constraints
+
+- Worktree is `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2` on branch `cc-i2p-2`.
+- Existing unrelated dirty files must be preserved.
+- No branch creation and no commits.
+- Packet events are append-only JSONL and already timestamped by `_append_repair_event`.
+- The composite gate must be strict both before and after commit hooks: pre-commit checks scope/conflict/unmerged state on dirty/staged changes; post-commit checks clean state plus committed changed paths from `pre_repair_head..HEAD`.
+- Serialized packet/result/CLI JSON must not contain raw ambient secret env keys or values.
+- Budget replay must occur under the per-unit lock before repair-loop decisions.
+
+## Open Decisions
+
+- Closeout reserve is feasible as a reserved outer agent invocation used only for an escalation prompt. The repair loop should subtract `closeout_agent_turns` from repair turns and only spend that reserve on closeout, not on another repair attempt.
+- Cost enforcement can use the runner-reported dollar cost and any cost-like fields found in breakdown payloads. There is no separate token budget field in `RepairBudget`, so token-only providers without an estimated cost cannot be hard-capped here beyond provider `max_turns`.
+
+## Verification Targets
+
+- New focused regressions should fail against the current production code before protocol edits.
+- Existing repair-protocol tests should remain green.
+- Required no-regress batch, smoke tier, ruff, and basedpyright should run after implementation.
+
 # Otto redesign — research
 
 ## P0 verdict/merge integrity hardening (2026-05-15)

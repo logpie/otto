@@ -19,9 +19,11 @@ from otto.v5_clean_verify import (
 from otto.v5_preflight_repair import (
     RepairBudget,
     RepairPacket,
+    append_repair_packet_oracle_event,
     oracle_progress_reproducible,
     run_oracle_repair_agent,
 )
+from otto.agent import AgentCallError
 from otto import v5_runner
 
 
@@ -328,6 +330,204 @@ async def test_composite_gate_blocks_smoke_pass_with_dirty_markers_and_scope_vio
     assert result.composite_gate["clean_worktree"] is False
     assert result.composite_gate["conflict_markers"] is False
     assert result.composite_gate["scope_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_composite_gate_blocks_scope_and_conflict_before_commit_hook_commits(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "allowed.txt").write_text("ok\n", encoding="utf-8")
+    (repo / "outside.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "seed")
+    pre_repair_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-precommit-gate",
+        budget=RepairBudget(agent_turns=1, oracle_invocations=1),
+        allowed_paths=("allowed.txt",),
+        scope_policy="allowed_paths",
+    )
+    packet.capture_scope_baseline()
+
+    async def fake_agent(prompt: str, options: Any, **kwargs: Any) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt, options, kwargs
+        (repo / "allowed.txt").write_text(
+            "<<<<<<< ours\nok\n=======\nother\n>>>>>>> theirs\n",
+            encoding="utf-8",
+        )
+        (repo / "outside.txt").write_text("outside change\n", encoding="utf-8")
+        return "fixed smoke only", 0.01, "sess-precommit", {}
+
+    async def fake_oracle(_packet: RepairPacket) -> CleanOracleResult:
+        return _oracle_result(passed=True)
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: CleanOracleResult) -> tuple[bool, str]:
+        _git(repo, "add", "-A")
+        proc = _git(repo, "commit", "-q", "-m", "bad repair")
+        return proc.returncode == 0, proc.stderr or proc.stdout
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=fake_agent,
+        oracle_runner=fake_oracle,
+        commit_hook=commit_hook,
+    )
+
+    assert result.verdict == "merge_blocked"
+    assert result.composite_gate is not None
+    assert result.composite_gate["scope_ok"] is False
+    assert result.composite_gate["conflict_markers"] is False
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == pre_repair_head
+
+
+def test_clean_verify_oracle_serialization_omits_secret_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_value = "sk-test-redaction-value-1234567890"
+    monkeypatch.setenv("OPENAI_API_KEY", secret_value)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secretredactionvalue1234567890")
+    monkeypatch.setenv("OTTO_CLEAN_VERIFY_WORKTREE", "/tmp/ambient-should-not-win")
+    project = tmp_path / "project"
+    project.mkdir()
+    packet_path = tmp_path / "session" / "repair" / "unit-secret" / "repair_packet.json"
+    command = build_clean_verify_oracle_command(
+        worktree_path=project,
+        verify_scope="scaffold",
+        repair_packet_path=packet_path,
+    )
+    result = verify_from_clean_oracle(project, scope="scaffold", timeout_s=5)
+    packet = _packet(tmp_path, project, unit_id="unit-secret")
+    packet.acceptance_oracle["env"] = command.env
+    packet.latest_oracle_result = result.to_jsonable()
+    packet.persist()
+
+    serialized = "\n".join([
+        json.dumps(command.env, sort_keys=True),
+        json.dumps(result.to_jsonable(), sort_keys=True),
+        packet.packet_path.read_text(encoding="utf-8"),
+    ])
+    assert "OPENAI_API_KEY" not in serialized
+    assert "GITHUB_TOKEN" not in serialized
+    assert secret_value not in serialized
+    assert "ghp_secretredactionvalue1234567890" not in serialized
+    assert command.env["OTTO_CLEAN_VERIFY_WORKTREE"] == str(project.resolve(strict=False))
+
+
+@pytest.mark.asyncio
+async def test_agent_call_error_returns_structured_repair_escalation(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-agent-error",
+        budget=RepairBudget(agent_turns=2, oracle_invocations=1),
+    )
+
+    async def failing_agent(prompt: str, options: Any, **kwargs: Any) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt, options, kwargs
+        raise AgentCallError(
+            "provider crashed",
+            session_id="sess-crashed",
+            total_cost_usd=0.27,
+            last_events=[{"type": "result", "summary": "partial"}],
+        )
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=failing_agent,
+        oracle_runner=lambda _packet: _oracle_result(passed=False),
+    )
+
+    assert result.verdict == "merge_blocked"
+    assert result.agent_session_id == "sess-crashed"
+    assert result.cost_usd == pytest.approx(0.27)
+    assert result.escalation is not None
+    assert result.escalation["reason"] == "agent_call_failed"
+    events = packet.events()
+    assert any(event["event"]["type"] == "agent_error" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_repair_budget_replays_prior_usage_and_preserves_closeout_reserve(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-budget-replay",
+        budget=RepairBudget(
+            agent_turns=2,
+            oracle_invocations=2,
+            cost_usd=0.50,
+            closeout_agent_turns=1,
+        ),
+    )
+    packet.persist()
+    packet.append_event("agent_turn", digest="old-agent", payload={"turn": 1, "cost_usd": 0.10})
+    packet.append_event("oracle_run", digest="old-oracle", payload={"source": "controller", "passed": False})
+    phases: list[str] = []
+
+    async def fake_agent(prompt: str, options: Any, **kwargs: Any) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt, options
+        phases.append(str(kwargs.get("phase_name") or ""))
+        assert kwargs.get("phase_name") == "REPAIR_CLOSEOUT"
+        return "closeout: still blocked", 0.03, "sess-closeout", {}
+
+    async def fake_oracle(_packet: RepairPacket) -> CleanOracleResult:
+        raise AssertionError("budget replay should block before spending another oracle")
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=fake_agent,
+        oracle_runner=fake_oracle,
+    )
+
+    assert phases == ["REPAIR_CLOSEOUT"]
+    assert result.verdict == "merge_blocked"
+    assert result.agent_turns_used == 2
+    assert result.oracle_invocations == 1
+    assert result.cost_usd == pytest.approx(0.13)
+    assert result.escalation is not None
+    assert result.escalation["closeout_source"] == "agent_reserve"
+
+
+@pytest.mark.asyncio
+async def test_agent_appended_passing_oracle_is_evaluated_before_controller_budget_escalation(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-agent-oracle",
+        budget=RepairBudget(agent_turns=1, oracle_invocations=0),
+    )
+    packet.persist()
+
+    async def fake_agent(prompt: str, options: Any, **kwargs: Any) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt, options, kwargs
+        append_repair_packet_oracle_event(packet.packet_path, _oracle_result(passed=True), source="agent")
+        return "oracle passed", 0.01, "sess-oracle", {}
+
+    async def forbidden_controller_oracle(_packet: RepairPacket) -> CleanOracleResult:
+        raise AssertionError("controller oracle budget is exhausted; agent oracle should be used")
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=fake_agent,
+        oracle_runner=forbidden_controller_oracle,
+    )
+
+    assert result.verdict == "pass"
+    assert result.oracle_invocations == 1
+    assert result.agent_session_id == "sess-oracle"
 
 
 def test_flaky_oracle_alternating_domains_is_not_progress_without_reproducible_digest() -> None:

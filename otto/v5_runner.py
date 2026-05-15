@@ -37,7 +37,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 from otto import paths as _paths
@@ -732,6 +732,101 @@ def _worktree_product_contract(
     return contract
 
 
+def _build_repair_packet(
+    *,
+    session_dir: Path,
+    repair_slug: str,
+    worktree_path: Path,
+    task_id: str,
+    phase: str,
+    repair_phase: str,
+    verify_scope: Scope,
+    config: dict[str, Any],
+    budget_prefix: str,
+    default_agent_turns: int,
+    default_oracle_invocations: int,
+    latest_oracle_result: dict[str, Any] | Callable[[Any], dict[str, Any]],
+    product_contract: dict[str, Any],
+    integration_context: dict[str, Any],
+    success_criteria: dict[str, Any],
+    attempt_history_entry: dict[str, Any],
+    expected_artifact_paths: list[str] | None = None,
+    allowed_paths: list[str] | None = None,
+    scope_policy: str = "unrestricted",
+    branch: str | None = None,
+    repair_unit_extra: dict[str, Any] | None = None,
+) -> RepairPacket:
+    packet_dir = session_dir / "repair" / repair_slug
+    packet_path = packet_dir / "repair_packet.json"
+    packet_dir.mkdir(parents=True, exist_ok=True)
+    link_path = packet_dir / "worktree"
+    if not link_path.exists():
+        try:
+            link_path.symlink_to(worktree_path)
+        except OSError as exc:
+            logger.debug("could not symlink repair worktree %s: %s", link_path, exc)
+
+    oracle_command = build_clean_verify_oracle_command(
+        worktree_path=worktree_path,
+        verify_scope=verify_scope,
+        repair_packet_path=packet_path,
+    )
+    if callable(latest_oracle_result):
+        latest_payload = latest_oracle_result(oracle_command)
+    else:
+        latest_payload = latest_oracle_result
+    attempt_history = _packet_attempt_history(packet_path)
+    attempt = dict(attempt_history_entry)
+    attempt.setdefault("_written_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    attempt_history.append(attempt)
+    current_branch = branch if branch is not None else _git_capture(worktree_path, ["branch", "--show-current"])
+    head = _git_capture(worktree_path, ["rev-parse", "HEAD"])
+    packet = RepairPacket(
+        repair_unit={
+            "id": repair_slug,
+            "worktree": str(worktree_path),
+            "branch": current_branch,
+            "task_id": task_id,
+            "phase": phase,
+            "repair_phase": repair_phase,
+            "allowed_paths": list(allowed_paths or []),
+            "scope_policy": scope_policy,
+            **dict(repair_unit_extra or {}),
+        },
+        acceptance_oracle={
+            "verify_scope": verify_scope,
+            "command": oracle_command.command,
+            "env": oracle_command.env,
+            "timeout_s": int(config.get(f"{budget_prefix}_oracle_timeout_s") or 300),
+            "expected_artifact_paths": list(expected_artifact_paths or []),
+            "success_criteria": {
+                "clean_deploy": True,
+                "composite_gate": True,
+                **dict(success_criteria),
+            },
+        },
+        latest_oracle_result=latest_payload,
+        product_contract=product_contract,
+        integration_context=integration_context,
+        attempt_history=attempt_history,
+        current_state={
+            "git_status": _git_status_short(worktree_path),
+            "head": head,
+            "pre_repair_head": head,
+            "branch": current_branch,
+        },
+        budget=_repair_budget_from_config(
+            config,
+            prefix=budget_prefix,
+            default_agent_turns=default_agent_turns,
+            default_oracle_invocations=default_oracle_invocations,
+        ),
+        packet_dir=packet_dir,
+    )
+    packet.capture_scope_baseline()
+    return packet
+
+
 def _repair_result_payload(
     *,
     repair_phase: str,
@@ -789,53 +884,20 @@ async def _run_preflight_payload_repair_session(
         f"{task_id}-{repair_phase}-{initial_payload.get('phase') or initial_payload.get('check') or 'repair'}",
         max_len=64,
     )
-    packet_dir = session_dir / "repair" / repair_slug
-    packet_path = packet_dir / "repair_packet.json"
-    packet_dir.mkdir(parents=True, exist_ok=True)
-    link_path = packet_dir / "worktree"
-    if not link_path.exists():
-        try:
-            link_path.symlink_to(worktree_path)
-        except OSError:
-            pass
-    oracle_command = build_clean_verify_oracle_command(
-        worktree_path=worktree_path,
-        verify_scope=verify_scope,
-        repair_packet_path=packet_path,
-    )
-    attempt_history = _packet_attempt_history(packet_path)
-    attempt_history.append({
-        "type": "preflight_blocking_payload",
-        "repair_phase": repair_phase,
-        "payload": initial_payload,
-        "git_status": _git_status_short(worktree_path),
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    })
     branch = _git_capture(worktree_path, ["branch", "--show-current"])
-    packet = RepairPacket(
-        repair_unit={
-            "id": repair_slug,
-            "worktree": str(worktree_path),
-            "branch": branch or integration_branch or "",
-            "task_id": task_id,
-            "phase": "preflight",
-            "repair_phase": repair_phase,
-            "allowed_paths": list(allowed_paths or []),
-            "scope_policy": scope_policy,
-        },
-        acceptance_oracle={
-            "verify_scope": verify_scope,
-            "command": oracle_command.command,
-            "env": oracle_command.env,
-            "timeout_s": int(config.get(f"{repair_phase}_repair_oracle_timeout_s") or 300),
-            "expected_artifact_paths": [],
-            "success_criteria": {
-                "clean_deploy": True,
-                "composite_gate": True,
-                "preflight_operation": initial_payload.get("check") or repair_phase,
-            },
-        },
-        latest_oracle_result=_clean_oracle_payload_from_preflight_payload(
+    packet = _build_repair_packet(
+        session_dir=session_dir,
+        repair_slug=repair_slug,
+        worktree_path=worktree_path,
+        task_id=task_id,
+        phase="preflight",
+        repair_phase=repair_phase,
+        verify_scope=verify_scope,
+        config=config,
+        budget_prefix=f"{repair_phase}_repair",
+        default_agent_turns=1,
+        default_oracle_invocations=3,
+        latest_oracle_result=lambda oracle_command: _clean_oracle_payload_from_preflight_payload(
             payload=initial_payload,
             worktree=worktree_path,
             scope=verify_scope,
@@ -849,21 +911,19 @@ async def _run_preflight_payload_repair_session(
             "initial_preflight": initial_payload,
             **dict(integration_context or {}),
         },
-        attempt_history=attempt_history,
-        current_state={
-            "git_status": _git_status_short(worktree_path),
-            "head": _git_capture(worktree_path, ["rev-parse", "HEAD"]),
-            "branch": branch,
+        success_criteria={
+            "preflight_operation": initial_payload.get("check") or repair_phase,
         },
-        budget=_repair_budget_from_config(
-            config,
-            prefix=f"{repair_phase}_repair",
-            default_agent_turns=1,
-            default_oracle_invocations=3,
-        ),
-        packet_dir=packet_dir,
+        attempt_history_entry={
+            "type": "preflight_blocking_payload",
+            "repair_phase": repair_phase,
+            "payload": initial_payload,
+            "git_status": _git_status_short(worktree_path),
+        },
+        allowed_paths=list(allowed_paths or []),
+        scope_policy=scope_policy,
+        branch=branch or integration_branch or "",
     )
-    packet.capture_scope_baseline()
     _emit(on_event, {
         "event": f"{event_prefix}_repair_start",
         "task_id": task_id,
@@ -1265,63 +1325,23 @@ async def _run_child_verify_repair_packet(
 ) -> Any:
     del max_parallel, run_started_at
     repair_slug = safe_slug(f"{child_task_id}-child-verify", max_len=64)
-    packet_dir = child_session_dir / "repair" / repair_slug
-    packet_path = packet_dir / "repair_packet.json"
-    packet_dir.mkdir(parents=True, exist_ok=True)
-    link_path = packet_dir / "worktree"
-    if not link_path.exists():
-        try:
-            link_path.symlink_to(child_worktree)
-        except OSError as exc:
-            logger.warning("could not symlink child repair worktree: %s", exc)
-
-    oracle_command = build_clean_verify_oracle_command(
-        worktree_path=child_worktree,
-        verify_scope="subtree",
-        repair_packet_path=packet_path,
-    )
     verify_result = result.verify_result if isinstance(result.verify_result, dict) else {}
     diff_name_only = _git_diff_name_only(child_worktree)
-    attempt_history = _packet_attempt_history(packet_path)
-    attempt_history.append({
-        "type": "pre_repair_verdict",
-        "verdict": result.verdict,
-        "verify_result": verify_result,
-        "diff_stat": _git_diff_stat(child_worktree),
-        "diff_name_only": diff_name_only,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    })
-    packet = RepairPacket(
-        repair_unit={
-            "id": repair_slug,
-            "worktree": str(child_worktree),
-            "branch": _git_capture(child_worktree, ["branch", "--show-current"]),
-            "task_id": child_task_id,
-            "phase": "child_verify",
-            "repair_phase": "child_verify",
-            "allowed_paths": list((get_task(project_dir, child_task_id) or {}).get("owned_paths") or []),
-            "scope_policy": (
-                "allowed_paths"
-                if (get_task(project_dir, child_task_id) or {}).get("owned_paths")
-                else "unrestricted"
-            ),
-            "canonical_verdict_path": str(child_session_dir / "verdict.json"),
-        },
-        acceptance_oracle={
-            "verify_scope": "subtree",
-            "command": oracle_command.command,
-            "env": oracle_command.env,
-            "timeout_s": int(config.get("child_verify_repair_oracle_timeout_s") or 300),
-            "expected_artifact_paths": [str(child_session_dir / "verdict.json")],
-            "success_criteria": {
-                "clean_deploy": True,
-                "composite_gate": True,
-                "child_merge_gate": "pass_or_reviewed_partial",
-                "no_uncommitted_state": True,
-                "no_conflict_markers": True,
-            },
-        },
-        latest_oracle_result=_make_initial_oracle_payload(
+    child_task = get_task(project_dir, child_task_id) or {}
+    owned_paths = [str(path) for path in (child_task.get("owned_paths") or [])]
+    packet = _build_repair_packet(
+        session_dir=child_session_dir,
+        repair_slug=repair_slug,
+        worktree_path=child_worktree,
+        task_id=child_task_id,
+        phase="child_verify",
+        repair_phase="child_verify",
+        verify_scope="subtree",
+        config=config,
+        budget_prefix="child_verify_repair",
+        default_agent_turns=1,
+        default_oracle_invocations=3,
+        latest_oracle_result=lambda oracle_command: _make_initial_oracle_payload(
             worktree=child_worktree,
             scope="subtree",
             oracle_command=oracle_command,
@@ -1339,7 +1359,7 @@ async def _run_child_verify_repair_packet(
         },
         integration_context={
             "parent_integration_branch": parent_integration_branch,
-            "child_task": get_task(project_dir, child_task_id) or {},
+            "child_task": child_task,
             "child_verdict": {
                 "verdict": result.verdict,
                 "verify_called": result.verify_called,
@@ -1356,21 +1376,23 @@ async def _run_child_verify_repair_packet(
                 "session_dir": str(child_session_dir),
             },
         },
-        attempt_history=attempt_history,
-        current_state={
-            "git_status": _git_status_short(child_worktree),
-            "head": _git_capture(child_worktree, ["rev-parse", "HEAD"]),
-            "branch": _git_capture(child_worktree, ["branch", "--show-current"]),
+        success_criteria={
+            "child_merge_gate": "pass_or_reviewed_partial",
+            "no_uncommitted_state": True,
+            "no_conflict_markers": True,
         },
-        budget=_repair_budget_from_config(
-            config,
-            prefix="child_verify_repair",
-            default_agent_turns=1,
-            default_oracle_invocations=3,
-        ),
-        packet_dir=packet_dir,
+        attempt_history_entry={
+            "type": "pre_repair_verdict",
+            "verdict": result.verdict,
+            "verify_result": verify_result,
+            "diff_stat": _git_diff_stat(child_worktree),
+            "diff_name_only": diff_name_only,
+        },
+        expected_artifact_paths=[str(child_session_dir / "verdict.json")],
+        allowed_paths=owned_paths,
+        scope_policy="allowed_paths" if owned_paths else "unrestricted",
+        repair_unit_extra={"canonical_verdict_path": str(child_session_dir / "verdict.json")},
     )
-    packet.capture_scope_baseline()
     _emit(on_event, {
         "event": "child_verify_repair_start",
         "task_id": child_task_id,
@@ -1927,47 +1949,19 @@ async def _run_scaffold_repair_packet(
     on_event: Any = None,
 ) -> Any:
     repair_slug = safe_slug(f"{architect_tid}-scaffold", max_len=64)
-    packet_dir = _paths.cross_sessions_dir(project_dir) / "repair" / repair_slug
-    packet_path = packet_dir / "repair_packet.json"
-    oracle_command = build_clean_verify_oracle_command(
-        worktree_path=project_dir,
-        verify_scope="scaffold",
-        repair_packet_path=packet_path,
-    )
-    attempt_history = _packet_attempt_history(packet_path)
-    attempt_history.append({
-        "type": "scaffold_oracle_failure",
-        "oracle_result": latest_result.to_jsonable(),
-        "diff_stat": _git_diff_stat(project_dir),
-        "diff_name_only": _git_diff_name_only(project_dir),
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    })
     owned_paths = [str(path) for path in (architect_task.get("owned_paths") or [])]
-    packet = RepairPacket(
-        repair_unit={
-            "id": repair_slug,
-            "worktree": str(project_dir),
-            "branch": _git_capture(project_dir, ["branch", "--show-current"]),
-            "task_id": architect_tid,
-            "phase": "scaffold",
-            "repair_phase": "scaffold",
-            "allowed_paths": owned_paths,
-            "scope_policy": "allowed_paths" if owned_paths else "unrestricted",
-        },
-        acceptance_oracle={
-            "verify_scope": "scaffold",
-            "command": oracle_command.command,
-            "env": oracle_command.env,
-            "timeout_s": int(config.get("scaffold_repair_oracle_timeout_s") or 300),
-            "expected_artifact_paths": [],
-            "success_criteria": {
-                "clean_deploy": True,
-                "scaffold_scope": True,
-                "composite_gate": True,
-                "no_uncommitted_state": True,
-                "no_conflict_markers": True,
-            },
-        },
+    packet = _build_repair_packet(
+        session_dir=_paths.cross_sessions_dir(project_dir),
+        repair_slug=repair_slug,
+        worktree_path=project_dir,
+        task_id=architect_tid,
+        phase="scaffold",
+        repair_phase="scaffold",
+        verify_scope="scaffold",
+        config=config,
+        budget_prefix="scaffold_repair",
+        default_agent_turns=1,
+        default_oracle_invocations=3,
         latest_oracle_result=latest_result.to_jsonable(),
         product_contract={
             **_worktree_product_contract(worktree=project_dir),
@@ -1983,21 +1977,20 @@ async def _run_scaffold_repair_packet(
                 "patch": _git_diff_full(project_dir),
             },
         },
-        attempt_history=attempt_history,
-        current_state={
-            "git_status": _git_status_short(project_dir),
-            "head": _git_capture(project_dir, ["rev-parse", "HEAD"]),
-            "branch": _git_capture(project_dir, ["branch", "--show-current"]),
+        success_criteria={
+            "scaffold_scope": True,
+            "no_uncommitted_state": True,
+            "no_conflict_markers": True,
         },
-        budget=_repair_budget_from_config(
-            config,
-            prefix="scaffold_repair",
-            default_agent_turns=1,
-            default_oracle_invocations=3,
-        ),
-        packet_dir=packet_dir,
+        attempt_history_entry={
+            "type": "scaffold_oracle_failure",
+            "oracle_result": latest_result.to_jsonable(),
+            "diff_stat": _git_diff_stat(project_dir),
+            "diff_name_only": _git_diff_name_only(project_dir),
+        },
+        allowed_paths=owned_paths,
+        scope_policy="allowed_paths" if owned_paths else "unrestricted",
     )
-    packet.capture_scope_baseline()
     _emit(on_event, {
         "event": "scaffold_repair_start",
         "task_id": architect_tid,
@@ -2913,13 +2906,6 @@ async def _repair_child_merge_conflict_once(
     except Exception:  # noqa: BLE001
         conflict_packet_path = ""
     repair_slug = safe_slug(f"{child_task_id}-merge-conflict", max_len=64)
-    packet_dir = child_session_dir / "repair" / repair_slug
-    packet_path = packet_dir / "repair_packet.json"
-    oracle_command = build_clean_verify_oracle_command(
-        worktree_path=child_worktree,
-        verify_scope="subtree",
-        repair_packet_path=packet_path,
-    )
     source_branch = str(conflict_packet.get("source_branch") or "")
     target_branch = str(conflict_packet.get("target_branch") or parent_integration_branch)
     if not source_branch:
@@ -2927,40 +2913,19 @@ async def _repair_child_merge_conflict_once(
 
         source_branch = child_branch_name(child_task_id)
     base_ref = _git_capture(project_dir, ["merge-base", target_branch, source_branch])
-    attempt_history = _packet_attempt_history(packet_path)
-    attempt_history.append({
-        "type": "merge_conflict_detected",
-        "detail": original_detail,
-        "conflict_packet": conflict_packet_path,
-        "unmerged_paths": paths,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    })
-    packet = RepairPacket(
-        repair_unit={
-            "id": repair_slug,
-            "worktree": str(child_worktree),
-            "branch": _git_capture(child_worktree, ["branch", "--show-current"]),
-            "task_id": child_task_id,
-            "phase": "merge",
-            "repair_phase": "merge",
-            "allowed_paths": paths,
-            "scope_policy": "allowed_paths" if paths else "unrestricted",
-        },
-        acceptance_oracle={
-            "verify_scope": "subtree",
-            "command": oracle_command.command,
-            "env": oracle_command.env,
-            "timeout_s": int(config.get("merge_repair_oracle_timeout_s") or 300),
-            "expected_artifact_paths": [conflict_packet_path] if conflict_packet_path else [],
-            "success_criteria": {
-                "clean_deploy": True,
-                "composite_gate": True,
-                "merge_retry": True,
-                "three_way_conflicts_resolved": True,
-                "no_whole_side_checkout": True,
-            },
-        },
-        latest_oracle_result=_make_initial_oracle_payload(
+    packet = _build_repair_packet(
+        session_dir=child_session_dir,
+        repair_slug=repair_slug,
+        worktree_path=child_worktree,
+        task_id=child_task_id,
+        phase="merge",
+        repair_phase="merge",
+        verify_scope="subtree",
+        config=config,
+        budget_prefix="merge_repair",
+        default_agent_turns=1,
+        default_oracle_invocations=3,
+        latest_oracle_result=lambda oracle_command: _make_initial_oracle_payload(
             worktree=child_worktree,
             scope="subtree",
             oracle_command=oracle_command,
@@ -3008,21 +2973,21 @@ async def _repair_child_merge_conflict_once(
                 "name_only": paths,
             },
         },
-        attempt_history=attempt_history,
-        current_state={
-            "git_status": _git_status_short(child_worktree),
-            "head": _git_capture(child_worktree, ["rev-parse", "HEAD"]),
-            "branch": _git_capture(child_worktree, ["branch", "--show-current"]),
+        success_criteria={
+            "merge_retry": True,
+            "three_way_conflicts_resolved": True,
+            "no_whole_side_checkout": True,
         },
-        budget=_repair_budget_from_config(
-            config,
-            prefix="merge_repair",
-            default_agent_turns=1,
-            default_oracle_invocations=3,
-        ),
-        packet_dir=packet_dir,
+        attempt_history_entry={
+            "type": "merge_conflict_detected",
+            "detail": original_detail,
+            "conflict_packet": conflict_packet_path,
+            "unmerged_paths": paths,
+        },
+        expected_artifact_paths=[conflict_packet_path] if conflict_packet_path else [],
+        allowed_paths=paths,
+        scope_policy="allowed_paths" if paths else "unrestricted",
     )
-    packet.capture_scope_baseline()
     _emit(on_event, {
         "event": "merge_conflict_repair_agent_start",
         "task_id": child_task_id,

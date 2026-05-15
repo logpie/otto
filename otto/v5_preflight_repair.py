@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import contextlib
 import inspect
 import json
@@ -182,6 +183,11 @@ class RepairPacket:
     def capture_scope_baseline(self) -> None:
         worktree = Path(str(self.repair_unit.get("worktree") or "."))
         self.current_state["scope_baseline"] = _scope_baseline(worktree)
+        head = _git_capture(worktree, ["rev-parse", "HEAD"])
+        if head:
+            self.current_state.setdefault("pre_repair_head", head)
+            self.current_state["head"] = head
+        self.current_state["scope_baseline_captured_at"] = _iso_now()
         self.persist()
 
 
@@ -196,6 +202,16 @@ class OracleRepairResult:
     packet_path: str = ""
     composite_gate: dict[str, Any] | None = None
     escalation: dict[str, Any] | None = None
+
+
+@dataclass
+class _BudgetUsage:
+    cost_usd: float = 0.0
+    agent_turns_used: int = 0
+    closeout_turns_used: int = 0
+    oracle_invocations: int = 0
+    first_event_epoch_s: float | None = None
+    last_event_epoch_s: float | None = None
 
 
 OracleRunner = Callable[[RepairPacket], CleanOracleResult | Awaitable[CleanOracleResult]]
@@ -299,6 +315,58 @@ def _git_status_porcelain(worktree: Path) -> str:
     return proc.stdout or ""
 
 
+def _git_capture(worktree: Path, args: list[str], *, timeout: int = 10) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or "").strip()
+
+
+def _git_changed_paths_between(worktree: Path, base_ref: str, head_ref: str) -> list[str]:
+    if not base_ref or not head_ref or base_ref == head_ref:
+        return []
+    output = _git_capture(
+        worktree,
+        ["diff", "--name-only", f"{base_ref}..{head_ref}"],
+        timeout=20,
+    )
+    paths = [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip() and not _is_generated_path(line.strip())
+    ]
+    return sorted(dict.fromkeys(paths))
+
+
+def _git_diff_churn_between(worktree: Path, base_ref: str, head_ref: str) -> int:
+    if not base_ref or not head_ref or base_ref == head_ref:
+        return 0
+    output = _git_capture(
+        worktree,
+        ["diff", "--numstat", f"{base_ref}..{head_ref}"],
+        timeout=20,
+    )
+    churn = 0
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or _is_generated_path(parts[-1].strip()):
+            continue
+        for value in parts[:2]:
+            if value.isdigit():
+                churn += int(value)
+    return churn
+
+
 def _porcelain_path(line: str) -> str:
     raw = line[3:] if len(line) > 3 else ""
     if " -> " in raw:
@@ -383,11 +451,33 @@ def _has_unmerged_paths(worktree: Path) -> bool:
     return False
 
 
-def _evaluate_composite_gate(packet: RepairPacket, oracle_result: CleanOracleResult) -> dict[str, Any]:
+def _changed_paths_since_repair_start(
+    packet: RepairPacket,
+    worktree: Path,
+    baseline: dict[str, Any] | None,
+) -> list[str]:
+    paths = _modified_paths_since_baseline(worktree, baseline)
+    pre_repair_head = str(
+        packet.current_state.get("pre_repair_head")
+        or packet.current_state.get("head")
+        or ""
+    )
+    current_head = _git_capture(worktree, ["rev-parse", "HEAD"])
+    for path in _git_changed_paths_between(worktree, pre_repair_head, current_head):
+        paths.append(path)
+    return sorted(dict.fromkeys(paths))
+
+
+def _evaluate_composite_gate(
+    packet: RepairPacket,
+    oracle_result: CleanOracleResult,
+    *,
+    require_clean_worktree: bool = True,
+) -> dict[str, Any]:
     worktree = Path(str(packet.repair_unit.get("worktree") or "."))
     baseline_raw = packet.current_state.get("scope_baseline")
     baseline = baseline_raw if isinstance(baseline_raw, dict) else None
-    changed_since_baseline = _modified_paths_since_baseline(worktree, baseline)
+    changed_since_baseline = _changed_paths_since_repair_start(packet, worktree, baseline)
     allowed_paths = [str(path) for path in (packet.repair_unit.get("allowed_paths") or [])]
     scope_policy = str(packet.repair_unit.get("scope_policy") or "unrestricted")
     scope_violations = (
@@ -399,12 +489,15 @@ def _evaluate_composite_gate(packet: RepairPacket, oracle_result: CleanOracleRes
         else []
     )
     dirty_paths = _modified_paths_since_baseline(worktree, None)
-    conflict_markers = _has_conflict_markers(worktree, dirty_paths or changed_since_baseline)
+    conflict_marker_paths = sorted(dict.fromkeys([*dirty_paths, *changed_since_baseline]))
+    conflict_markers = _has_conflict_markers(worktree, conflict_marker_paths)
     unmerged = _has_unmerged_paths(worktree)
     gate = {
         "oracle_passed": oracle_result.passed,
         "clean_worktree": not dirty_paths,
+        "require_clean_worktree": require_clean_worktree,
         "dirty_paths": dirty_paths,
+        "changed_paths": changed_since_baseline,
         "conflict_markers": not conflict_markers,
         "unmerged_paths": not unmerged,
         "scope_ok": not scope_violations,
@@ -412,19 +505,39 @@ def _evaluate_composite_gate(packet: RepairPacket, oracle_result: CleanOracleRes
         "verdict_consistency": True,
         "graph_invariants": True,
     }
-    gate["passed"] = all(
-        bool(gate[key])
-        for key in (
-            "oracle_passed",
-            "clean_worktree",
-            "conflict_markers",
-            "unmerged_paths",
-            "scope_ok",
-            "verdict_consistency",
-            "graph_invariants",
-        )
-    )
+    required_keys = [
+        "oracle_passed",
+        "conflict_markers",
+        "unmerged_paths",
+        "scope_ok",
+        "verdict_consistency",
+        "graph_invariants",
+    ]
+    if require_clean_worktree:
+        required_keys.append("clean_worktree")
+    gate["passed"] = all(bool(gate[key]) for key in required_keys)
     return gate
+
+
+def _diff_churn_since_repair_start(packet: RepairPacket) -> int:
+    worktree = Path(str(packet.repair_unit.get("worktree") or "."))
+    pre_repair_head = str(
+        packet.current_state.get("pre_repair_head")
+        or packet.current_state.get("head")
+        or ""
+    )
+    current_head = _git_capture(worktree, ["rev-parse", "HEAD"])
+    committed_churn = _git_diff_churn_between(worktree, pre_repair_head, current_head)
+    uncommitted_output = _git_capture(worktree, ["diff", "--numstat"], timeout=20)
+    uncommitted_churn = 0
+    for line in uncommitted_output.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3 or _is_generated_path(parts[-1].strip()):
+            continue
+        for value in parts[:2]:
+            if value.isdigit():
+                uncommitted_churn += int(value)
+    return committed_churn + uncommitted_churn
 
 
 def _issue_fingerprint_set(result: CleanOracleResult) -> set[str]:
@@ -561,6 +674,109 @@ def _infra_oracle_result(packet: RepairPacket, message: str) -> CleanOracleResul
     )
 
 
+def _parse_event_epoch_s(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    return float(calendar.timegm(parsed))
+
+
+def _float_event_value(value: Any) -> float:
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _replay_budget_usage(packet: RepairPacket) -> _BudgetUsage:
+    usage = _BudgetUsage()
+    with _repair_unit_lock(packet.packet_dir, packet.repair_unit_id):
+        if not packet.events_path.exists():
+            return usage
+        lines = packet.events_path.read_text(encoding="utf-8").splitlines()
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts = _parse_event_epoch_s(row.get("ts"))
+        if ts is not None:
+            usage.first_event_epoch_s = (
+                ts
+                if usage.first_event_epoch_s is None
+                else min(usage.first_event_epoch_s, ts)
+            )
+            usage.last_event_epoch_s = (
+                ts
+                if usage.last_event_epoch_s is None
+                else max(usage.last_event_epoch_s, ts)
+            )
+        event = row.get("event")
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "")
+        if event_type == "agent_turn":
+            usage.agent_turns_used += 1
+            usage.cost_usd += _float_event_value(event.get("cost_usd"))
+        elif event_type == "closeout_agent_turn":
+            usage.agent_turns_used += 1
+            usage.closeout_turns_used += 1
+            usage.cost_usd += _float_event_value(event.get("cost_usd"))
+        elif event_type == "closeout_agent_error":
+            usage.agent_turns_used += 1
+            usage.closeout_turns_used += 1
+            usage.cost_usd += _float_event_value(event.get("cost_usd"))
+        elif event_type == "agent_error":
+            if event.get("agent_turn_charged", True):
+                usage.agent_turns_used += 1
+            usage.cost_usd += _float_event_value(event.get("cost_usd"))
+        elif event_type == "oracle_run":
+            usage.oracle_invocations += 1
+    return usage
+
+
+def _reload_packet_state(packet: RepairPacket) -> RepairPacket:
+    if not packet.packet_path.exists():
+        return packet
+    with _repair_unit_lock(packet.packet_dir, packet.repair_unit_id):
+        try:
+            loaded = RepairPacket.load(packet.packet_path)
+        except (OSError, json.JSONDecodeError, ValueError):
+            return packet
+    loaded.budget = packet.budget
+    return loaded
+
+
+def _cost_from_breakdown(raw: Any) -> float:
+    if isinstance(raw, dict):
+        for key in ("cost_usd", "total_cost_usd", "estimated_cost_usd"):
+            value = raw.get(key)
+            if isinstance(value, (int, float)):
+                return float(value)
+        for value in raw.values():
+            nested = _cost_from_breakdown(value)
+            if nested:
+                return nested
+    if isinstance(raw, list):
+        for value in raw:
+            nested = _cost_from_breakdown(value)
+            if nested:
+                return nested
+    return 0.0
+
+
+def _closeout_prompt(packet: RepairPacket, reason: str) -> str:
+    return (
+        "Write a concise structured escalation record for this repair packet. "
+        "Do not edit files or run more repair attempts. Use the packet events, "
+        "latest oracle result, and current state to explain why landing is "
+        f"blocked within budget. Reason: {reason}\n\n"
+        f"Repair packet: {packet.packet_path}\n"
+    )
+
+
 async def _default_oracle_runner(packet: RepairPacket) -> CleanOracleResult:
     command = [str(part) for part in (packet.acceptance_oracle.get("command") or [])]
     worktree = Path(str(packet.repair_unit.get("worktree") or "."))
@@ -624,7 +840,11 @@ def _structured_escalation(
     agent_turns_used: int,
     oracle_invocations: int,
     cost_usd: float,
+    closeout_summary: str = "",
 ) -> dict[str, Any]:
+    worktree = Path(str(packet.repair_unit.get("worktree") or "."))
+    baseline_raw = packet.current_state.get("scope_baseline")
+    baseline = baseline_raw if isinstance(baseline_raw, dict) else None
     return {
         "reason": reason,
         "oracle_command": packet.acceptance_oracle.get("command") or [],
@@ -635,16 +855,10 @@ def _structured_escalation(
         "agent_turns_used": agent_turns_used,
         "oracle_invocations": oracle_invocations,
         "cost_usd": cost_usd,
-        "files_changed": _modified_paths_since_baseline(
-            Path(str(packet.repair_unit.get("worktree") or ".")),
-            None,
-        ),
+        "files_changed": _changed_paths_since_repair_start(packet, worktree, baseline),
         "recommendation": "review_packet",
-        "closeout_source": (
-            "agent_reserve"
-            if packet.budget.closeout_agent_turns > 0
-            else "packet"
-        ),
+        "closeout_source": "agent_reserve" if closeout_summary else "packet",
+        "closeout_summary": closeout_summary,
         "_written_at": _iso_now(),
     }
 
@@ -658,6 +872,8 @@ async def run_oracle_repair_agent(
     commit_hook: CommitHook | None = None,
 ) -> OracleRepairResult:
     """Run or resume one durable repair session for a whole oracle unit."""
+    from otto.agent import AgentCallError, make_agent_options
+
     packet = repair_packet
     if packet.packet_path.exists():
         loaded = RepairPacket.load(packet.packet_path)
@@ -666,71 +882,72 @@ async def run_oracle_repair_agent(
         loaded.budget = packet.budget
         packet = loaded
     packet.persist()
+    if "scope_baseline" not in packet.current_state or "pre_repair_head" not in packet.current_state:
+        packet.capture_scope_baseline()
     worktree = Path(str(packet.repair_unit.get("worktree") or "."))
     started = time.monotonic()
-    cost_usd = 0.0
-    agent_turns_used = 0
-    oracle_invocations = 0
+    usage = _replay_budget_usage(packet)
+    cost_usd = usage.cost_usd
+    agent_turns_used = usage.agent_turns_used
+    closeout_turns_used = usage.closeout_turns_used
+    oracle_invocations = usage.oracle_invocations
+    prior_elapsed_wall_s = (
+        max(0.0, time.time() - usage.first_event_epoch_s)
+        if usage.first_event_epoch_s is not None
+        else 0.0
+    )
+    last_activity_epoch_s = usage.last_event_epoch_s or time.time()
     latest_oracle = _oracle_result_from_json(packet.latest_oracle_result)
     default_oracle = oracle_runner is None
 
-    while True:
-        if agent_turns_used >= packet.budget.agent_turns:
-            escalation = _structured_escalation(
-                packet,
-                reason="budget_exhausted",
-                agent_turns_used=agent_turns_used,
-                oracle_invocations=oracle_invocations,
-                cost_usd=cost_usd,
-            )
-            packet.append_event("repair_escalated", digest=latest_oracle.digest, payload=escalation)
-            packet.persist()
-            return OracleRepairResult(
-                verdict="merge_blocked",
-                summary="repair budget exhausted",
-                agent_session_id=packet.agent_session_id,
-                cost_usd=cost_usd,
-                agent_turns_used=agent_turns_used,
-                oracle_invocations=oracle_invocations,
-                packet_path=str(packet.packet_path),
-                escalation=escalation,
-            )
-        if time.monotonic() - started > packet.budget.wall_clock_s:
-            escalation = _structured_escalation(
-                packet,
-                reason="wall_clock_exhausted",
-                agent_turns_used=agent_turns_used,
-                oracle_invocations=oracle_invocations,
-                cost_usd=cost_usd,
-            )
-            packet.append_event("repair_escalated", digest=latest_oracle.digest, payload=escalation)
-            packet.persist()
-            return OracleRepairResult(
-                verdict="merge_blocked",
-                summary="repair wall-clock budget exhausted",
-                agent_session_id=packet.agent_session_id,
-                cost_usd=cost_usd,
-                agent_turns_used=agent_turns_used,
-                oracle_invocations=oracle_invocations,
-                packet_path=str(packet.packet_path),
-                escalation=escalation,
-            )
+    if agent_runner is None:
+        from otto.agent import run_agent_with_timeout
 
-        from otto.agent import make_agent_options
+        async def default_runner(
+            prompt: str,
+            options: Any,
+            **kwargs: Any,
+        ) -> tuple[str, float, str, dict[str, Any]]:
+            return await run_agent_with_timeout(prompt, options, **kwargs)
 
-        if agent_runner is None:
-            from otto.agent import run_agent_with_timeout
+        selected_runner: AgentRunner = default_runner
+    else:
+        selected_runner = agent_runner
 
-            async def default_runner(
-                prompt: str,
-                options: Any,
-                **kwargs: Any,
-            ) -> tuple[str, float, str, dict[str, Any]]:
-                return await run_agent_with_timeout(prompt, options, **kwargs)
+    def elapsed_wall_s() -> float:
+        return prior_elapsed_wall_s + (time.monotonic() - started)
 
-            selected_runner: AgentRunner = default_runner
-        else:
-            selected_runner = agent_runner
+    def repair_turn_limit() -> int:
+        return max(0, packet.budget.agent_turns - packet.budget.closeout_agent_turns)
+
+    def repair_turns_used() -> int:
+        return max(0, agent_turns_used - closeout_turns_used)
+
+    def budget_exhausted_reason(*, include_turn_limit: bool = True) -> str | None:
+        if elapsed_wall_s() > packet.budget.wall_clock_s:
+            return "wall_clock_exhausted"
+        if packet.budget.idle_s is not None:
+            idle_for = max(0.0, time.time() - last_activity_epoch_s)
+            if idle_for > packet.budget.idle_s:
+                return "idle_exhausted"
+        if packet.budget.cost_usd is not None and cost_usd >= packet.budget.cost_usd:
+            return "cost_exhausted"
+        if (
+            packet.budget.diff_churn is not None
+            and _diff_churn_since_repair_start(packet) > packet.budget.diff_churn
+        ):
+            return "diff_churn_exhausted"
+        if include_turn_limit and repair_turns_used() >= repair_turn_limit():
+            return "budget_exhausted"
+        return None
+
+    async def call_agent(
+        *,
+        prompt: str,
+        phase_name: str,
+        phase_label: str,
+        log_name: str,
+    ) -> tuple[str, float, str, dict[str, Any]]:
         options = make_agent_options(
             worktree,
             config,
@@ -740,28 +957,246 @@ async def run_oracle_repair_agent(
         max_turns = packet.budget.provider_max_turns or int(config.get("max_turns_per_call") or 1)
         options.max_turns = max(1, max_turns)
         options.cwd = str(worktree)
-        prompt = _repair_prompt(packet)
-        log_dir = packet.packet_dir / "agent" / f"turn-{agent_turns_used + 1}"
+        log_dir = packet.packet_dir / "agent" / log_name
         log_dir.mkdir(parents=True, exist_ok=True)
-        text, turn_cost, session_id, breakdown = await selected_runner(
+        timeout_s = int(
+            max(
+                1.0,
+                min(
+                    max(1.0, packet.budget.wall_clock_s - elapsed_wall_s()),
+                    float(config.get("run_budget_seconds") or 3600),
+                ),
+            )
+        )
+        return await selected_runner(
             prompt,
             options,
             log_dir=log_dir,
-            phase_name="REPAIR",
-            phase_label="oracle-repair",
-            timeout=int(min(packet.budget.wall_clock_s, float(config.get("run_budget_seconds") or 3600))),
+            phase_name=phase_name,
+            phase_label=phase_label,
+            timeout=timeout_s,
             project_dir=worktree,
         )
+
+    def reconcile_replayed_usage() -> None:
+        nonlocal cost_usd, agent_turns_used, closeout_turns_used, oracle_invocations
+        nonlocal last_activity_epoch_s, packet, latest_oracle
+        packet = _reload_packet_state(packet)
+        latest_oracle = _oracle_result_from_json(packet.latest_oracle_result)
+        replayed = _replay_budget_usage(packet)
+        cost_usd = max(cost_usd, replayed.cost_usd)
+        agent_turns_used = max(agent_turns_used, replayed.agent_turns_used)
+        closeout_turns_used = max(closeout_turns_used, replayed.closeout_turns_used)
+        oracle_invocations = max(oracle_invocations, replayed.oracle_invocations)
+        if replayed.last_event_epoch_s is not None:
+            last_activity_epoch_s = max(last_activity_epoch_s, replayed.last_event_epoch_s)
+
+    async def block_with_escalation(
+        *,
+        reason: str,
+        summary: str,
+        composite_gate: dict[str, Any] | None = None,
+        allow_closeout: bool = True,
+    ) -> OracleRepairResult:
+        nonlocal cost_usd, agent_turns_used, closeout_turns_used, last_activity_epoch_s
+        closeout_summary = ""
+        if (
+            allow_closeout
+            and closeout_turns_used < packet.budget.closeout_agent_turns
+            and agent_turns_used < packet.budget.agent_turns
+        ):
+            try:
+                text, turn_cost, session_id, breakdown = await call_agent(
+                    prompt=_closeout_prompt(packet, reason),
+                    phase_name="REPAIR_CLOSEOUT",
+                    phase_label="oracle-repair-closeout",
+                    log_name=f"closeout-{closeout_turns_used + 1}",
+                )
+                closeout_cost = float(turn_cost or 0.0) or _cost_from_breakdown(breakdown)
+                cost_usd += closeout_cost
+                agent_turns_used += 1
+                closeout_turns_used += 1
+                last_activity_epoch_s = time.time()
+                if session_id:
+                    packet.agent_session_id = session_id
+                closeout_summary = str(text or "")[-4000:]
+                packet.attempt_history.append({
+                    "type": "closeout_agent_turn",
+                    "turn": agent_turns_used,
+                    "agent_session_id": packet.agent_session_id,
+                    "cost_usd": closeout_cost,
+                    "breakdown": breakdown,
+                    "reason": reason,
+                    "_written_at": _iso_now(),
+                })
+                packet.append_event(
+                    "closeout_agent_turn",
+                    digest=latest_oracle.digest,
+                    payload={
+                        "agent_session_id": packet.agent_session_id,
+                        "turn": agent_turns_used,
+                        "cost_usd": closeout_cost,
+                        "reason": reason,
+                    },
+                )
+                packet.persist()
+            except AgentCallError as exc:
+                closeout_cost = float(exc.total_cost_usd or 0.0)
+                cost_usd += closeout_cost
+                agent_turns_used += 1
+                closeout_turns_used += 1
+                last_activity_epoch_s = time.time()
+                if exc.session_id:
+                    packet.agent_session_id = exc.session_id
+                packet.append_event(
+                    "closeout_agent_error",
+                    digest=latest_oracle.digest,
+                    payload={
+                        "agent_session_id": packet.agent_session_id,
+                        "reason": exc.reason,
+                        "cost_usd": closeout_cost,
+                    },
+                )
+                packet.persist()
+        escalation = _structured_escalation(
+            packet,
+            reason=reason,
+            agent_turns_used=agent_turns_used,
+            oracle_invocations=oracle_invocations,
+            cost_usd=cost_usd,
+            closeout_summary=closeout_summary,
+        )
+        packet.append_event("repair_escalated", digest=latest_oracle.digest, payload=escalation)
+        packet.persist()
+        return OracleRepairResult(
+            verdict="merge_blocked",
+            summary=summary,
+            agent_session_id=packet.agent_session_id,
+            cost_usd=cost_usd,
+            agent_turns_used=agent_turns_used,
+            oracle_invocations=oracle_invocations,
+            packet_path=str(packet.packet_path),
+            composite_gate=composite_gate,
+            escalation=escalation,
+        )
+
+    async def accept_or_block_passed_oracle() -> OracleRepairResult:
+        pre_commit_gate = _evaluate_composite_gate(
+            packet,
+            latest_oracle,
+            require_clean_worktree=False,
+        )
+        if not pre_commit_gate["passed"]:
+            return OracleRepairResult(
+                verdict="merge_blocked",
+                summary="clean-deploy passed but pre-commit composite repair gate blocked landing",
+                agent_session_id=packet.agent_session_id,
+                cost_usd=cost_usd,
+                agent_turns_used=agent_turns_used,
+                oracle_invocations=oracle_invocations,
+                packet_path=str(packet.packet_path),
+                composite_gate=pre_commit_gate,
+            )
+        if commit_hook is not None:
+            ok, detail = await _maybe_await(commit_hook(packet, latest_oracle))
+            packet.append_event(
+                "commit",
+                digest=latest_oracle.digest,
+                payload={"ok": ok, "detail": detail},
+            )
+            packet.persist()
+            if not ok:
+                return await block_with_escalation(
+                    reason="commit_failed",
+                    summary=detail,
+                    allow_closeout=False,
+                )
+
+        post_commit_gate = _evaluate_composite_gate(
+            packet,
+            latest_oracle,
+            require_clean_worktree=True,
+        )
+        if post_commit_gate["passed"]:
+            return OracleRepairResult(
+                verdict="pass",
+                summary="clean-deploy oracle and composite gate passed",
+                agent_session_id=packet.agent_session_id,
+                cost_usd=cost_usd,
+                agent_turns_used=agent_turns_used,
+                oracle_invocations=oracle_invocations,
+                packet_path=str(packet.packet_path),
+                composite_gate=post_commit_gate,
+            )
+        return OracleRepairResult(
+            verdict="merge_blocked",
+            summary="clean-deploy passed but composite repair gate blocked landing",
+            agent_session_id=packet.agent_session_id,
+            cost_usd=cost_usd,
+            agent_turns_used=agent_turns_used,
+            oracle_invocations=oracle_invocations,
+            packet_path=str(packet.packet_path),
+            composite_gate=post_commit_gate,
+        )
+
+    while True:
+        if latest_oracle.passed:
+            return await accept_or_block_passed_oracle()
+
+        reason = budget_exhausted_reason()
+        if reason is not None:
+            return await block_with_escalation(
+                reason=reason,
+                summary=f"repair {reason.replace('_', ' ')}",
+            )
+
+        try:
+            text, turn_cost, session_id, breakdown = await call_agent(
+                prompt=_repair_prompt(packet),
+                phase_name="REPAIR",
+                phase_label="oracle-repair",
+                log_name=f"turn-{repair_turns_used() + 1}",
+            )
+        except AgentCallError as exc:
+            error_cost = float(exc.total_cost_usd or 0.0)
+            cost_usd += error_cost
+            agent_turns_used += 1
+            last_activity_epoch_s = time.time()
+            if exc.session_id:
+                packet.agent_session_id = exc.session_id
+            packet.append_event(
+                "agent_error",
+                digest=latest_oracle.digest,
+                payload={
+                    "agent_session_id": packet.agent_session_id,
+                    "reason": exc.reason,
+                    "cost_usd": error_cost,
+                    "crash_path": exc.crash_path,
+                    "last_events": exc.last_events[-5:],
+                    "agent_turn_charged": True,
+                },
+            )
+            packet.persist()
+            return await block_with_escalation(
+                reason="agent_call_failed",
+                summary=f"repair agent failed: {exc.reason}",
+                allow_closeout=False,
+            )
+
         del text
-        cost_usd += float(turn_cost or 0.0)
+        packet = _reload_packet_state(packet)
+        latest_oracle = _oracle_result_from_json(packet.latest_oracle_result)
+        charged_cost = float(turn_cost or 0.0) or _cost_from_breakdown(breakdown)
+        cost_usd += charged_cost
         agent_turns_used += 1
+        last_activity_epoch_s = time.time()
         if session_id:
             packet.agent_session_id = session_id
         packet.attempt_history.append({
             "type": "agent_turn",
             "turn": agent_turns_used,
             "agent_session_id": packet.agent_session_id,
-            "cost_usd": float(turn_cost or 0.0),
+            "cost_usd": charged_cost,
             "breakdown": breakdown,
             "_written_at": _iso_now(),
         })
@@ -771,16 +1206,30 @@ async def run_oracle_repair_agent(
             payload={
                 "agent_session_id": packet.agent_session_id,
                 "turn": agent_turns_used,
-                "cost_usd": float(turn_cost or 0.0),
+                "cost_usd": charged_cost,
             },
         )
         packet.persist()
+        reconcile_replayed_usage()
+        if latest_oracle.passed:
+            return await accept_or_block_passed_oracle()
+
+        reason = budget_exhausted_reason(include_turn_limit=False)
+        if reason is not None:
+            return await block_with_escalation(
+                reason=reason,
+                summary=f"repair {reason.replace('_', ' ')}",
+            )
 
         if oracle_invocations >= packet.budget.oracle_invocations:
-            continue
+            return await block_with_escalation(
+                reason="oracle_budget_exhausted",
+                summary="repair oracle budget exhausted",
+            )
         raw_oracle = oracle_runner(packet) if oracle_runner is not None else _default_oracle_runner(packet)
         latest_oracle = await _maybe_await(raw_oracle)
         oracle_invocations += 1
+        last_activity_epoch_s = time.time()
         packet.latest_oracle_result = latest_oracle.to_jsonable()
         if not default_oracle:
             packet.append_event(
@@ -792,54 +1241,4 @@ async def run_oracle_repair_agent(
                 },
             )
         packet.persist()
-
-        if latest_oracle.passed and commit_hook is not None:
-            ok, detail = await _maybe_await(commit_hook(packet, latest_oracle))
-            packet.append_event(
-                "commit",
-                digest=latest_oracle.digest,
-                payload={"ok": ok, "detail": detail},
-            )
-            packet.persist()
-            if not ok:
-                escalation = _structured_escalation(
-                    packet,
-                    reason="commit_failed",
-                    agent_turns_used=agent_turns_used,
-                    oracle_invocations=oracle_invocations,
-                    cost_usd=cost_usd,
-                )
-                return OracleRepairResult(
-                    verdict="merge_blocked",
-                    summary=detail,
-                    agent_session_id=packet.agent_session_id,
-                    cost_usd=cost_usd,
-                    agent_turns_used=agent_turns_used,
-                    oracle_invocations=oracle_invocations,
-                    packet_path=str(packet.packet_path),
-                    escalation=escalation,
-                )
-
-        gate = _evaluate_composite_gate(packet, latest_oracle)
-        if gate["passed"]:
-            return OracleRepairResult(
-                verdict="pass",
-                summary="clean-deploy oracle and composite gate passed",
-                agent_session_id=packet.agent_session_id,
-                cost_usd=cost_usd,
-                agent_turns_used=agent_turns_used,
-                oracle_invocations=oracle_invocations,
-                packet_path=str(packet.packet_path),
-                composite_gate=gate,
-            )
-        if latest_oracle.passed:
-            return OracleRepairResult(
-                verdict="merge_blocked",
-                summary="clean-deploy passed but composite repair gate blocked landing",
-                agent_session_id=packet.agent_session_id,
-                cost_usd=cost_usd,
-                agent_turns_used=agent_turns_used,
-                oracle_invocations=oracle_invocations,
-                packet_path=str(packet.packet_path),
-                composite_gate=gate,
-            )
+        reconcile_replayed_usage()

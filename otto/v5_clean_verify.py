@@ -261,6 +261,67 @@ _STATEFUL_EXCLUDES = (
     "target",  # rust build dir
 )
 
+_SERIALIZED_ENV_EXACT_ALLOWLIST = {
+    "CI",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "NODE_OPTIONS",
+    "NO_COLOR",
+    "NPM_CONFIG_CACHE",
+    "PATH",
+    "PYTHONPATH",
+    "TMP",
+    "TEMP",
+    "TMPDIR",
+    "TZ",
+    "UV_CACHE_DIR",
+    "VIRTUAL_ENV",
+    "npm_config_cache",
+}
+_SERIALIZED_ENV_SUFFIX_ALLOWLIST = (
+    "_DIR",
+    "_HOST",
+    "_PATH",
+    "_PORT",
+    "_ROOT",
+)
+_SECRET_ENV_NAME_PARTS = (
+    "API_KEY",
+    "AUTH",
+    "COOKIE",
+    "CREDENTIAL",
+    "KEY",
+    "PASSWORD",
+    "SECRET",
+    "TOKEN",
+)
+
+
+def _secret_like_env_key(key: str) -> bool:
+    upper = key.upper()
+    return any(part in upper for part in _SECRET_ENV_NAME_PARTS)
+
+
+def _serialized_oracle_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return the small non-secret env surface safe to persist in packets."""
+    source = base_env if base_env is not None else os.environ
+    env: dict[str, str] = {}
+    for key, value in source.items():
+        if _secret_like_env_key(key):
+            continue
+        upper = key.upper()
+        if (
+            key in _SERIALIZED_ENV_EXACT_ALLOWLIST
+            or upper.startswith("OTTO_")
+            or upper.startswith("AGENT_BROWSER_")
+            or upper.startswith("PLAYWRIGHT_")
+            or upper.endswith(_SERIALIZED_ENV_SUFFIX_ALLOWLIST)
+        ):
+            env[str(key)] = str(value)
+    return env
+
 
 def _copy_project_clean(
     project_dir: Path, temp_root: Path
@@ -593,7 +654,7 @@ def build_clean_verify_oracle_command(
         "--verify-scope",
         verify_scope,
     ]
-    env = dict(os.environ)
+    env = _serialized_oracle_env()
     repo_root = Path(__file__).resolve().parents[1]
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = (
