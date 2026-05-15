@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -62,7 +62,7 @@ def _enqueue_task(
         task_id=task_id,
         intent=intent,
         parent_task_id=parent_task_id,
-        integration_branch=entry["integration_branch"],
+        integration_branch=cast(str, entry["integration_branch"]),
     )
 
 
@@ -102,8 +102,8 @@ class FakeLead:
             marker = _worktree(kwargs["project_dir"], kwargs["session_dir"]) / "docs" / f"integration-{task_id}.md"
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(f"integration marker for {task_id}\n", encoding="utf-8")
-            set_verdict(self.repo, task_id, "partial", cost_usd=0.0)
-            return LeadResult(task_id=task_id, verdict="partial", decomposition="inline")
+            set_verdict(self.repo, task_id, "pass", cost_usd=0.0)
+            return LeadResult(task_id=task_id, verdict="pass", decomposition="inline")
 
         if task_id in self.children:
             if task_id not in self._emitted:

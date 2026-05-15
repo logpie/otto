@@ -38,10 +38,10 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 from otto import paths as _paths
-from otto.lead import LeadResult, run_lead
+from otto.lead import LeadKind, LeadResult, run_lead
 from otto.v5_preflight import (
     check_scaffold_compiles,
     filter_blocked_descendants,
@@ -64,6 +64,7 @@ from otto.queue.task_graph import (
     get_retry_count,
     get_retry_reason,
     get_task,
+    mark_reviewed_partial,
     read_graph,
     record_task,
     set_verdict,
@@ -81,6 +82,7 @@ ROOT_TASK_ID = "root"
 # prepended to its intent. This is the cap on those retries (architect
 # is allowed 1 original attempt + ``MAX_ARCHITECT_RETRIES`` re-runs).
 MAX_ARCHITECT_RETRIES = 2
+MAX_CHILD_VERIFY_REPAIR_RETRIES = 1
 
 
 class _DispatchLease:
@@ -547,8 +549,7 @@ def _verify_child_branches_reached_parent(
     target = "main" if parent_task_id == ROOT_TASK_ID else integration_branch_name(parent_task_id)
     for child_id in children_of(project_dir, parent_task_id):
         child = get_task(project_dir, child_id) or {}
-        verdict = str(child.get("verdict") or "")
-        if verdict not in {"pass", "partial", "unverified"}:
+        if not _task_entry_allows_upward_merge(child):
             continue
 
         branches = [child_branch_name(child_id)]
@@ -602,6 +603,220 @@ def _branch_is_ancestor(project_dir: Path, branch: str, target: str) -> tuple[bo
     detail = (ancestor.stderr or ancestor.stdout or "").strip()
     suffix = f": {detail}" if detail else ""
     return False, f"{branch} is not an ancestor of {target}{suffix}"
+
+
+def _task_entry_allows_upward_merge(entry: dict[str, Any]) -> bool:
+    verdict = str(entry.get("verdict") or "")
+    if verdict == "pass":
+        return True
+    return verdict == "partial" and entry.get("review_state") == "reviewed_partial"
+
+
+def _child_result_allows_upward_merge(
+    project_dir: Path,
+    task_id: str,
+    result: LeadResult,
+) -> bool:
+    if result.verdict == "pass":
+        return True
+    if result.verdict != "partial":
+        return False
+    entry = get_task(project_dir, task_id) or {}
+    return _result_has_reviewed_partial(result) or entry.get("review_state") == "reviewed_partial"
+
+
+def _result_has_reviewed_partial(result: LeadResult) -> bool:
+    if result.verdict != "partial" or not isinstance(result.verify_result, dict):
+        return False
+    payload = result.verify_result
+    return (
+        payload.get("review_state") == "reviewed_partial"
+        or payload.get("merge_review_state") == "reviewed_partial"
+        or payload.get("reviewed_partial") is True
+    )
+
+
+def _record_reviewed_partial_if_present(
+    project_dir: Path,
+    task_id: str,
+    result: LeadResult,
+) -> None:
+    if not _result_has_reviewed_partial(result):
+        return
+    payload = result.verify_result if isinstance(result.verify_result, dict) else {}
+    mark_reviewed_partial(
+        project_dir,
+        task_id,
+        reason=str(
+            payload.get("reviewed_partial_reason")
+            or payload.get("summary")
+            or "partial explicitly reviewed before merge"
+        ),
+        reviewer=str(payload.get("reviewed_partial_by") or "agent-oracle"),
+    )
+
+
+def _block_child_before_upward_merge(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    result: LeadResult,
+    reason: str,
+    on_event: Any = None,
+) -> LeadResult:
+    logger.error("child %s blocked before upward merge: %s", child_task_id, reason)
+    set_verdict(project_dir, child_task_id, "merge_blocked", cost_usd=result.cost_usd)
+    result.verdict = "merge_blocked"
+    result.failure_reason = reason
+    if result.verify_result is None:
+        result.verify_result = {}
+    if isinstance(result.verify_result, dict):
+        result.verify_result["verdict"] = "merge_blocked"
+        result.verify_result["summary"] = reason
+    _emit(on_event, {
+        "event": "child_merge_blocked",
+        "task_id": child_task_id,
+        "reason": reason,
+    })
+    return result
+
+
+def _child_verify_repair_intent(
+    *,
+    original_intent: str,
+    result: LeadResult,
+) -> str:
+    verify_result = result.verify_result if isinstance(result.verify_result, dict) else {}
+    return (
+        "VERIFY/REPAIR BEFORE MERGE.\n\n"
+        "The previous child result was not mergeable. Otto only merges a child "
+        "upward after `pass` or an explicitly recorded reviewed partial. Raw "
+        "`partial` and `unverified` must be repaired or honestly blocked.\n\n"
+        f"Previous verdict: {result.verdict}\n"
+        "Previous verdict payload:\n"
+        f"{json.dumps(verify_result, indent=2, sort_keys=True, default=str)}\n\n"
+        "Repair the child worktree if needed, run the relevant smoke/verify "
+        "oracle, then write a canonical verdict.json. Use `pass` only with "
+        "evidence. If the correct outcome is an explicitly reviewed partial, "
+        "write `verdict: partial` plus `review_state: reviewed_partial` and a "
+        "`reviewed_partial_reason`.\n\n"
+        "Original child intent:\n"
+        f"{original_intent}"
+    )
+
+
+async def _ensure_child_merge_ready(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    child_worktree: Path,
+    child_session_dir: Path,
+    parent_integration_branch: str,
+    original_intent: str,
+    result: LeadResult,
+    config: dict[str, Any],
+    max_parallel: int,
+    run_started_at: float | None,
+    spec_path: Path,
+    on_event: Any = None,
+) -> LeadResult:
+    _record_reviewed_partial_if_present(project_dir, child_task_id, result)
+    if _child_result_allows_upward_merge(project_dir, child_task_id, result):
+        return result
+    if result.verdict not in ("partial", "unverified"):
+        return result
+
+    current = result
+    original_cost = result.cost_usd
+    for attempt in range(1, MAX_CHILD_VERIFY_REPAIR_RETRIES + 1):
+        repair_session_dir = child_session_dir / "verify-repair" / f"attempt-{attempt:02d}"
+        repair_session_dir.mkdir(parents=True, exist_ok=True)
+        link_path = repair_session_dir / "worktree"
+        if not link_path.exists():
+            try:
+                link_path.symlink_to(child_worktree)
+            except OSError as exc:
+                logger.warning("could not symlink child repair worktree: %s", exc)
+        _emit(on_event, {
+            "event": "child_verify_repair_start",
+            "task_id": child_task_id,
+            "attempt": attempt,
+            "previous_verdict": current.verdict,
+            "session_dir": str(repair_session_dir),
+        })
+        repaired = await _run_lead_with_fallback(
+            task_id=child_task_id,
+            intent=_child_verify_repair_intent(
+                original_intent=original_intent,
+                result=current,
+            ),
+            project_dir=project_dir,
+            session_dir=repair_session_dir,
+            integration_branch=parent_integration_branch,
+            config=config,
+            kind="plan_or_inline",
+            context_slice_note=(
+                "This is a focused verify/repair pass for the same child worktree. "
+                "Do not expand product scope."
+            ),
+            decomp_runtime_context=_build_decomp_runtime_context(
+                project_dir=project_dir,
+                config=config,
+                max_parallel=max_parallel,
+                run_started_at=run_started_at,
+                spec_path=spec_path,
+            ),
+            on_event=on_event,
+        )
+        repaired.cost_usd += original_cost
+        current = repaired
+        _record_reviewed_partial_if_present(project_dir, child_task_id, current)
+        _emit(on_event, {
+            "event": "child_verify_repair_done",
+            "task_id": child_task_id,
+            "attempt": attempt,
+            "verdict": current.verdict,
+        })
+        if not _child_result_allows_upward_merge(project_dir, child_task_id, current):
+            continue
+
+        oracle = await _run_integration_smoke_preflight_with_repair(
+            project_dir=project_dir,
+            worktree_path=child_worktree,
+            task_id=child_task_id,
+            phase=f"child_verify_repair_{attempt:02d}",
+            session_dir=repair_session_dir,
+            config=config,
+            integration_branch=parent_integration_branch,
+            on_event=on_event,
+        )
+        if current.verify_result is None:
+            current.verify_result = {}
+        if isinstance(current.verify_result, dict):
+            current.verify_result["child_merge_oracle"] = oracle
+        if _preflight_repair_escalated(oracle) or _integration_smoke_blocks(oracle):
+            return _block_child_before_upward_merge(
+                project_dir=project_dir,
+                child_task_id=child_task_id,
+                result=current,
+                reason=_preflight_blocking_summary(
+                    "Child verify/repair smoke oracle failed",
+                    oracle,
+                ),
+                on_event=on_event,
+            )
+        return current
+
+    return _block_child_before_upward_merge(
+        project_dir=project_dir,
+        child_task_id=child_task_id,
+        result=current,
+        reason=(
+            "Child remained "
+            f"{current.verdict!r} after verify/repair; refusing upward merge"
+        ),
+        on_event=on_event,
+    )
 
 
 async def run_v5_pipeline(
@@ -1209,7 +1424,6 @@ async def _process_children(
             try:
                 from otto.v5_capability_inventory import (
                     build_inventory, render_inventory, inject_into_charter,
-                    check_coherence,
                 )
                 inv = build_inventory(project_dir)
                 rendered = render_inventory(inv)
@@ -1237,7 +1451,9 @@ async def _process_children(
             # scaffold. Emit warnings; don't block dispatch.
             try:
                 if inv is not None:
-                    findings = check_coherence(project_dir, inv)
+                    from otto.v5_capability_inventory import check_coherence as _check_coherence
+
+                    findings = _check_coherence(project_dir, inv)
                     for f in findings:
                         logger.warning(
                             "coherence: %s — %s (in CHARTER operating notes)",
@@ -1337,7 +1553,12 @@ async def _process_children(
                         # i2p/integ/<tid> and never lands on main — the
                         # chat-platform decomp shipped a broken product
                         # because the web subtree never propagated.
-                        if integ_result.verdict in ("pass", "partial", "unverified"):
+                        _record_reviewed_partial_if_present(
+                            project_dir,
+                            tid,
+                            integ_result,
+                        )
+                        if _child_result_allows_upward_merge(project_dir, tid, integ_result):
                             try:
                                 ok, detail, source, target = _propagate_subtree_integration(
                                     project_dir=project_dir,
@@ -1360,6 +1581,17 @@ async def _process_children(
                                     "subtree propagation crashed for %s: %s",
                                     tid, exc,
                                 )
+                        elif integ_result.verdict in ("partial", "unverified"):
+                            _block_child_before_upward_merge(
+                                project_dir=project_dir,
+                                child_task_id=tid,
+                                result=integ_result,
+                                reason=(
+                                    "Subtree integration remained "
+                                    f"{integ_result.verdict!r}; refusing propagation"
+                                ),
+                                on_event=on_event,
+                            )
 
                 except Exception as exc:  # noqa: BLE001
                     if not released:
@@ -1523,16 +1755,35 @@ async def _run_child(
         on_event=on_event,
     )
 
-    # Merge child's branch into parent's integration branch (best-effort).
-    if child_worktree is not None and result.verdict in ("pass", "partial", "unverified"):
-        await _merge_child_branch(
+    # Merge child's branch into parent's integration branch only after an
+    # oracle-backed result. Raw partial/unverified results get one focused
+    # verify/repair dispatch; if that still does not produce pass or explicit
+    # reviewed-partial, the child becomes merge_blocked instead of best-effort
+    # merging upward.
+    if child_worktree is not None:
+        result = await _ensure_child_merge_ready(
             project_dir=project_dir,
             child_task_id=tid,
             child_worktree=child_worktree,
+            child_session_dir=child_session_dir,
             parent_integration_branch=parent_integration_branch,
+            original_intent=entry.get("intent") or intent,
             result=result,
+            config=config,
+            max_parallel=max_parallel,
+            run_started_at=run_started_at,
+            spec_path=child_spec_path,
             on_event=on_event,
         )
+        if _child_result_allows_upward_merge(project_dir, tid, result):
+            await _merge_child_branch(
+                project_dir=project_dir,
+                child_task_id=tid,
+                child_worktree=child_worktree,
+                parent_integration_branch=parent_integration_branch,
+                result=result,
+                on_event=on_event,
+            )
 
     return result
 
@@ -1646,7 +1897,7 @@ async def _run_lead_with_fallback(
         session_dir=session_dir,
         integration_branch=integration_branch,
         config=config,
-        kind=kind,  # type: ignore[arg-type]
+        kind=cast(LeadKind, kind),
         child_summaries=child_summaries,
         context_slice_note=context_slice_note,
         decomp_runtime_context=decomp_runtime_context,
@@ -1696,7 +1947,7 @@ async def _run_lead_with_fallback(
         session_dir=session_dir,
         integration_branch=integration_branch,
         config=fallback_config,
-        kind=kind,  # type: ignore[arg-type]
+        kind=cast(LeadKind, kind),
         child_summaries=child_summaries,
         context_slice_note=context_slice_note,
         decomp_runtime_context=decomp_runtime_context,
@@ -2664,8 +2915,9 @@ def _build_decomp_runtime_context(
 ) -> dict[str, Any]:
     spec_payload = _spec_payload(spec=spec, spec_path=spec_path)
     graph = read_graph(project_dir)
-    pending = read_pending(project_dir)
-    tasks = graph.get("tasks") if isinstance(graph.get("tasks"), dict) else {}
+    pending = [entry for entry in read_pending(project_dir) if isinstance(entry, dict)]
+    raw_tasks = graph.get("tasks")
+    tasks: dict[str, Any] = raw_tasks if isinstance(raw_tasks, dict) else {}
     terminal = {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}
     done = {
         tid for tid, task in tasks.items()
@@ -2732,8 +2984,12 @@ def _spec_payload(*, spec: FlatSpec | None, spec_path: Path | None) -> dict[str,
 
 
 def _spec_profile(spec: dict[str, Any]) -> dict[str, Any]:
-    entities = spec.get("core_entities") if isinstance(spec.get("core_entities"), list) else []
-    journeys = spec.get("behavior_journeys") if isinstance(spec.get("behavior_journeys"), list) else []
+    raw_entities = spec.get("core_entities")
+    raw_journeys = spec.get("behavior_journeys")
+    raw_intent_claims = spec.get("intent_claims")
+    entities: list[Any] = raw_entities if isinstance(raw_entities, list) else []
+    journeys: list[Any] = raw_journeys if isinstance(raw_journeys, list) else []
+    intent_claims: list[Any] = raw_intent_claims if isinstance(raw_intent_claims, list) else []
     actions = 0
     for entity in entities:
         if not isinstance(entity, dict):
@@ -2748,7 +3004,7 @@ def _spec_profile(spec: dict[str, Any]) -> dict[str, Any]:
     })
     return {
         "project_kind": str(spec.get("project_kind") or "unknown"),
-        "intent_claims": len(spec.get("intent_claims") or []),
+        "intent_claims": len(intent_claims),
         "core_entities": len(entities),
         "primary_actions": actions,
         "behavior_journeys": len(journeys),

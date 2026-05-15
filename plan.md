@@ -3,6 +3,66 @@
 Source of truth: [`research.md`](research.md). Conversation transcript:
 [`docs/otto-redesign-conversation.md`](docs/otto-redesign-conversation.md).
 
+## P0 Verdict/Merge Integrity Hardening (2026-05-15)
+
+Goal: detector findings must trigger agent repair/oracle verification or block.
+Raw `partial`/`unverified` results, vague pass blobs, failed runner oracles,
+degraded failed checks, empty compile contracts, and unknown preflight kinds must
+not silently flow into merge/land/pass paths.
+
+Plan Gate: local `codex-gate` checklist APPROVED.
+
+- Objective and owned files: `otto/v5_runner.py`, `otto/lead.py`,
+  `otto/merge_queue.py`, `otto/spec_compile_flat.py`,
+  `otto/v5_preflight.py`, `otto/queue/task_graph.py`, and focused `tests/`.
+- Worktree/branch confirmed: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+  on branch `cc-i2p-2`.
+- Riskiest assumptions:
+  - `review_state=reviewed_partial` is sufficient as the minimal durable state.
+    Verify: tests distinguish raw `partial` from reviewed partial.
+  - Reusing the child worktree for one verify/repair dispatch preserves branch
+    ownership and lets existing child merge code commit the final result.
+    Verify: regression stubs prove raw `unverified` does not merge before the
+    second pass.
+  - Compile failure should raise rather than write an empty spec. Verify:
+    compile test asserts no `spec.json` after repeated invalid output.
+- Existing patterns reused: `LeadResult`, `run_lead`/`_run_lead_with_fallback`,
+  `PreflightRepairController`, task graph metadata, and merge queue repair loop.
+- System-level verification:
+  - Verify: red/green proof for items 1, 2, 3, 5, and 6 by stashing production
+    changes and running the focused tests.
+  - Verify: `uv run python scripts/test_tiers.py smoke`.
+  - Verify: `uv run --extra dev python -m pytest tests/test_v5_leaf_runtime_invariants.py tests/smoke -q`.
+  - Verify: focused pytest for new P0 tests.
+  - Verify: `uv run ruff check` and `basedpyright --level error` on touched files.
+- Docs/artifacts: update `review.md` with implementation gate status and any
+  unavailable external review notes.
+
+Steps:
+
+1. Add reviewed-partial metadata support in the task graph and helper gates in
+   the runner. Raw `partial`/`unverified` triggers one verify/repair Lead in the
+   same child worktree, then a smoke oracle; only `pass` or recorded
+   reviewed-partial can merge.
+   Verify: child test fails on old code because merge happens after the first
+   `unverified`, then passes after repair-first behavior.
+2. Tighten verdict canonicalization so `pass` requires structured evidence.
+   Vague success/status blobs without evidence canonicalize as `unverified`.
+   Verify: direct canonicalization tests cover bare success/status and a
+   canonical evidence-bearing pass.
+3. Downgrade self-reported pass when runner verification-plan execution raises.
+   Verify: a fake runner verifier exception yields `unverified` in result,
+   summary, and task graph.
+4. Remove degraded merge landing on failed non-structural checks unless an
+   explicit reviewed-partial marker is present.
+   Verify: merge queue regression blocks the old degraded-failed-check path.
+5. Fail loudly when flat spec compile never produces usable JSON/schema.
+   Verify: compile regression raises and leaves no empty spec artifact.
+6. Make unknown preflight kinds blocking so they route into repair/redispach.
+   Verify: scaffold and clean-deploy unknown-kind tests return block severity.
+
+Implementation Gate: pending until diff review and tests complete.
+
 ## Leaf Runtime Invariant Poisoning Fix (2026-05-15)
 
 Goal: prevent stale runtime hints inside child INTENT text from overriding the

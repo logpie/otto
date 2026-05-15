@@ -60,7 +60,7 @@ from otto.checks import Evidence, run_checks
 from otto.observability import iso_timestamp
 from otto.safe_slug import safe_slug
 from otto.setup_gitignore import non_product_paths_from_porcelain
-from otto.spec_compile import SPEC_FILENAME, Group, Spec
+from otto.spec_compile import SPEC_FILENAME, Component, Group, Spec
 from otto.spec_state import aborted_group_ids, emit
 
 logger = logging.getLogger("otto.merge_queue")
@@ -90,6 +90,7 @@ class MergeCandidate:
     merge_worktree: Path | None = None  # integration target worktree
     contract_deltas: list[ContractDelta] = field(default_factory=list)
     degraded: bool = False
+    reviewed_partial: bool = False
 
 
 @dataclass
@@ -115,6 +116,15 @@ class MergeBudget:
     per_slice_repair_retries: int = 2
     per_slice_progress_repair_extensions: int = 1
     per_slice_wall_s: int = 15 * 60  # 15 min per slice for merge repair
+
+
+def _group_result_has_reviewed_partial(result: GroupResult) -> bool:
+    self_check = result.self_check if isinstance(result.self_check, dict) else {}
+    return (
+        self_check.get("review_state") == "reviewed_partial"
+        or self_check.get("merge_review_state") == "reviewed_partial"
+        or self_check.get("reviewed_partial") is True
+    )
 
 
 @dataclass
@@ -193,7 +203,7 @@ def eligible_components(
     passing_ids: Iterable[str],
     landed_ids: Iterable[str],
     blocked_ids: Iterable[str] = (),
-) -> list:  # type: list[Component]; avoid forward-import circularity here
+) -> list[Component]:
     """Return Components that are merge candidates, in dep-topological FIFO order.
 
     Eligibility mirrors `eligible_candidates` for Groups:
@@ -213,7 +223,7 @@ def eligible_components(
     passing = set(passing_ids)
     landed = set(landed_ids)
     blocked = set(blocked_ids)
-    eligible: list = []
+    eligible: list[Component] = []
     for c in spec.components:
         if c.id not in passing:
             continue
@@ -480,6 +490,11 @@ async def run_merge_queue(
                 unit_kind == "group"
                 and latest_group_results.get(group_obj.id) is not None
                 and latest_group_results[group_obj.id].status == GroupStatus.DEGRADED
+            ),
+            reviewed_partial=(
+                unit_kind == "group"
+                and latest_group_results.get(group_obj.id) is not None
+                and _group_result_has_reviewed_partial(latest_group_results[group_obj.id])
             ),
         )
         if candidate.contract_deltas:
@@ -880,6 +895,7 @@ async def _process_candidate(
             degraded_failure_pairs = [*slice_pairs, *cross_pairs]
             degraded_can_land = (
                 candidate.degraded
+                and candidate.reviewed_partial
                 and not missing_cross_evidence
                 and _failed_checks_are_non_structural(degraded_failure_pairs)
             )

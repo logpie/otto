@@ -220,6 +220,41 @@ def set_verdict(
             graph["tasks"][task_id]["cost_usd"] = float(cost_usd)
 
 
+def mark_reviewed_partial(
+    project_dir: Path,
+    task_id: str,
+    *,
+    reason: str = "",
+    reviewer: str = "oracle",
+) -> None:
+    """Record explicit approval for a partial verdict to merge upward.
+
+    The terminal verdict remains ``partial`` so aggregate product semantics stay
+    honest. The separate review_state is the merge gate's durable proof that
+    this was not a raw agent self-claim.
+    """
+    with _locked_graph(project_dir) as (_path, graph):
+        if task_id not in graph["tasks"]:
+            graph["tasks"][task_id] = {
+                "parent_task_id": None,
+                "intent": "",
+                "decomposition": "unknown",
+                "verdict": "partial",
+                "integration_branch": None,
+                "started_at": _now_iso(),
+                "completed_at": _now_iso(),
+                "cost_usd": 0.0,
+                "child_task_ids": [],
+                "depends_on": [],
+            }
+        entry = graph["tasks"][task_id]
+        entry["review_state"] = "reviewed_partial"
+        entry["reviewed_partial_at"] = _now_iso()
+        entry["reviewed_partial_by"] = reviewer
+        if reason:
+            entry["reviewed_partial_reason"] = reason
+
+
 def add_cost(project_dir: Path, task_id: str, cost_usd: float) -> None:
     """Increment a task's accumulated cost by ``cost_usd``."""
     with _locked_graph(project_dir) as (_path, graph):

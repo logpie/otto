@@ -310,6 +310,27 @@ async def run_lead(
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("runner verification plan failed: %s", exc)
+                if result.verdict == "pass":
+                    result.verdict = "unverified"
+                    if isinstance(result.verify_result, dict):
+                        result.verify_result["verdict"] = "unverified"
+                        existing_summary = str(result.verify_result.get("summary") or "").strip()
+                        failure_summary = (
+                            "Runner verification plan failed; invalidating "
+                            f"self-reported pass: {type(exc).__name__}: {exc}"
+                        )
+                        result.verify_result["summary"] = (
+                            f"{existing_summary}\n\n{failure_summary}"
+                            if existing_summary
+                            else failure_summary
+                        )
+                        result.verify_result["runner_verification_error"] = {
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    failure_reason = (
+                        f"runner verification plan failed: {type(exc).__name__}: {exc}"
+                    )
 
     except Exception as exc:  # noqa: BLE001 — best-effort
         logger.exception("Lead session crashed for task %s", task_id)
@@ -855,6 +876,8 @@ def _is_canonical_shaped_verdict_payload(payload: Any) -> bool:
         return False
     if "verdict" not in payload:
         return False
+    if "journeys" not in payload or not isinstance(payload.get("journeys"), list):
+        return False
     if not (_VERDICT_SCHEMA_HINT_KEYS & set(payload)):
         return False
     return _canonicalize_verdict_payload(payload) is not None
@@ -947,7 +970,11 @@ def _canonicalize_verdict_payload(payload: Any) -> dict[str, Any] | None:
     verdict = _verdict_token_to_canonical(payload.get("verdict"))
     if verdict in _CANONICAL_VERDICTS:
         canonical = dict(payload)
+        if verdict == "pass" and not _pass_payload_has_evidence(canonical):
+            verdict = "unverified"
         canonical["verdict"] = verdict
+        canonical.setdefault("journeys", [])
+        canonical.setdefault("evidence", list(payload.get("deliverables") or []))
         return canonical
 
     for key in ("status", "result", "outcome", "terminal_outcome", "state"):
@@ -955,13 +982,46 @@ def _canonicalize_verdict_payload(payload: Any) -> dict[str, Any] | None:
         if verdict is not None:
             if verdict == "pass" and _tests_explicitly_fail(payload):
                 verdict = "partial"
+            elif verdict == "pass" and not _pass_payload_has_evidence(payload):
+                verdict = "unverified"
             return _noncanonical_verdict(payload, verdict, source={key: payload.get(key)})
 
     for key in ("passed", "success", "ok"):
         if isinstance(payload.get(key), bool):
             verdict = "pass" if payload.get(key) else "partial"
+            if verdict == "pass" and not _pass_payload_has_evidence(payload):
+                verdict = "unverified"
             return _noncanonical_verdict(payload, verdict, source={key: payload.get(key)})
     return None
+
+
+def _pass_payload_has_evidence(payload: dict[str, Any]) -> bool:
+    journeys = payload.get("journeys")
+    if isinstance(journeys, list) and bool(journeys):
+        return True
+    evidence = payload.get("evidence")
+    if isinstance(evidence, list) and bool(evidence):
+        return True
+    deliverables = payload.get("deliverables")
+    if isinstance(deliverables, list) and bool(deliverables):
+        return True
+    artifacts = payload.get("artifacts")
+    if isinstance(artifacts, list) and bool(artifacts):
+        return True
+    runner_checks = payload.get("runner_checks")
+    if isinstance(runner_checks, list) and bool(runner_checks):
+        return True
+    if ("tests" in payload or "checks" in payload) and not _tests_explicitly_fail(payload):
+        return True
+    test_command = payload.get("test_command")
+    if isinstance(test_command, str) and test_command.strip():
+        return True
+    coverage = payload.get("intent_coverage")
+    if isinstance(coverage, dict):
+        built = coverage.get("built")
+        if isinstance(built, list) and bool(built):
+            return True
+    return False
 
 
 def _verdict_token_to_canonical(value: Any) -> str | None:

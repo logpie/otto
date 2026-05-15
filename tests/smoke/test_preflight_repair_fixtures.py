@@ -16,6 +16,7 @@ from otto.lead import (
 )
 from otto.merge_queue import _merge_raw_log_dir
 from otto.safe_slug import safe_slug
+from otto import v5_clean_verify
 from otto.v5_preflight_repair import (
     AgentRepairRequest,
     AgentRepairResult,
@@ -84,6 +85,65 @@ async def test_port_busy_autofix_fires_and_continues(tmp_path: Path) -> None:
     assert events[0]["action"] == "auto_fix"
     assert events[0]["outcome"] == "repaired"
     assert "_written_at" in events[0]
+
+
+@pytest.mark.asyncio
+async def test_port_busy_cleanup_noop_falls_back_to_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = tmp_path / "session"
+    worktree = tmp_path / "repo"
+    session_dir.mkdir()
+    worktree.mkdir()
+    (worktree / "CHARTER.md").write_text("- app: 127.0.0.1:18080\n", encoding="utf-8")
+    requests: list[AgentRepairRequest] = []
+    killed: list[int] = []
+    runs = 0
+
+    monkeypatch.setattr(v5_clean_verify, "_pids_for_port", lambda _port: [4444])
+    monkeypatch.setattr(v5_clean_verify, "_is_otto_owned_process", lambda *_args: False)
+    monkeypatch.setattr(v5_clean_verify, "_terminate_pid", lambda pid: killed.append(pid))
+    monkeypatch.setattr(v5_clean_verify, "_check_ports_free", lambda _ports: [18080])
+
+    def run_preflight() -> dict[str, Any]:
+        nonlocal runs
+        runs += 1
+        if requests:
+            return _passing_payload()
+        return _blocking_payload("clean_deploy_port_busy", "Declared ports [18080] already bound")
+
+    async def repair(request: AgentRepairRequest) -> AgentRepairResult:
+        requests.append(request)
+        return AgentRepairResult(ok=True, cost_usd=0.4, summary="made start.sh pick a free port")
+
+    controller = PreflightRepairController(
+        session_dir=session_dir,
+        worktree_path=worktree,
+        original_budget_usd=100.0,
+        agent_repair=repair,
+    )
+
+    result = await controller.repair_until_clean(run_preflight)
+
+    assert result.terminal_state == "continued"
+    assert killed == []
+    assert runs == 2
+    assert len(requests) == 1
+    assert requests[0].failure_kind == "port_busy"
+    assert "deterministic port cleanup" in requests[0].instruction.lower()
+    assert "18080" in requests[0].instruction
+    events = _log_events(session_dir)
+    assert not any(
+        event.get("action") == "auto_fix" and event.get("outcome") == "repaired"
+        for event in events
+    )
+    assert any(
+        event.get("action") == "auto_fix" and event.get("outcome") == "no_op_agent_fallback"
+        for event in events
+    )
+    assert events[-1]["action"] == "agent"
+    assert events[-1]["outcome"] == "repaired"
 
 
 @pytest.mark.asyncio
@@ -291,7 +351,7 @@ def test_noncanonical_success_verdict_maps_to_pass(tmp_path: Path) -> None:
     assert json.loads((session_dir / "verdict.json").read_text(encoding="utf-8"))["verdict"] == "pass"
 
 
-def test_verdict_parser_maps_aliases_and_reports_bad_existing_file(tmp_path: Path) -> None:
+def test_verdict_parser_downgrades_bare_aliases_and_reports_bad_existing_file(tmp_path: Path) -> None:
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     (session_dir / "verdict.json").write_text(
@@ -303,7 +363,7 @@ def test_verdict_parser_maps_aliases_and_reports_bad_existing_file(tmp_path: Pat
 
     assert called is True
     assert payload is not None
-    assert payload["verdict"] == "pass"
+    assert payload["verdict"] == "unverified"
 
     (session_dir / "verdict.json").write_text(
         json.dumps({"verdict": "passed", "summary": "provider alias"}),
@@ -314,7 +374,7 @@ def test_verdict_parser_maps_aliases_and_reports_bad_existing_file(tmp_path: Pat
 
     assert called is True
     assert payload is not None
-    assert payload["verdict"] == "pass"
+    assert payload["verdict"] == "unverified"
 
     (session_dir / "verdict.json").write_text("{ not json", encoding="utf-8")
     reason = _verdict_failure_reason(session_dir, integration=False)

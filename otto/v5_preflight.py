@@ -243,12 +243,23 @@ def check_scaffold_compiles(
         return [
             PreflightIssue(
                 kind="scaffold_compile_timeout",
-                severity="warn",
+                severity="block",
                 message=result.failure_message
                 or "scaffold compile timed out",
+                task_id=architect_task_id,
             )
         ]
-    if kind in ("copy_failed", "no_npm", "no_python"):
+    if kind == "copy_failed":
+        return [
+            PreflightIssue(
+                kind="scaffold_compile_failed",
+                severity="block",
+                message=result.failure_message
+                or "scaffold compile could not copy the project into a clean verifier",
+                task_id=architect_task_id,
+            )
+        ]
+    if kind in ("no_npm", "no_python"):
         return [
             PreflightIssue(
                 kind="scaffold_compile_skipped",
@@ -257,13 +268,18 @@ def check_scaffold_compiles(
                 or f"scaffold compile skipped: {kind}",
             )
         ]
-    # internal_error or any unexpected kind: surface as warn.
+    # internal_error or any unexpected kind: trigger repair/re-dispatch. Unknown
+    # verification failures are not informational.
     return [
         PreflightIssue(
-            kind="scaffold_compile_skipped",
-            severity="warn",
-            message=result.failure_message
-            or f"scaffold compile inconclusive: {kind}",
+            kind="scaffold_compile_failed",
+            severity="block",
+            message=(
+                f"{kind}: {result.failure_message}"
+                if result.failure_message
+                else f"scaffold compile inconclusive: {kind}"
+            ),
+            task_id=architect_task_id,
         )
     ]
 
@@ -333,7 +349,7 @@ def smoke_clean_deploy(
         issues.append(
             PreflightIssue(
                 kind="clean_deploy_copy_failed",
-                severity="warn",
+                severity="block",
                 message=message,
             )
         )
@@ -359,16 +375,17 @@ def smoke_clean_deploy(
         issues.append(
             PreflightIssue(
                 kind="clean_deploy_ports_not_listening",
-                severity="warn",
+                severity="block",
                 message=message,
             )
         )
     else:
-        # internal_error, no_npm, no_python, timeouts, etc.
+        # internal_error, no_npm, no_python, timeouts, and newly introduced
+        # verifier kinds are repair triggers unless explicitly handled above.
         issues.append(
             PreflightIssue(
                 kind="clean_deploy_smoke_error",
-                severity="warn",
+                severity="block",
                 message=f"{kind}: {message}",
             )
         )

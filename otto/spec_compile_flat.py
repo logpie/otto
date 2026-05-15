@@ -175,6 +175,12 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
 def _obj_id(obj: Any) -> str:
     if not isinstance(obj, dict):
         return ""
@@ -838,11 +844,7 @@ async def compile_flat_spec(
             intent=intent,
             intent_hash=intent_h,
             project_kind=str(parsed.get("project_kind") or project_kind_hint or "webapp"),
-            product_overview=(
-                dict(parsed.get("product_overview"))
-                if isinstance(parsed.get("product_overview"), dict)
-                else {}
-            ),
+            product_overview=_as_dict(parsed.get("product_overview")),
             intent_claims=[dict(j) for j in _as_list(parsed.get("intent_claims")) if isinstance(j, dict)],
             core_entities=[dict(j) for j in _as_list(parsed.get("core_entities")) if isinstance(j, dict)],
             cold_start_states=[
@@ -880,14 +882,13 @@ async def compile_flat_spec(
         accepted = True
         break
     if not accepted:
-        # All attempts failed basic JSON shape. Preserve the last preview so
-        # callers still get an auditable artifact instead of losing the run.
-        spec = preview
-        spec.lint_warnings = last_warnings
-        logger.warning(
-            "compile_flat_spec: valid JSON shape not produced after %d attempts; accepting empty fallback",
-            max_retries + 1,
+        _cleanup_root_spec_artifacts(project_dir)
+        message = (
+            "compile_flat_spec: valid JSON shape not produced after "
+            f"{max_retries + 1} attempts; refusing empty fallback"
         )
+        logger.error("%s: %s", message, "; ".join(last_warnings))
+        raise StructuredSpecValidationError(message)
 
     _cleanup_root_spec_artifacts(project_dir)
 
@@ -1076,7 +1077,7 @@ def _read_structured_output_tool_input(messages_jsonl: Path) -> dict[str, Any] |
                         continue
                     tool_input = block.get("input")
                     if _looks_like_flat_spec_payload(tool_input):
-                        latest = dict(tool_input)
+                        latest = _as_dict(tool_input)
             return latest
     except OSError:
         return None

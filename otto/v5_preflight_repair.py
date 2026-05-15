@@ -186,10 +186,10 @@ class PreflightRepairController:
         self._total_attempts += 1
 
         if action == "auto_fix":
-            return self._auto_fix(issue, classification, fingerprint)
+            return await self._auto_fix(issue, classification, fingerprint)
         return await self._agent_fix(issue, classification, fingerprint)
 
-    def _auto_fix(
+    async def _auto_fix(
         self,
         issue: dict[str, Any],
         classification: dict[str, Any],
@@ -219,6 +219,25 @@ class PreflightRepairController:
                 reason=f"auto_fix_exception:{type(exc).__name__}: {exc}",
                 fingerprint=fingerprint,
             )
+
+        if failure_kind == "port_busy" and not _port_cleanup_repaired(detail):
+            self._append_log(
+                event="repair_attempt",
+                issue=issue,
+                failure_kind=failure_kind,
+                action="auto_fix",
+                outcome="no_op_agent_fallback",
+                fingerprint=fingerprint,
+                detail=detail,
+                fallback_action="agent",
+            )
+            agent_classification = {
+                **classification,
+                "action": "agent",
+                "workspace_paths": ("start.sh", "CHARTER.md"),
+                "instruction": _port_cleanup_agent_instruction(issue, detail),
+            }
+            return await self._agent_fix(issue, agent_classification, fingerprint)
 
         self._append_log(
             event="repair_attempt",
@@ -327,6 +346,7 @@ class PreflightRepairController:
 
     def _cleanup_ports(self, worktree_path: Path, _issue: dict[str, Any]) -> dict[str, Any]:
         from otto.v5_clean_verify import (
+            _check_ports_free,
             _is_otto_owned_process,
             _parse_declared_ports,
             _pids_for_port,
@@ -334,19 +354,41 @@ class PreflightRepairController:
         )
 
         ports = _parse_declared_ports(worktree_path)
+        pids_before: dict[int, list[int]] = {}
+        owned_by_port: dict[int, list[int]] = {}
         killed: dict[int, list[int]] = {}
         for port in ports:
             pids = _pids_for_port(port)
+            pids_before[port] = pids
             owned = [
                 pid for pid in pids
                 if _is_otto_owned_process(pid, worktree_path)
             ]
+            owned_by_port[port] = owned
             if not owned:
                 continue
             for pid in owned:
                 _terminate_pid(pid)
             killed[port] = owned
-        return {"killed_ports": sorted(killed), "killed_pids": killed}
+        bound_after = _check_ports_free(ports)
+        pids_after = {port: _pids_for_port(port) for port in bound_after}
+        freed_ports = sorted(port for port in killed if port not in bound_after)
+        ports_without_owned_process = sorted(
+            port for port, pids in pids_before.items()
+            if pids and not owned_by_port.get(port)
+        )
+        return {
+            "declared_ports": ports,
+            "pids_before": pids_before,
+            "owned_pids": owned_by_port,
+            "ports_without_owned_process": ports_without_owned_process,
+            "killed_ports": sorted(killed),
+            "killed_pids": killed,
+            "freed_ports": freed_ports,
+            "bound_after": bound_after,
+            "pids_after": pids_after,
+            "repaired": bool(killed) and not bound_after,
+        }
 
     def _repair_overlong_paths(self, worktree_path: Path, _issue: dict[str, Any]) -> dict[str, Any]:
         renamed: list[dict[str, str]] = []
@@ -441,6 +483,32 @@ def failure_fingerprint(issue: dict[str, Any], *, failure_kind: str) -> str:
     normalized = re.sub(r"/private/[^ \n]+|/tmp/[^ \n]+", "<tmp-path>", message)
     normalized = re.sub(r"\d+\.\d+s", "<duration>", normalized)
     return short_hash(f"{failure_kind}\n{normalized}", length=12)
+
+
+def _port_cleanup_repaired(detail: dict[str, Any]) -> bool:
+    if "repaired" in detail:
+        return bool(detail.get("repaired"))
+    killed_ports = detail.get("killed_ports") or []
+    if "bound_after" in detail:
+        return bool(killed_ports) and not bool(detail.get("bound_after"))
+    return bool(killed_ports)
+
+
+def _port_cleanup_agent_instruction(issue: dict[str, Any], detail: dict[str, Any]) -> str:
+    ports = detail.get("bound_after") or detail.get("declared_ports") or []
+    return (
+        "Deterministic port cleanup could not repair this port_busy failure. "
+        f"Ports still relevant: {ports}. "
+        "Cleanup killed no Otto-owned process, or the port remained bound after cleanup. "
+        "Concrete cleanup detail follows:\n"
+        f"{json.dumps(detail, indent=2, sort_keys=True, default=str)}\n\n"
+        "Inspect start.sh and CHARTER.md. Make start.sh adapt to the conflict by "
+        "honoring port environment variables, choosing a free port when appropriate, "
+        "or failing through a clear PORT_CONFLICT path. "
+        f"Original issue: {json.dumps(issue, sort_keys=True, default=str)}\n\n"
+        "The runner will rerun smoke_clean_deploy after you finish; do not assume "
+        "the repair succeeded without that oracle."
+    )
 
 
 def _extract_likely_paths(message: str) -> list[str]:

@@ -1,5 +1,48 @@
 # Otto redesign — research
 
+## P0 verdict/merge integrity hardening (2026-05-15)
+
+Scope: enforce the pass-1 policy that detector findings route to agent repair
+or block; they must not downgrade to lenient merge, warn, skip, or empty
+contract fallback.
+
+Relevant current paths:
+
+- `otto/v5_runner.py` merges direct child worktrees into the parent branch when
+  the child verdict is `pass`, `partial`, or `unverified`; decomposed child
+  integration propagation uses the same permissive verdict set.
+- `otto/lead.py` canonicalizes non-canonical success/status blobs to `pass`
+  even when they carry no journey or evidence. Runner verification-plan
+  exceptions are only logged and preserve the agent's self-reported verdict.
+- `otto/merge_queue.py` lets degraded build slices land when failed checks are
+  classified as non-structural.
+- `otto/spec_compile_flat.py` accepts an empty fallback spec after all
+  compile attempts fail JSON/schema checks.
+- `otto/v5_preflight.py` maps scaffold unknown/internal failures to warning
+  severity; `smoke_clean_deploy` has the same unknown catch-all pattern.
+
+Constraints and decisions:
+
+- Represent explicitly reviewed partials with the minimal durable field
+  `review_state: "reviewed_partial"` plus optional `reviewed_partial_*`
+  metadata. Do not introduce a new terminal verdict string that would leak into
+  aggregate product verdict semantics.
+- A raw `partial` or `unverified` child is not mergeable. The runner may run one
+  verify/repair dispatch in the same child worktree; after that, only `pass` or
+  explicit reviewed-partial can merge. Otherwise mark the child
+  `merge_blocked` and emit a blocking event.
+- Keep compile hardening fail-loud: the existing compile retry loop is already
+  the repair/redelivery path. If it still cannot produce a usable structured
+  contract, raise instead of writing an empty `spec.json`.
+- For preflight unknowns, use blocking severity so existing repair machinery or
+  architect redispach sees the raw failure. Only named informational cases stay
+  warnings.
+
+Open question for later review:
+
+- `review_state=reviewed_partial` is intentionally narrow. If the product wants
+  a human UI workflow for approving partials, that should be a later pass.
+
 ## Leaf runtime invariant poisoning fix (2026-05-15)
 
 Scope: fix the v5 modular-path failure where a leaf prompt could contain a

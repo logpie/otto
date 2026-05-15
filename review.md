@@ -702,3 +702,46 @@ Verification:
 - `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev pytest -q tests/test_v5_integration_worktree.py tests/test_v5_port_cleanup.py tests/test_v5_decomposed_child_lands_in_main.py tests/smoke/test_preflight_repair_fixtures.py tests/test_v5_preflight.py tests/smoke/test_nested_subtree_propagation.py` passed: 46 tests.
 - `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke` passed: 305 passed, 2370 deselected.
 - `git diff --check` passed.
+
+---
+
+## Implementation Gate — 2026-05-15 — v5 P0 merge/verdict integrity
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, focused diff review,
+red/green regression proof, smoke gates, ruff, and basedpyright were used
+instead.
+
+Findings during implementation review:
+- [IMPORTANT] Raw `partial` and `unverified` child verdicts are now blocked
+  before upward merge and routed through one verify/repair attempt plus the
+  existing clean-deploy smoke oracle. Only `pass` or a recorded
+  `review_state="reviewed_partial"` may merge upward.
+- [IMPORTANT] Vague success payloads without journey/evidence proof now
+  canonicalize to `unverified`; runner verification-plan crashes also
+  invalidate self-reported `pass`.
+- [IMPORTANT] Compile-spec JSON failures now fail loudly instead of writing an
+  empty fallback contract.
+- [IMPORTANT] Unknown clean-verify/preflight failure kinds now block for
+  repair with raw failure context instead of defaulting to warning.
+- [IMPORTANT] Scaffold clean-copy failures now block for repair; only the
+  explicitly named "no package manager/runtime to compile" skips remain
+  warnings.
+- [NOTE] `reviewed_partial` is intentionally minimal: a durable task-graph
+  review state plus metadata, leaving the terminal verdict as `partial`.
+
+Verification:
+- Red proof used a reversible production patch rollback because git stash
+  could not write the worktree index from this sandbox. With the production
+  P0 patch reversed, `tests/test_v5_p0_hardening.py` failed: 15 failed,
+  1 passed.
+- Green focused regression: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p0_hardening.py tests/test_merge_queue.py::test_run_merge_queue_blocks_degraded_slice_with_failed_behavior_check -q`
+  passed: 17 passed.
+- Required invariant/smoke suite: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_leaf_runtime_invariants.py tests/smoke -q`
+  passed: 61 passed.
+- Required smoke tier: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke`
+  passed: 306 passed, 2434 deselected.
+- Touched-file lint: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run ruff check ...`
+  passed.
+- Touched-file type check: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error ...`
+  passed: 0 errors.
