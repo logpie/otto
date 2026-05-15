@@ -12,13 +12,15 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib import import_module
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from otto import paths
 from otto.config import ConfigError, load_config
@@ -28,6 +30,7 @@ from otto.verification import normalize_verification_policy
 SCHEMA_VERSION = 1
 AUTOPILOT_MODES = ("off", "assisted", "full")
 ACTIVE_DECISION_STATUSES = {"pending", "running"}
+logger = logging.getLogger("otto.mission_control.autopilot")
 DECISION_STATUSES = {*ACTIVE_DECISION_STATUSES, "executed", "blocked", "failed", "dismissed"}
 SAFE_FULL_ACTIONS = {
     "start_watcher",
@@ -703,9 +706,9 @@ class AutopilotController:
                 details={"decision_id": decision_id, "action": pilot_action},
             )
             return
-        from otto.mission_control.service import MissionControlService
-
-        result = self._execute_decision(nested, policy, MissionControlService(self.project_dir), approved=approved)
+        service_module = import_module("otto.mission_control.service")
+        executor = cast(AutopilotExecutor, service_module.MissionControlService(self.project_dir))
+        result = self._execute_decision(nested, policy, executor, approved=approved)
         result["pilot_plan"] = pilot_plan
         self._append_audit("pilot.action_selected", "info", f"Pilot selected {_action_label(pilot_action)}", {"decision": decision, "pilot_plan": pilot_plan, "result": result})
         self._remove_pending_decision(decision_id)
@@ -778,7 +781,8 @@ class AutopilotController:
 
     def _policy(self, state: dict[str, Any]) -> AutopilotPolicy:
         config = _load_config_best_effort(self.project_dir)
-        raw = config.get("autopilot") if isinstance(config.get("autopilot"), dict) else {}
+        raw_config = config.get("autopilot")
+        raw: dict[str, Any] = raw_config if isinstance(raw_config, dict) else {}
         configured_mode = _normalize_mode(raw.get("mode") if raw.get("mode") is not None else "assisted")
         mode = _normalize_mode(state.get("mode") if state.get("mode") is not None else configured_mode)
         max_actions = _bounded_int(raw.get("max_actions_per_hour"), 8, lower=0, upper=100)
@@ -1258,7 +1262,8 @@ def _normalize_mode(value: Any) -> str:
 def _load_config_best_effort(project_dir: Path) -> dict[str, Any]:
     try:
         return load_config(Path(project_dir) / "otto.yaml")
-    except (ConfigError, ValueError):
+    except (ConfigError, ValueError) as exc:
+        logger.warning("autopilot ignoring unreadable config for %s: %s", project_dir, exc)
         return {}
 
 
@@ -1275,7 +1280,8 @@ def _pilot_agent_status(project_dir: Path) -> dict[str, Any]:
 
 
 def _pilot_effort(config: dict[str, Any]) -> str:
-    autopilot = config.get("autopilot") if isinstance(config.get("autopilot"), dict) else {}
+    raw_config = config.get("autopilot")
+    autopilot: dict[str, Any] = raw_config if isinstance(raw_config, dict) else {}
     raw = str(autopilot.get("pilot_effort") or autopilot.get("pilot_reasoning_effort") or "").strip().lower()
     if raw in {"low", "medium"}:
         return raw

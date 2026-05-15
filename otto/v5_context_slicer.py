@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 import time
 from collections.abc import Callable
@@ -22,6 +23,7 @@ from typing import Any
 from otto.v5_capability_inventory import parse_information_architecture_contract
 
 CHARTER_TARGET_LINES = 500
+logger = logging.getLogger("otto.v5_context_slicer")
 
 
 @dataclass(frozen=True)
@@ -548,7 +550,8 @@ def _coerce_spec(spec: Any) -> dict[str, Any]:
 def _read_json_object(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("ignoring unreadable context-slice JSON %s: %s", path, exc)
         return {}
     return payload if isinstance(payload, dict) else {}
 

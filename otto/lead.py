@@ -487,7 +487,8 @@ def _render_intent_runtime_block(
     )
     if not sanitized_intent:
         sanitized_intent = "(empty after removing stale runtime hint lines)"
-    branch = str(integration_branch or "main")
+    branch_text = str(integration_branch or "").strip()
+    branch = branch_text if branch_text else "main"
     return "\n".join(
         [
             "- INTENT:",
@@ -592,13 +593,16 @@ def _render_prompt(
             sort_keys=True,
             default=str,
         )
+        integration_branch_text = str(integration_branch).strip() if integration_branch is not None else ""
+        if not integration_branch_text:
+            integration_branch_text = "main"
         return _interpolate_prompt(template, {
             "task_id": task_id,
             "intent": intent,
             "intent_runtime_block": intent_runtime_block,
             "is_root": str(is_root).lower(),
             "journeys_path": str(journeys_path),
-            "integration_branch": str(integration_branch or "main"),
+            "integration_branch": integration_branch_text,
             "session_dir": str(session_dir),
             "decomp_runtime_context": runtime_context_text,
             "context_slice_note": (
@@ -635,6 +639,9 @@ def _render_prompt(
             "issues": [],
             "note": "not run",
         }
+        integration_branch_text = str(integration_branch).strip() if integration_branch is not None else ""
+        if not integration_branch_text:
+            integration_branch_text = "main"
         preflight_text = json.dumps(
             rendered_preflight,
             indent=2,
@@ -644,7 +651,7 @@ def _render_prompt(
             "task_id": task_id,
             "intent": intent,
             "intent_runtime_block": intent_runtime_block,
-            "integration_branch": str(integration_branch or "main"),
+            "integration_branch": integration_branch_text,
             "child_summaries": summary_text,
             "preflight_result": preflight_text,
             "journeys_path": str(journeys_path),

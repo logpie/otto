@@ -176,6 +176,8 @@ class AuditResult:
     feature_audits: list[FeatureAudit] = field(default_factory=list)
     cross_slice_evidence: list[Evidence] = field(default_factory=list)
     walkthrough_artifacts: list[Path] = field(default_factory=list)
+    walkthrough_succeeded: bool = False
+    walkthrough_detail: str = ""
     contract_test_passed: bool | None = None  # None if no test_command configured
     contract_test_detail: str = ""
     quality_score: int = 0  # 1-5; 0 = not assessed
@@ -230,10 +232,12 @@ class AuditAgentInput:
     spec: Spec
     project_dir: Path
     integrated_worktree: Path
-    build_summary: dict
-    merge_summary: dict
+    build_summary: dict[str, Any]
+    merge_summary: dict[str, Any]
     cross_slice_evidence: list[Evidence]
     walkthrough_artifacts: list[Path]
+    walkthrough_succeeded: bool = False
+    walkthrough_detail: str = ""
     log_dir: Path | None = None
     walkthrough_jsonl_path: Path | None = None
     feature_scope_ids: tuple[str, ...] = ()
@@ -276,7 +280,7 @@ class AuditAgentOutput:
 
 
 class AuditAgentCallable(Protocol):
-    async def __call__(self, agent_input: AuditAgentInput) -> AuditAgentOutput:
+    async def __call__(self, agent_input: AuditAgentInput, /) -> AuditAgentOutput:
         ...
 
 
@@ -306,7 +310,7 @@ project command.
 
 def no_op_walkthrough(_project_dir: Path, _log_dir: Path, _timeout_s: int) -> WalkthroughResult:
     """Default walkthrough: no-op. Production projects override."""
-    return WalkthroughResult(succeeded=True, detail="no walkthrough configured", artifacts=[])
+    return WalkthroughResult(succeeded=False, detail="no walkthrough configured", artifacts=[])
 
 
 def _validate_walkthrough_jsonl(
@@ -698,11 +702,11 @@ def _synthesized_webapp_walkthrough(
             "        (ROOT / '__audit_home_body__.html').write_text(body)\n"
             "        print(json.dumps(result))\n"
             "        sys.exit(0)\n"
-            "# No webapp shape detected. Not a failure — declare not-applicable.\n"
+            "# No webapp shape detected. This is an audit evidence gap.\n"
             "print(json.dumps({'shape': 'not-applicable',\n"
             "                  'note': 'no Flask create_app and no static index.html; '\n"
-            "                          'project may be a CLI/library/lib — walkthrough skipped'}))\n"
-            "sys.exit(0)\n"
+            "                          'webapp walkthrough cannot verify product behavior'}))\n"
+            "sys.exit(3)\n"
         )
 
         env = _subprocess_env(extra_pythonpath=[project_dir])
@@ -781,11 +785,15 @@ def _synthesized_webapp_walkthrough(
                 ),
                 artifacts=artifacts,
             )
+        detail_prefix = (
+            "synthesized webapp walkthrough found no runnable webapp shape"
+            if completed.returncode == 3
+            else "synthesized webapp walkthrough failed"
+        )
         return WalkthroughResult(
             succeeded=False,
             detail=(
-                f"synthesized webapp walkthrough failed "
-                f"(exit={completed.returncode}); see {log_path.name}"
+                f"{detail_prefix} (exit={completed.returncode}); see {log_path.name}"
             ),
             artifacts=artifacts,
         )
@@ -1074,6 +1082,7 @@ async def run_audit(
     session_dir = session_dir.resolve()
     spec = _spec_with_declared_feature_fallbacks(spec)
     budget = budget or AuditBudget()
+    walkthrough_was_default_noop = walkthrough is None
     walk = walkthrough or no_op_walkthrough
     scoped_feature_ids = tuple(str(fid) for fid in (feature_scope_ids or ()) if str(fid))
     t0 = time.monotonic()
@@ -1137,6 +1146,8 @@ async def run_audit(
             merge_summary=_merge_summary(merge_result),
             cross_slice_evidence=cross_evidence,
             walkthrough_artifacts=list(walk_result.artifacts),
+            walkthrough_succeeded=walk_result.succeeded,
+            walkthrough_detail=walk_result.detail,
             log_dir=attempt_dir / "judge",
             walkthrough_jsonl_path=walk_log_dir / "walkthrough.jsonl",
             feature_scope_ids=scoped_feature_ids,
@@ -1187,6 +1198,8 @@ async def run_audit(
                 feature_audits=[],
                 cross_slice_evidence=cross_evidence,
                 walkthrough_artifacts=list(walk_result.artifacts),
+                walkthrough_succeeded=walk_result.succeeded,
+                walkthrough_detail=walk_result.detail,
                 contract_test_passed=contract_passed,
                 contract_test_detail=contract_detail,
                 quality_score=0,
@@ -1277,6 +1290,14 @@ async def run_audit(
         # itself lives in `CoverageReport.meets_threshold()` —
         # `walk_coverage["meets_threshold"]` is the precomputed bool.
         verdict_cap_reasons: list[str] = []
+        if not walkthrough_was_default_noop and not walk_result.succeeded:
+            cap_reason = (
+                "walkthrough oracle failed or produced unusable product proof: "
+                f"{walk_result.detail}"
+            )
+            verdict = _strictest(verdict, AuditVerdict.PARTIAL)
+            narrative = narrative + "\n\n[walkthrough oracle failed]\n" + cap_reason
+            verdict_cap_reasons.append(cap_reason)
         if walk_coverage is not None and not walk_coverage["meets_threshold"]:
             cap_reason = (
                 f"walkthrough Feature-tag coverage "
@@ -1298,6 +1319,8 @@ async def run_audit(
             feature_audits=list(agent_output.feature_audits),
             cross_slice_evidence=cross_evidence,
             walkthrough_artifacts=list(walk_result.artifacts),
+            walkthrough_succeeded=walk_result.succeeded,
+            walkthrough_detail=walk_result.detail,
             contract_test_passed=contract_passed,
             contract_test_detail=contract_detail,
             quality_score=agent_output.quality_score,
@@ -1427,8 +1450,12 @@ async def run_audit(
                 (r for r in build_result.group_results if r.group_id == group_id),
                 None,
             )
-            has_group_branch = sresult is not None and bool(sresult.branch)
-            branch = sresult.branch if has_group_branch else base_branch
+            has_group_branch = False
+            if sresult is not None and sresult.branch:
+                branch = sresult.branch
+                has_group_branch = True
+            else:
+                branch = base_branch
             worktree = sresult.worktree if sresult else project_dir
             agent_input_fix = BuildAgentInput(
                 spec=spec,
@@ -1751,7 +1778,7 @@ def _fallback_contract_test_argv(
     return ["uvx", "--with", "tox-uv", "tox", *argv[1:]]
 
 
-def _build_summary(build_result: BuildResult) -> dict:
+def _build_summary(build_result: BuildResult) -> dict[str, Any]:
     return {
         "all_passing": build_result.all_passing,
         "passing_ids": list(build_result.passing_ids),
@@ -1773,6 +1800,13 @@ def _build_summary(build_result: BuildResult) -> dict:
                 "cost_usd": r.cost_usd,
                 "narrative": r.failure_narrative,
                 "self_check": dict(getattr(r, "self_check", {}) or {}),
+                "malformed_evidence_count": _malformed_evidence_count(
+                    getattr(r, "last_evidence", []) or []
+                ),
+                "last_evidence": [
+                    _compact_evidence(ev)
+                    for ev in (getattr(r, "last_evidence", []) or [])[:8]
+                ],
                 "contract_deltas": [
                     delta.to_dict() for delta in getattr(r, "contract_deltas", [])
                 ],
@@ -1782,7 +1816,16 @@ def _build_summary(build_result: BuildResult) -> dict:
     }
 
 
-def _merge_summary(merge_result: MergeQueueResult) -> dict:
+def _malformed_evidence_count(evidence_items: Iterable[Evidence]) -> int:
+    count = 0
+    for evidence in evidence_items:
+        raw = evidence.raw if isinstance(evidence.raw, dict) else {}
+        if raw.get("malformed") is True or raw.get("evidence_quality") == "malformed":
+            count += 1
+    return count
+
+
+def _merge_summary(merge_result: MergeQueueResult) -> dict[str, Any]:
     return {
         "landed_ids": list(merge_result.landed_ids),
         "blocked_ids": list(merge_result.blocked_ids),
@@ -1884,6 +1927,11 @@ def _write_audit_evidence_packet(agent_input: AuditAgentInput) -> None:
             "passed": agent_input.contract_test_passed,
             "detail": agent_input.contract_test_detail,
         },
+        "walkthrough_oracle": {
+            "succeeded": agent_input.walkthrough_succeeded,
+            "detail": agent_input.walkthrough_detail,
+            "artifact_count": len(agent_input.walkthrough_artifacts),
+        },
         "deterministic_first_order": [
             "contract_test",
             "cross_slice_evidence",
@@ -1911,6 +1959,8 @@ def _write_audit_evidence_packet(agent_input: AuditAgentInput) -> None:
             "Read this packet first, then inspect referenced artifacts as needed.",
             "Prefer deterministic contract/cross-slice results and browser artifacts over provider transcript text.",
             "A failed deterministic contract is a blocker or partial cap unless direct evidence proves the oracle is invalid.",
+            "Evidence with evidence_quality=malformed or proof_usable=false is a diagnostic, not proof of behavior.",
+            "A failed walkthrough_oracle is a product-proof gap unless another named browser artifact proves the behavior.",
             "Cross-slice evidence with raw.classification=check_infrastructure is harness/test wiring noise, not product failure.",
             "Avoid bulk-reading messages.jsonl; if needed, inspect bounded relevant excerpts only.",
             "Do not inspect node_modules, dist/assets bundles, coverage, or test-results unless a named evidence artifact points there.",
@@ -1934,6 +1984,11 @@ def _compact_evidence(evidence: Evidence) -> dict[str, Any]:
         "timeout",
         "command",
         "classification",
+        "malformed",
+        "malformed_check",
+        "evidence_quality",
+        "proof_usable",
+        "diagnostic",
     ):
         if key in raw:
             compact_raw[key] = raw[key]
@@ -2185,9 +2240,24 @@ def _audit_prompt(agent_input: AuditAgentInput) -> str:
         label = "PASS" if agent_input.contract_test_passed else "FAIL"
         lines.append(f"- {label} — {agent_input.contract_test_detail}")
     lines.append("")
+    lines.append("## Walkthrough oracle")
+    lines.append(
+        f"- {'PASS' if agent_input.walkthrough_succeeded else 'FAIL'} — "
+        f"{agent_input.walkthrough_detail or 'not recorded'}"
+    )
+    if not agent_input.walkthrough_succeeded:
+        lines.append(
+            "  Treat this as a product-proof gap unless other named browser "
+            "artifacts in this packet directly prove the behavior."
+        )
+    lines.append("")
     lines.append("## Cross-slice deterministic check evidence")
     for ev in agent_input.cross_slice_evidence:
-        lines.append(f"- {'PASS' if ev.passed else 'FAIL'} — {ev.detail}")
+        raw = ev.raw if isinstance(ev.raw, dict) else {}
+        proof_note = ""
+        if raw.get("evidence_quality") == "malformed" or raw.get("proof_usable") is False:
+            proof_note = " (diagnostic only; not proof)"
+        lines.append(f"- {'PASS' if ev.passed else 'FAIL'}{proof_note} — {ev.detail}")
     lines.append("")
     if agent_input.walkthrough_artifacts:
         lines.append("## Walkthrough artifacts (paths — READ these)")
@@ -2863,7 +2933,7 @@ async def default_audit_agent(agent_input: AuditAgentInput) -> AuditAgentOutput:
 
     config_path = agent_input.project_dir / "otto.yaml"
     # Pattern F: distinguish missing (fine) from unreadable (fail).
-    config: dict = dict(agent_input.config or {})
+    config: dict[str, Any] = dict(agent_input.config or {})
     if not config and config_path.exists():
         try:
             config = load_config(config_path)

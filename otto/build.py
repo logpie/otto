@@ -480,7 +480,7 @@ class BuildAgentOutput:
 class BuildAgentCallable(Protocol):
     """Async callable signature for the per-slice build agent."""
 
-    async def __call__(self, agent_input: BuildAgentInput) -> BuildAgentOutput:
+    async def __call__(self, agent_input: BuildAgentInput, /) -> BuildAgentOutput:
         ...
 
 

@@ -137,19 +137,31 @@ def read_pending(project_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
-_TERMINAL_VERDICTS = frozenset({
+_TERMINAL_FOR_REDISPATCH_VERDICTS = frozenset({
     "pass", "partial", "unverified", "merge_blocked", "catastrophic",
 })
-_NON_RUNNABLE_VERDICTS = _TERMINAL_VERDICTS | {"pending_children"}
+_NON_RUNNABLE_VERDICTS = _TERMINAL_FOR_REDISPATCH_VERDICTS | {"pending_children"}
 
 
-def _globally_completed_task_ids(project_dir: Path) -> set[str]:
-    """Tasks whose verdict in task_graph.json is terminal (not pending).
+def _verdict_satisfies_dependency(verdict: Any, review_state: Any = None) -> bool:
+    """Return whether a completed upstream can unlock a dependent task.
+
+    This is deliberately stricter than "non-runnable." Failed terminal states
+    must not be redispatched, but they also must not satisfy dependents. Raw
+    partials are not enough either; only the P0 reviewed-partial gate is.
+    """
+    if verdict == "pass":
+        return True
+    return verdict == "partial" and review_state == "reviewed_partial"
+
+
+def _globally_dependency_satisfied_task_ids(project_dir: Path) -> set[str]:
+    """Tasks whose task_graph state satisfies downstream dependencies.
 
     The runner's local ``completed`` set in _process_children is per-call,
     so recursive invocations don't see siblings completed in earlier passes —
     leading to re-dispatch loops. The task graph is the global source of
-    truth for completion; reading from it stops the thrash.
+    truth for dependency satisfaction.
     """
     from otto.queue.task_graph import read_graph
 
@@ -160,7 +172,7 @@ def _globally_completed_task_ids(project_dir: Path) -> set[str]:
     done: set[str] = set()
     for tid, t in (graph.get("tasks") or {}).items():
         verdict = t.get("verdict")
-        if isinstance(verdict, str) and verdict in _TERMINAL_VERDICTS:
+        if _verdict_satisfies_dependency(verdict, t.get("review_state")):
             done.add(tid)
     return done
 
@@ -200,7 +212,7 @@ def take_ready(
     """
     # Union local + global completion. Local catches in-flight transitions
     # the graph hasn't observed yet; global catches across recursive calls.
-    globally_done = _globally_completed_task_ids(project_dir)
+    globally_done = _globally_dependency_satisfied_task_ids(project_dir)
     completed_all = set(completed_task_ids) | globally_done
     non_runnable = (
         set(completed_task_ids)

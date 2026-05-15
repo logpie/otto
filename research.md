@@ -1438,3 +1438,58 @@ Branch: `cc-i2p-2`
 - Apply the scoped production patch and rerun the P2 tests.
 - Run the requested P0/P1/leaf/smoke regressions, smoke tier, ruff, and
   basedpyright on touched files.
+
+---
+
+# Research: Pass 4 Brittleness Containment
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+
+## Existing State
+
+- `otto/queue/subtask.py` uses one `_TERMINAL_VERDICTS` set for two different
+  jobs: anti-thrash non-runnability and dependency satisfaction. That keeps
+  catastrophic children from redispatching, but it also lets downstream
+  siblings run after a non-pass dependency.
+- `otto/v5_runner.py:_build_decomp_runtime_context()` repeats the same
+  "terminal verdicts are done" rule in the runtime prompt context.
+- `otto/audit.py` has two false-green walkthrough edges: `no_op_walkthrough()`
+  reports success with no artifacts, and synthesized webapp walkthroughs exit
+  0 for "not-applicable" when a webapp has no runnable/static shape.
+- `otto/checks.py:_malformed_check_evidence()` intentionally returns
+  `passed=True` under the v2.1 design. It already marks
+  `raw["malformed_check"]`, but `_compact_evidence()`, the evidence packet,
+  and the prompt do not elevate that signal as "not proof".
+- `otto/v5_branching.py:setup_child_worktree()` still returns `None` on setup
+  failure and documents the caller fallback to `project_dir`.
+- `otto/v5_runner._run_child()` still has a context-slicing fallback through
+  `(child_worktree or project_dir)` and can proceed after child worktree setup
+  failure.
+
+## Constraints
+
+- Preserve the anti-thrash mechanism: catastrophic/merge_blocked/unverified/raw
+  partial tasks must not redispatch endlessly.
+- Dependency satisfaction must match the P0 merge gate: only `pass` and
+  `partial` with `review_state == "reviewed_partial"` satisfy dependents.
+- Keep malformed per-check payloads non-slice-blocking per
+  `docs/intent-to-product-v2-plan.md`; make them typed, loud, and unusable as
+  proof.
+- Production audit safety depends on the audit gate no longer treating missing
+  or synthesized-not-applicable walkthroughs as success.
+- The guardrail should be precise enough to fail on new brittle shapes without
+  becoming a broad regex tax.
+
+## Open Questions Resolved
+
+- `checks.py` malformed evidence remains `passed=True` because v2.1 explicitly
+  delegates product truth to the audit contract gate. The fix is to make
+  `evidence_quality="malformed"` and `proof_usable=False` survive into the
+  audit packet and prompt.
+- Webapp synthesized "not-applicable" is not a successful walkthrough. It is a
+  product/audit evidence gap and should cap a passing audit at least to
+  partial.
+- Child worktree setup failure is not a valid reason to run a child in the
+  project root. The child should become `merge_blocked` before dispatch.

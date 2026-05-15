@@ -991,3 +991,69 @@ available in this session. Local `codex-gate` checklist applied:
   `verification_plan.json` required-failure downgrade.
 - System checks: focused P2 tests, required P0/P1/leaf/smoke tests, smoke tier,
   ruff, basedpyright, and production-only rollback red proof.
+
+---
+
+# Plan: Pass 4 Brittleness Containment
+
+Date: 2026-05-15
+
+## Objective
+
+Fix the remaining HIGH brittleness findings and add a standing AST guardrail
+that prevents new lenient-success, swallowed-state, substring-classifier,
+dependency-satisfaction, and identity-fallback regressions.
+
+## Steps
+
+1. Split non-runnable task verdicts from dependency-satisfied verdicts.
+   - Why: anti-thrash and dependency success are different semantics.
+   - Verify: a catastrophic upstream is not redispatched, and its dependent is
+     not ready; reviewed partial still satisfies dependency.
+
+2. Close audit walkthrough false-success paths.
+   - Why: a webapp audit cannot treat "no artifact" or synthesized
+     "not-applicable" as proof.
+   - Verify: synthesized no-shape webapp returns `succeeded=False`; a passing
+     judge is capped to partial when the configured walkthrough fails.
+
+3. Keep malformed check payloads non-blocking but machine-detectable.
+   - Why: v2.1 says malformed per-check payloads do not block slices, but they
+     must never be counted as real proof.
+   - Verify: malformed evidence has `malformed=True`,
+     `evidence_quality="malformed"`, `proof_usable=False`, and those fields
+     appear in the audit evidence packet.
+
+4. Remove child worktree setup fallback to `project_dir`.
+   - Why: running a child against the root worktree violates branch/worktree
+     identity and can corrupt unrelated state.
+   - Verify: setup failure marks the child `merge_blocked` and does not call
+     `run_lead`.
+
+5. Add `tests/test_brittleness_guardrail.py`.
+   - Why: the recurring class needs a structural CI tripwire.
+   - Verify: guardrail walks `otto/` AST, fails on synthetic/current
+     violations outside a reasoned allowlist, and passes after fixes.
+
+6. Run local gates and implementation review.
+   - Verify: red production-rollback proof for new behavior tests; focused
+     green tests; requested smoke/regression suites; ruff and basedpyright on
+     touched files.
+
+## Plan Gate Review
+
+Codex MCP gate status: unavailable in this session. Local `codex-gate`
+checklist applied:
+
+- Worktree confirmed:
+  `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`, branch `cc-i2p-2`.
+- Owned files: `otto/queue/subtask.py`, `otto/v5_runner.py`,
+  `otto/audit.py`, `otto/checks.py`, `otto/v5_branching.py`, focused tests,
+  guardrail test, and review/research/plan artifacts.
+- Riskiest assumptions: malformed-check leniency remains safe only if audit
+  evidence is loud and missing walkthroughs cap verdicts; reviewed partial is
+  the only non-pass dependency-satisfied state.
+- Existing patterns reused: `mark_reviewed_partial`, `LeadResult`,
+  `set_verdict`, audit `verdict_cap_reasons`, and `_compact_evidence`.
+- System checks: new focused hardening tests, guardrail test, requested
+  P0/P1/P2/leaf/smoke suites, smoke tier, ruff, basedpyright, and diff review.

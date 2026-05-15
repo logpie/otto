@@ -50,6 +50,10 @@ class MergeWorktreeDirtyError(RuntimeError):
         )
 
 
+class ChildWorktreeSetupError(RuntimeError):
+    """Raised when a child worktree cannot be established safely."""
+
+
 def git_current_branch(project_dir: Path) -> str:
     """Return the checked-out branch name, or ``HEAD`` when detached/unknown."""
     cp = subprocess.run(
@@ -487,11 +491,12 @@ def setup_child_worktree(
     project_dir: Path,
     child_task_id: str,
     parent_integration_branch: str,
-) -> Path | None:
+) -> Path:
     """Create a worktree for ``child_task_id`` off the parent's integration branch.
 
-    Best-effort: returns None on any failure (caller falls back to
-    project_dir for the child's CWD).
+    Raises when setup fails. Running a child in ``project_dir`` after a
+    worktree identity failure is unsafe because child edits can leak into the
+    parent/root worktree.
     """
     from otto.worktree import add_worktree
 
@@ -524,10 +529,12 @@ def setup_child_worktree(
         return wt_path
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "setup_child_worktree(%s) failed: %s; falling back to project_dir",
+            "setup_child_worktree(%s) failed: %s",
             child_task_id, exc,
         )
-        return None
+        raise ChildWorktreeSetupError(
+            f"setup_child_worktree({child_task_id}) failed: {exc}"
+        ) from exc
 
 
 def _gitignored_paths(repo: Path, paths: list[str]) -> set[str]:

@@ -1184,6 +1184,10 @@ def _run_state_invariant(
             duration_s=time.monotonic() - t0,
             detail=f"{detail} → informational ({type(exc).__name__}: {exc})",
             raw={
+                "malformed": True,
+                "malformed_check": True,
+                "evidence_quality": "malformed",
+                "proof_usable": False,
                 "expression": expression,
                 "description": check.description,
                 "result": None,
@@ -2001,7 +2005,13 @@ def _malformed_check_evidence(started: str, t0: float, detail: str) -> Evidence:
         started_at=started,
         duration_s=time.monotonic() - t0,
         detail=detail,
-        raw={"malformed_check": True, "diagnostic": detail},
+        raw={
+            "malformed": True,
+            "malformed_check": True,
+            "evidence_quality": "malformed",
+            "proof_usable": False,
+            "diagnostic": detail,
+        },
     )
 
 

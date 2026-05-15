@@ -849,3 +849,59 @@ Verification:
   passed.
 - Touched-file type check: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error ...`
   passed: 0 errors, 0 warnings, 0 notes.
+
+---
+
+## Implementation Gate — 2026-05-15 — Pass 4 brittleness containment
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, focused diff review,
+red/green regression proof, smoke gates, ruff, basedpyright, and diff-check
+were used instead.
+
+Findings during implementation review:
+- [HIGH] Redispatch terminality and dependency satisfaction were conflated.
+  `catastrophic`/`merge_blocked`/`unverified`/raw `partial` now stay
+  non-runnable for anti-thrash, but only `pass` and reviewed partials unlock
+  dependents.
+- [HIGH] Synthesized audit walkthroughs could report success with no runnable
+  webapp shape. Missing shape now fails the walkthrough oracle, and configured
+  walkthrough failure caps an otherwise-passing judge verdict to `partial`.
+- [HIGH] Malformed per-check evidence remains non-slice-blocking per v2.1, but
+  is now machine-marked as malformed, diagnostic-only, and not usable proof.
+  Audit packets and prompts consume that typed signal.
+- [HIGH] Child worktree setup no longer falls back to the project root or
+  dispatches a Lead without a valid parent integration branch. Setup failure
+  or missing branch identity records `merge_blocked` before agent dispatch.
+- [MEDIUM] Several silent JSON/YAML/config fallback readers now log malformed
+  or unreadable input before returning default state.
+- [MEDIUM] The standing guardrail is AST-based and green. It detects success on
+  error/malformed/fallback paths, swallowed state parse failures, substring
+  error classifiers, non-pass dependency-satisfaction sets, and branch/worktree
+  identity default fallbacks. Allowlist entries require concrete reasons.
+- [NOTE] Two legacy root/default-branch helpers remain explicitly allowlisted:
+  `otto/cli_run.py:_pipeline_base_branch` and
+  `otto/mission_control/service.py:_merge_target`. They are not child
+  worktree/dependency identity paths, but remain visible medium debt.
+
+Verification:
+- Red proof before production patch: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_pass4_hardening.py -q`
+  failed as expected: 7 failed.
+- Focused Pass 4 plus guardrail: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_pass4_hardening.py tests/test_brittleness_guardrail.py -q`
+  passed: 10 passed.
+- Required smoke tier: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke`
+  passed: 306 passed, 2470 deselected.
+- Required hardening/leaf/smoke/guardrail batch: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p0_hardening.py tests/test_v5_p1_hardening.py tests/test_v5_p2_hardening.py tests/test_v5_leaf_runtime_invariants.py tests/smoke tests/test_brittleness_guardrail.py -q`
+  passed: 104 passed.
+- Required merge/audit/build/repair plus Pass 4/config/audit regressions:
+  `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_pass4_hardening.py tests/test_merge_queue.py tests/test_audit_loop_repair.py tests/test_build.py tests/test_repair_gates.py tests/test_audit.py tests/test_config.py -q`
+  passed: 333 passed.
+- Extra touched check suite: adding `tests/test_checks.py` produced four
+  environment-only failures because this sandbox rejects local socket bind on
+  `127.0.0.1:0` with `PermissionError: [Errno 1] Operation not permitted`;
+  the same run had 400 passing tests before those socket probe failures.
+- Touched-file lint: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run ruff check ...`
+  passed.
+- Touched-file type check: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error ...`
+  passed: 0 errors, 0 warnings, 0 notes.
+- `git diff --check` passed.

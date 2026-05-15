@@ -56,6 +56,7 @@ from otto.v5_preflight_repair import (
 from otto.queue.subtask import (
     read_pending,
     take_ready,
+    _verdict_satisfies_dependency,
 )
 from otto.queue.task_graph import (
     aggregate_verdict,
@@ -1604,7 +1605,9 @@ async def _process_children(
                     await dispatch_lease.release(tid)
                     released = True
                     child_results[tid] = result
-                    completed.add(tid)
+                    _record_reviewed_partial_if_present(project_dir, tid, result)
+                    if _child_result_allows_upward_merge(project_dir, tid, result):
+                        completed.add(tid)
                     _emit(on_event, {
                         "event": "child_done",
                         "task_id": tid,
@@ -1722,7 +1725,29 @@ async def _run_child(
             logger.warning("could not copy parent spec to child session: %s", exc)
 
     # Set up the child's per-task worktree off the parent's integration branch.
-    parent_integration_branch = entry.get("integration_branch") or "main"
+    # Queue entries are expected to carry this branch explicitly; missing
+    # identity is corrupt state and must not silently fall back to main.
+    parent_integration_branch = str(entry.get("integration_branch") or "").strip()
+    if not parent_integration_branch:
+        reason = "child queue entry missing integration_branch before dispatch"
+        logger.error("%s: %s", tid, reason)
+        set_verdict(project_dir, tid, "merge_blocked")
+        _emit(on_event, {
+            "event": "child_worktree_setup_failed",
+            "task_id": tid,
+            "detail": reason,
+        })
+        return LeadResult(
+            task_id=tid,
+            verdict="merge_blocked",
+            failure_reason=reason,
+            verify_called=True,
+            verify_result={
+                "verdict": "merge_blocked",
+                "summary": reason,
+                "phase": "worktree_setup",
+            },
+        )
     child_worktree: Path | None = None
     try:
         from otto.v5_branching import setup_child_worktree
@@ -1766,14 +1791,52 @@ async def _run_child(
                 "path": str(child_worktree),
             })
     except Exception as exc:  # noqa: BLE001
-        logger.warning("worktree setup for child %s failed: %s", tid, exc)
+        reason = f"child worktree setup failed before dispatch: {type(exc).__name__}: {exc}"
+        logger.error("%s", reason)
+        set_verdict(project_dir, tid, "merge_blocked")
+        _emit(on_event, {
+            "event": "child_worktree_setup_failed",
+            "task_id": tid,
+            "detail": reason,
+        })
+        return LeadResult(
+            task_id=tid,
+            verdict="merge_blocked",
+            failure_reason=reason,
+            verify_called=True,
+            verify_result={
+                "verdict": "merge_blocked",
+                "summary": reason,
+                "phase": "worktree_setup",
+            },
+        )
+    if child_worktree is None:
+        reason = "child worktree setup returned no worktree before dispatch"
+        logger.error("%s: %s", tid, reason)
+        set_verdict(project_dir, tid, "merge_blocked")
+        _emit(on_event, {
+            "event": "child_worktree_setup_failed",
+            "task_id": tid,
+            "detail": reason,
+        })
+        return LeadResult(
+            task_id=tid,
+            verdict="merge_blocked",
+            failure_reason=reason,
+            verify_called=True,
+            verify_result={
+                "verdict": "merge_blocked",
+                "summary": reason,
+                "phase": "worktree_setup",
+            },
+        )
 
     context_slice_note = ""
     if _context_slicing_enabled(config):
         try:
             from otto.v5_context_slicer import write_context_slice_for_child
 
-            full_charter_path = (child_worktree or project_dir) / "CHARTER.md"
+            full_charter_path = child_worktree / "CHARTER.md"
             if not full_charter_path.exists():
                 full_charter_path = project_dir / "CHARTER.md"
             child_scope = _child_scope_from_entry(tid, entry)
@@ -2015,9 +2078,12 @@ def _read_latest_conflict_packet(project_dir: Path) -> dict[str, Any]:
     from otto.v5_branching import latest_conflict_packet_path
 
     path = latest_conflict_packet_path(project_dir)
+    if not path.exists():
+        return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("ignoring unreadable merge conflict packet %s: %s", path, exc)
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -3229,10 +3295,17 @@ def _reconcile_recovered_children(
 
     Returns the number of children whose verdict was updated.
     """
-    from otto.v5_branching import child_branch_name
+    from otto.v5_branching import child_branch_name, integration_branch_name
 
     parent = get_task(project_dir, parent_task_id) or {}
-    integration_branch = parent.get("integration_branch") or "main"
+    integration_branch = str(parent.get("integration_branch") or "").strip()
+    if not integration_branch:
+        integration_branch = integration_branch_name(parent_task_id)
+        logger.warning(
+            "parent task %s has no recorded integration_branch; using deterministic %s",
+            parent_task_id,
+            integration_branch,
+        )
 
     reconciled = 0
     for cid in children_of(project_dir, parent_task_id):
@@ -3299,20 +3372,25 @@ def _build_decomp_runtime_context(
     pending = [entry for entry in read_pending(project_dir) if isinstance(entry, dict)]
     raw_tasks = graph.get("tasks")
     tasks: dict[str, Any] = raw_tasks if isinstance(raw_tasks, dict) else {}
-    terminal = {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}
-    done = {
+    non_runnable_verdicts = {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}
+    dependency_satisfied = {
         tid for tid, task in tasks.items()
-        if isinstance(task, dict) and task.get("verdict") in terminal
+        if isinstance(task, dict)
+        and _verdict_satisfies_dependency(task.get("verdict"), task.get("review_state"))
+    }
+    non_runnable = {
+        tid for tid, task in tasks.items()
+        if isinstance(task, dict) and task.get("verdict") in non_runnable_verdicts
     }
     runnable = [
         entry for entry in pending
         if entry.get("task_id")
-        and entry.get("task_id") not in done
+        and entry.get("task_id") not in non_runnable
         and entry.get("review_state") in ("approved", None)
     ]
     ready = [
         entry for entry in runnable
-        if all(dep in done for dep in (entry.get("depends_on") or []))
+        if all(dep in dependency_satisfied for dep in (entry.get("depends_on") or []))
     ]
     elapsed = int(time.monotonic() - run_started_at) if run_started_at else 0
     budget = int(config.get("run_budget_seconds") or 3600)

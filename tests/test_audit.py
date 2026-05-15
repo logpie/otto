@@ -509,7 +509,7 @@ def test_run_audit_walkthrough_artifacts_passed_to_agent(tmp_path: Path) -> None
     spec = _spec(["s1"])
     session_dir = tmp_path / "sess"
     session_dir.mkdir()
-    captured: dict = {}
+    captured: dict[str, Any] = {}
 
     def fake_walkthrough(project_dir: Path, log_dir: Path, _timeout_s: int) -> WalkthroughResult:
         # Simulate writing a screenshot.
@@ -2135,10 +2135,9 @@ def test_synthesized_walkthrough_root_index_static_site(tmp_path: Path, monkeypa
     assert "walkthrough.webm" in artifact_names
 
 
-def test_synthesized_walkthrough_not_applicable_returns_succeeded(tmp_path: Path) -> None:
+def test_synthesized_walkthrough_not_applicable_returns_failure(tmp_path: Path) -> None:
     """No create_app AND no static index.html → not a webapp shape.
-    Walkthrough returns succeeded=True with 'not-applicable' diagnostic.
-    Audit verdict shouldn't be penalized for non-webapp projects.
+    A webapp walkthrough cannot treat this as product proof.
     """
     from otto.spec_compile import PytestCheck
 
@@ -2146,7 +2145,8 @@ def test_synthesized_walkthrough_not_applicable_returns_succeeded(tmp_path: Path
                 groups=[Group(id="s", name="t", checks=[PytestCheck(selector="x")])])
     callable_ = default_walkthrough_from_spec(spec)
     result = callable_(tmp_path, tmp_path / "log", 60)
-    assert result.succeeded is True
+    assert result.succeeded is False
+    assert "no runnable webapp shape" in result.detail
     log_text = (tmp_path / "log" / "synthesized-webapp.log").read_text()
     assert "not-applicable" in log_text
 
