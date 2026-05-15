@@ -37,9 +37,10 @@ import socket
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 Scope = Literal["scaffold", "subtree", "full"]
 
@@ -77,6 +78,29 @@ class CleanVerifyResult:
     temp_dir: Path | None = None
     listening_ports: list[int] = field(default_factory=list)
 
+
+@dataclass
+class PortCleanupResult:
+    """Honest startup cleanup result for declared ports."""
+
+    killed_ports: list[int] = field(default_factory=list)
+    freed_ports: list[int] = field(default_factory=list)
+    still_bound_ports: list[int] = field(default_factory=list)
+    killed_pids: dict[int, list[int]] = field(default_factory=dict)
+    pids_before: dict[int, list[int]] = field(default_factory=dict)
+    pids_after: dict[int, list[int]] = field(default_factory=dict)
+    ports_without_owned_process: list[int] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return bool(self.killed_ports or self.still_bound_ports)
+
+    def __iter__(self) -> Iterator[int]:
+        return iter(self.killed_ports)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, list):
+            return self.killed_ports == other
+        return super().__eq__(other)
 
 @dataclass
 class ToolchainCommandResult:
@@ -439,6 +463,8 @@ def _run_toolchain_command(
             )
     except subprocess.TimeoutExpired as exc:
         duration_s = time.monotonic() - started
+        stdout_tail: str = cast(str, exc.stdout)[-800:] if isinstance(exc.stdout, str) else ""
+        stderr_tail: str = cast(str, exc.stderr)[-800:] if isinstance(exc.stderr, str) else ""
         result.commands.append(ToolchainCommandResult(
             command=command,
             cwd=str(cwd),
@@ -447,8 +473,8 @@ def _run_toolchain_command(
             returncode=None,
             status="failed",
             reason=f"timed out after {timeout_s}s",
-            stdout_tail=(exc.stdout or "")[-800:] if isinstance(exc.stdout, str) else "",
-            stderr_tail=(exc.stderr or "")[-800:] if isinstance(exc.stderr, str) else "",
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
         ))
         result.failure_messages.append(
             f"{' '.join(command)} timed out in {cwd} after {timeout_s}s"
@@ -866,7 +892,7 @@ def _terminate_pid(pid: int) -> None:
 
 def cleanup_stale_declared_ports(
     project_dir: Path, logger_fn: Any = None
-) -> list[int]:
+) -> PortCleanupResult:
     """Kill processes bound to project's declared ports.
 
     Called once at the start of a pipeline run to clean up zombies from
@@ -879,27 +905,51 @@ def cleanup_stale_declared_ports(
     is absent or has no port declarations — the architect hasn't pinned
     ports yet, so there's nothing zombie-able.
 
-    Returns the list of ports we killed something on (may be empty).
+    Returns killed/freed/still-bound ports. The object is iterable over
+    ``killed_ports`` for compatibility with older callers.
     """
     ports = _parse_declared_ports(project_dir)
     if not ports:
-        return []
+        return PortCleanupResult()
 
     def log(msg: str) -> None:
         if logger_fn:
             logger_fn(msg)
 
-    killed_on: list[int] = []
+    pids_before: dict[int, list[int]] = {}
+    killed_pids: dict[int, list[int]] = {}
+    ports_without_owned_process: list[int] = []
     for port in ports:
         pids = _pids_for_port(port)
+        pids_before[port] = pids
+        if not pids:
+            continue
         owned = [pid for pid in pids if _is_otto_owned_process(pid, project_dir)]
         if not owned:
+            ports_without_owned_process.append(port)
             continue
         log(f"port-cleanup: port {port} bound by Otto-owned PIDs {owned}; killing")
         for pid in owned:
             _terminate_pid(pid)
-        killed_on.append(port)
-    return killed_on
+        killed_pids[port] = owned
+    still_bound = _check_ports_free(ports)
+    pids_after = {port: _pids_for_port(port) for port in still_bound}
+    killed_ports = sorted(killed_pids)
+    freed_ports = sorted(port for port in killed_ports if port not in still_bound)
+    if still_bound:
+        log(
+            "port-cleanup: declared ports still bound after cleanup: "
+            + ", ".join(str(port) for port in still_bound)
+        )
+    return PortCleanupResult(
+        killed_ports=killed_ports,
+        freed_ports=freed_ports,
+        still_bound_ports=sorted(still_bound),
+        killed_pids=killed_pids,
+        pids_before=pids_before,
+        pids_after=pids_after,
+        ports_without_owned_process=sorted(ports_without_owned_process),
+    )
 
 
 def _subtree_verify_start_sh(

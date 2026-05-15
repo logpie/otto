@@ -220,7 +220,7 @@ class PreflightRepairController:
                 fingerprint=fingerprint,
             )
 
-        if failure_kind == "port_busy" and not _port_cleanup_repaired(detail):
+        if not _auto_fix_repaired(failure_kind, detail):
             self._append_log(
                 event="repair_attempt",
                 issue=issue,
@@ -234,8 +234,15 @@ class PreflightRepairController:
             agent_classification = {
                 **classification,
                 "action": "agent",
-                "workspace_paths": ("start.sh", "CHARTER.md"),
-                "instruction": _port_cleanup_agent_instruction(issue, detail),
+                "workspace_paths": _auto_fix_agent_workspace_paths(
+                    failure_kind,
+                    classification,
+                ),
+                "instruction": _auto_fix_agent_instruction(
+                    failure_kind,
+                    issue,
+                    detail,
+                ),
             }
             return await self._agent_fix(issue, agent_classification, fingerprint)
 
@@ -420,6 +427,8 @@ class PreflightRepairController:
             path = worktree_path / rel
             if path.suffix != ".sh" or not path.is_file():
                 continue
+            if path.stat().st_mode & 0o111:
+                continue
             path.chmod(path.stat().st_mode | 0o111)
             changed.append(rel)
         return {"chmod_x": sorted(set(changed))}
@@ -492,6 +501,45 @@ def _port_cleanup_repaired(detail: dict[str, Any]) -> bool:
     if "bound_after" in detail:
         return bool(killed_ports) and not bool(detail.get("bound_after"))
     return bool(killed_ports)
+
+
+def _auto_fix_repaired(failure_kind: str, detail: dict[str, Any]) -> bool:
+    if failure_kind == "port_busy":
+        return _port_cleanup_repaired(detail)
+    if failure_kind == "filename_too_long":
+        return bool(detail.get("renamed") or [])
+    if failure_kind == "permission_chmod":
+        return bool(detail.get("chmod_x") or [])
+    return True
+
+
+def _auto_fix_agent_workspace_paths(
+    failure_kind: str,
+    classification: dict[str, Any],
+) -> tuple[str, ...]:
+    paths = tuple(str(path) for path in (classification.get("workspace_paths") or ()))
+    if failure_kind == "port_busy":
+        return paths or ("start.sh", "CHARTER.md")
+    return paths
+
+
+def _auto_fix_agent_instruction(
+    failure_kind: str,
+    issue: dict[str, Any],
+    detail: dict[str, Any],
+) -> str:
+    if failure_kind == "port_busy":
+        return _port_cleanup_agent_instruction(issue, detail)
+    return (
+        f"Deterministic {failure_kind} repair changed nothing, so do not treat "
+        "the issue as repaired. Inspect the concrete failure and make the "
+        "smallest code or contract change that lets the preflight oracle pass.\n"
+        "Auto-fix detail:\n"
+        f"{json.dumps(detail, indent=2, sort_keys=True, default=str)}\n\n"
+        f"Original issue: {json.dumps(issue, sort_keys=True, default=str)}\n\n"
+        "The runner will rerun the preflight after you finish; do not assume "
+        "the repair succeeded without that oracle."
+    )
 
 
 def _port_cleanup_agent_instruction(issue: dict[str, Any], detail: dict[str, Any]) -> str:

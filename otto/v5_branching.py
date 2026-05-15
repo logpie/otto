@@ -13,9 +13,11 @@ conflicts (best-effort, with bounded retry).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess
+import time
 from pathlib import Path
 
 logger = logging.getLogger("otto.v5_branching")
@@ -161,6 +163,59 @@ def child_branch_name(child_task_id: str) -> str:
     """
     safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", child_task_id).strip("-")
     return f"i2p/build/{safe}"
+
+
+def latest_conflict_packet_path(project_dir: Path) -> Path:
+    return project_dir / ".otto" / "merge-conflicts" / "latest.json"
+
+
+def _git_show_stage(project_dir: Path, stage: int, path: str) -> str:
+    proc = subprocess.run(
+        ["git", "show", f":{stage}:{path}"],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def _write_conflict_packet(
+    *,
+    project_dir: Path,
+    source_branch: str,
+    target_branch: str,
+    files: list[str],
+) -> Path:
+    packet_dir = project_dir / ".otto" / "merge-conflicts"
+    packet_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    safe_source = re.sub(r"[^A-Za-z0-9_.-]+", "-", source_branch)[:48]
+    packet_path = packet_dir / f"{timestamp}-{safe_source}.json"
+    payload = {
+        "schema_version": 1,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source_branch": source_branch,
+        "target_branch": target_branch,
+        "unmerged_paths": list(files),
+        "conflicts": [
+            {
+                "path": path,
+                "base": _git_show_stage(project_dir, 1, path),
+                "ours": _git_show_stage(project_dir, 2, path),
+                "theirs": _git_show_stage(project_dir, 3, path),
+            }
+            for path in files
+        ],
+        "instruction": (
+            "Analyze base, ours, and theirs for each path. Preserve both the "
+            "target branch behavior and the source branch behavior; do not "
+            "blindly choose an entire --ours or --theirs side."
+        ),
+    }
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    packet_path.write_text(text, encoding="utf-8")
+    latest_conflict_packet_path(project_dir).write_text(text, encoding="utf-8")
+    return packet_path
 
 
 def child_worktree_path(project_dir: Path, child_task_id: str) -> Path:
@@ -646,14 +701,26 @@ def merge_branch_into(
                 )
             # Auto-resolve commit failed; fall through to abort.
 
-        # Layer 4 fallback would dispatch an LLM resolver here; for now,
-        # surface the unresolvable files honestly.
+        conflict_packet: Path | None = None
+        if truly_blocked:
+            try:
+                conflict_packet = _write_conflict_packet(
+                    project_dir=project_dir,
+                    source_branch=branch,
+                    target_branch=parent_integration_branch,
+                    files=truly_blocked,
+                )
+            except OSError as exc:
+                logger.warning("could not write merge conflict packet: %s", exc)
         subprocess.run(
             ["git", "merge", "--abort"],
             cwd=str(project_dir), capture_output=True,
         )
         if truly_blocked:
-            return False, f"conflict on: {', '.join(truly_blocked[:5])}"
+            detail = f"conflict on: {', '.join(truly_blocked[:5])}"
+            if conflict_packet is not None:
+                detail += f"; conflict packet: {conflict_packet}"
+            return False, detail
         # All files were auto-resolvable individually, but commit failed
         # (something downstream like hooks / index in bad state). Report
         # the *original* conflict set so the log isn't a bare "?". Without

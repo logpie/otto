@@ -10,6 +10,7 @@ Coverage:
 
 The build agent is mocked throughout; the LLM never runs.
 """
+# pyright: reportArgumentType=false
 
 from __future__ import annotations
 
@@ -1375,11 +1376,9 @@ def test_run_build_flags_scope_violation(tmp_path: Path) -> None:
         )
     )
     by_id = {r.group_id: r for r in result.group_results}
-    # Soft-warning model: scope crossing does NOT block the slice. Both
-    # slices still PASS (each has a no-op-passing check), and the
-    # warning is captured on s2's GroupResult for the proof packet.
+    # Scope crossing blocks the slice; it must amend ownership or revert before merge.
     assert by_id["s1"].status == GroupStatus.PASSING
-    assert by_id["s2"].status == GroupStatus.PASSING
+    assert by_id["s2"].status == GroupStatus.FAILED_SCOPE
     assert "app/main.py" in by_id["s2"].scope_warnings
 
 
@@ -1465,7 +1464,7 @@ def test_run_build_warns_on_dep_owned_extension(tmp_path: Path) -> None:
     )
 
     by_id = {r.group_id: r for r in result.group_results}
-    assert by_id["task_lifecycle"].status == GroupStatus.PASSING
+    assert by_id["task_lifecycle"].status == GroupStatus.FAILED_SCOPE
     assert "todo.py" in by_id["task_lifecycle"].scope_warnings
     journal = (session_dir / "spec-state.jsonl").read_text(encoding="utf-8")
     assert '"kind": "scope.warning"' in journal

@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from collections.abc import Iterable, Mapping
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 
 from otto.checks import Evidence, run_checks
 from otto.prompts import render_prompt
@@ -1361,6 +1361,8 @@ def _configured_group_concurrent(config: dict[str, Any] | None) -> int:
     if not isinstance(build, dict):
         return 1
     raw = build.get("group_concurrent")
+    if not isinstance(raw, (int, str)):
+        return 1
     try:
         parsed = int(raw)
     except (TypeError, ValueError):
@@ -1693,6 +1695,7 @@ async def run_build(
         # primary parent doesn't include sibling deps. Merge the rest
         # in via `_setup_group_branch_with_deps` so the slice branch
         # contains the integrated state of ALL its deps.
+        setup_narrative = ""
         if additional_dep_refs:
             dep_setup = _setup_group_branch_with_deps(
                 group_worktree, branch=group_branch,
@@ -1701,6 +1704,7 @@ async def run_build(
                 allow_conflict_context=True,
             )
             branch_real = dep_setup.ok
+            setup_narrative = dep_setup.conflict_context
             # Fall back to single-parent setup if the dep-merge produced a
             # conflict — preserves the build run instead of failing the
             # slice purely from V12. The slice will then fail at merge time
@@ -1753,7 +1757,7 @@ async def run_build(
             branch=group_branch,
             worktree=group_worktree,
             branch_real=branch_real,
-            setup_narrative=dep_setup.conflict_context if additional_dep_refs else "",
+            setup_narrative=setup_narrative,
         )
 
     while True:
@@ -1804,6 +1808,7 @@ async def run_build(
                     },
                 )
                 continue
+            setup_narrative_c = ""
             if additional_dep_refs_c:
                 dep_setup_c = _setup_group_branch_with_deps(
                     comp_worktree, branch=comp_branch,
@@ -1812,6 +1817,7 @@ async def run_build(
                     allow_conflict_context=True,
                 )
                 branch_real_c = dep_setup_c.ok
+                setup_narrative_c = dep_setup_c.conflict_context
                 if not branch_real_c:
                     narrative = _dependency_branch_setup_failure(
                         unit_id=next_component.id,
@@ -1859,9 +1865,7 @@ async def run_build(
                 config=config,
                 base_url=base_url,
                 budget=budget,
-                initial_failure_narrative=(
-                    dep_setup_c.conflict_context if additional_dep_refs_c else ""
-                ),
+                initial_failure_narrative=setup_narrative_c,
                 initial_agent_session_id=resume_agent_sessions.get(next_component.id, ""),
             )
             if branch_real_c and comp_result.status == ComponentStatus.PASSING:
@@ -1967,7 +1971,7 @@ async def run_build(
                     ),
                 )
             else:
-                slice_result = raw_result
+                slice_result = cast(GroupResult, raw_result)
 
             # Pattern D: commit the slice's work to its branch so merge_queue
             # can do a real `git merge`. Only run when branch setup succeeded.
@@ -2181,7 +2185,11 @@ async def _run_slice(
         if invalidation_reason:
             return GroupResult(
                 group_id=group_obj.id,
-                status=GroupStatus.BLOCKED,
+                status=(
+                    GroupStatus.FAILED_SCOPE
+                    if accumulated_scope_warnings
+                    else GroupStatus.BLOCKED
+                ),
                 attempts=attempt - 1,
                 branch=branch,
                 worktree=worktree,
@@ -2226,7 +2234,11 @@ async def _run_slice(
                 )
             return GroupResult(
                 group_id=group_obj.id,
-                status=GroupStatus.BLOCKED,
+                status=(
+                    GroupStatus.FAILED_SCOPE
+                    if accumulated_scope_warnings
+                    else GroupStatus.BLOCKED
+                ),
                 attempts=attempt - 1,
                 branch=branch,
                 worktree=worktree,
@@ -2465,12 +2477,9 @@ async def _run_slice(
                 )
 
         # Scope check: detect modifications outside the slice's declared
-        # owned_paths + transitive deps + shared_scaffold. Soft-warning
-        # mode: don't block the slice — just log the warnings and let
-        # the slice's own checks + cross-slice checks + audit catch any
-        # actual behavior regressions. A modification that crossed a
-        # declared scope boundary is interesting documentation, not
-        # automatically harmful.
+        # owned_paths + transitive deps + shared_scaffold. The amendment
+        # side-channel above can legitimately broaden ownership; remaining
+        # violations are blocking repair feedback, not mergeable warnings.
         # B3 fix: try git first; if it returns no paths (likely because
         # we're in single-worktree fallback or not a repo), fall back
         # to filesystem-snapshot diff. Without a fallback, the first
@@ -2498,7 +2507,7 @@ async def _run_slice(
                 scope_warnings.append(path)
         if scope_warnings:
             logger.info(
-                "group %s: scope warnings (%d path(s) outside own scope): %s",
+                "group %s: scope violation (%d path(s) outside own scope): %s",
                 group_obj.id,
                 len(scope_warnings),
                 ", ".join(scope_warnings[:5]),
@@ -2513,7 +2522,7 @@ async def _run_slice(
                 group_id=group_obj.id,
                 attempt=attempt,
                 detail=(
-                    f"scope warning (non-blocking): modified {len(scope_warnings)} "
+                    f"scope violation (blocking): modified {len(scope_warnings)} "
                     f"path(s) outside the slice's own owned_paths: "
                     f"{', '.join(scope_warnings[:5])}"
                 ),
@@ -2522,6 +2531,21 @@ async def _run_slice(
             for w in scope_warnings:
                 if w not in accumulated_scope_warnings:
                     accumulated_scope_warnings.append(w)
+            last_failure = (
+                "scope violation: modified path(s) outside declared ownership: "
+                + ", ".join(scope_warnings[:5])
+                + ". Request a contract amendment via `.otto/amendment_request.json` "
+                "or revert the out-of-scope write before declaring success."
+            )
+            emit(
+                session_dir,
+                "group.attempt.failed",
+                group_id=group_obj.id,
+                attempt=attempt,
+                detail=last_failure,
+            )
+            current_diff_hash = _hash_worktree_diff(worktree)
+            continue
 
         contract_deltas = collect_critical_shared_contract_deltas(
             group_obj,
@@ -2692,6 +2716,21 @@ async def _run_slice(
         )
 
     # Out of retries.
+    if accumulated_scope_warnings:
+        return GroupResult(
+            group_id=group_obj.id,
+            status=GroupStatus.FAILED_SCOPE,
+            attempts=attempt,
+            branch=branch,
+            worktree=worktree,
+            last_evidence=last_evidence,
+            failure_narrative=last_failure or "scope violation remained after repair attempts",
+            scope_warnings=list(accumulated_scope_warnings),
+            contract_deltas=list(accumulated_contract_deltas),
+            self_check=dict(self_check),
+            cost_usd=cost_total,
+            wall_s=time.monotonic() - slice_t0,
+        )
     if _result_can_continue_degraded(
         evidence_pairs=last_evidence_pairs,
         worktree=worktree,
@@ -3686,7 +3725,7 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
     # silently becomes {} causes the build agent to run with default
     # options instead of the project's configured venv/test_command —
     # the run "succeeds" but produces wrong output.
-    config: dict = dict(agent_input.config or {})
+    config: dict[str, Any] = dict(agent_input.config or {})
     if not config and config_path.exists():
         try:
             config = load_config(config_path)

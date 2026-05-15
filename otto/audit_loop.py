@@ -201,15 +201,16 @@ def features_to_repair(
     feature_verdicts: list[dict[str, Any]],
     *,
     max_attempts_per_run: int | None = None,
+    ensure_each_group_first_attempt: bool = True,
 ) -> list[FailingFeature]:
     """Pick which failing Features to attempt repair on this audit pass.
 
-    Bounded by `max_attempts_per_run` (defaults from
-    retries.audit_loop.max_repair_attempts_per_run). Selection order
-    is the failing-feature list order — first-found-first-attempted.
+    Selection order is the failing-feature list order, coalesced to one repair
+    dispatch per Group. Every failing Group gets one first repair attempt
+    before the per-run cap is allowed to truncate follow-up work.
 
-    Features without a known Group (orphan features) are excluded —
-    repair has nowhere to route.
+    Features without a known Group are spec/verdict contract mismatches and
+    raise instead of being silently dropped.
     """
     cap = (
         max_attempts_per_run
@@ -222,16 +223,24 @@ def features_to_repair(
     for feature in failing:
         group = group_for_feature(spec, feature.feature_id)
         if group is None:
-            continue
+            raise ValueError(
+                "failing audit verdict references feature without repair group: "
+                f"{feature.feature_id}"
+            )
         if group.id not in by_group:
             group_order.append(group.id)
             by_group[group.id] = []
         by_group[group.id].append(feature)
 
+    effective_cap = (
+        max(int(cap), len(group_order))
+        if ensure_each_group_first_attempt
+        else int(cap)
+    )
     candidates: list[FailingFeature] = []
     for group_id in group_order:
         candidates.append(_coalesce_group_failures(group_id, by_group[group_id]))
-        if len(candidates) >= cap:
+        if len(candidates) >= effective_cap:
             break
     return candidates
 
@@ -390,7 +399,17 @@ async def repair_failing_features(
         if max_attempts_per_run is not None
         else _repair_cap_default()
     )
-    remaining_attempts = max(0, int(cap))
+    remaining_attempts = max(1, int(cap))
+    audit_cap = (
+        max_audit_passes
+        if max_audit_passes is not None
+        else _audit_passes_cap_default()
+    )
+    effective_audit_cap = (
+        max(int(audit_cap), int(audit_passes_so_far) + 1)
+        if re_audit is not None
+        else int(audit_cap)
+    )
     current_verdicts = feature_verdicts
     attempt_numbers_by_feature: dict[str, int] = {}
 
@@ -399,6 +418,7 @@ async def repair_failing_features(
             spec,
             current_verdicts,
             max_attempts_per_run=remaining_attempts,
+            ensure_each_group_first_attempt=not result.attempts,
         )
         if not selected:
             if not result.attempts:
@@ -407,7 +427,7 @@ async def repair_failing_features(
 
         if not can_run_another_audit_pass(
             audit_passes_run=result.audit_passes_run,
-            max_audit_passes=max_audit_passes,
+            max_audit_passes=effective_audit_cap,
         ):
             # No budget for re-audit: do not dispatch hidden fixes that
             # cannot be verified in this run. Earlier behavior attempted

@@ -14,6 +14,7 @@ import copy
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,7 @@ _GLOBAL_SECTION_NAMES = {
     "agent operating notes",
     "detected infrastructure",
 }
+ScopeResolver = Callable[[dict[str, Any], ChildScope, str], ChildScope | dict[str, Any] | None]
 
 
 def slice_spec_for_child(spec: Any, child_scope: ChildScope | dict[str, Any]) -> dict[str, Any]:
@@ -180,6 +182,7 @@ def write_context_slice_for_child(
     parent_spec_path: Path,
     full_charter_path: Path,
     child_spec_path: Path,
+    scope_resolver: ScopeResolver | None = None,
 ) -> ContextSliceResult:
     """Write child slice artifacts and an auditable decision log."""
     scope = _coerce_child_scope(child_scope)
@@ -189,6 +192,43 @@ def write_context_slice_for_child(
     spec_analysis = _analyze_spec_scope(spec_payload, scope)
     fallback_to_full = spec_analysis.fallback_to_full
     fallback_reason = spec_analysis.fallback_reason
+    scope_resolution: dict[str, Any] = {
+        "attempted": False,
+        "status": "not_needed",
+        "reason": "",
+    }
+    if fallback_to_full and _scope_resolution_needed(fallback_reason):
+        scope_resolution = {
+            "attempted": scope_resolver is not None,
+            "status": "last_resort_full_context",
+            "reason": fallback_reason,
+        }
+        if scope_resolver is not None:
+            resolved_raw = scope_resolver(spec_payload, scope, fallback_reason)
+            if resolved_raw is not None:
+                resolved_scope = _coerce_child_scope(resolved_raw)
+                resolved_analysis = _analyze_spec_scope(spec_payload, resolved_scope)
+                if not resolved_analysis.fallback_to_full:
+                    scope = resolved_scope
+                    spec_analysis = resolved_analysis
+                    fallback_to_full = False
+                    fallback_reason = ""
+                    scope_resolution = {
+                        "attempted": True,
+                        "status": "resolved",
+                        "reason": "",
+                        "resolved_scope": {
+                            "task_intent": scope.task_intent,
+                            "owned_paths": list(scope.owned_paths),
+                            "action_ids": list(scope.action_ids),
+                        },
+                    }
+                else:
+                    scope_resolution = {
+                        "attempted": True,
+                        "status": "unresolved_last_resort_full_context",
+                        "reason": resolved_analysis.fallback_reason,
+                    }
     if not charter_text.strip():
         fallback_to_full = True
         fallback_reason = fallback_reason or "missing CHARTER.md"
@@ -264,6 +304,12 @@ def write_context_slice_for_child(
         "excluded_intent_claims_n": max(original_claims_n - included_claims_n, 0),
         "fallback_to_full": fallback_to_full,
         "fallback_reason": fallback_reason,
+        "fallback_last_resort": (
+            fallback_to_full
+            and scope_resolution.get("status")
+            in {"last_resort_full_context", "unresolved_last_resort_full_context"}
+        ),
+        "scope_resolution": scope_resolution,
         "scope": {
             "task_intent": scope.task_intent,
             "owned_paths": list(scope.owned_paths),
@@ -349,6 +395,15 @@ def _analyze_spec_scope(spec: dict[str, Any], scope: ChildScope) -> _ScopeAnalys
         included_action_ids=included_action_ids,
         included_claim_ids=included_claim_ids,
         fallback_to_full=False,
+    )
+
+
+def _scope_resolution_needed(reason: str) -> bool:
+    lowered = str(reason or "").lower()
+    return (
+        "unknown explicit action ids" in lowered
+        or "scope did not match" in lowered
+        or "child scope has no intent" in lowered
     )
 
 

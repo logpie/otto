@@ -1330,3 +1330,64 @@ System-level checks:
 - Live `scripts/run_field_tests.py --scenario 04-mini-crm --parallel 1`.
 - Live `scripts/run_field_tests.py --scenario 05-blog-generator --parallel 1`.
 - After live runs: `git merge-base --is-ancestor` for all child branches versus `main`, `field-test-result.json` verdict and boot smoke HTTP status.
+
+---
+
+# Research: P1 Agentic-Native Router Defaults
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+
+## Existing State
+
+- `otto/v5_preflight.py` already maps scaffold `install_failed`,
+  `build_failed`, `py_compile_failed`, `copy_failed`, and timeout kinds to
+  blocking preflight issues. `no_npm` and `no_python` still map to warn/skip
+  even though `verify_from_clean` emits them only when matching manifests
+  exist.
+- `otto/v5_preflight_repair.py` already treats `port_busy` no-op cleanup as
+  an agent fallback, but filename and chmod deterministic shortcuts still log
+  `repaired` even when they changed nothing.
+- `otto/v5_clean_verify.cleanup_stale_declared_ports()` returns only a list of
+  killed ports and does not report whether ports were actually freed.
+- `otto/v5_runner._run_integration()` still sets `integration_cwd =
+  integration_worktree or project_dir`, which can dispatch the integration
+  Lead in the wrong tree after setup failure.
+- `otto/v5_branching.merge_branch_into()` aborts unresolved source conflicts
+  after deterministic/noise/structured merge attempts. It does not preserve a
+  conflict packet for an agent repair.
+- `otto/audit_loop.py` applies repair caps before every failing group gets a
+  first repair attempt, can stop before a fix when audit pass cap is already
+  reached, and silently excludes failing verdicts without a spec group.
+- `otto/v5_context_slicer.py` falls back to full context for ambiguous scope.
+  It writes `context_slice.json`, but there is no resolver hook and no
+  explicit last-resort marker.
+- `otto/build.py` treats out-of-scope writes as non-blocking
+  `scope.warning` events. The amendment side-channel already runs before the
+  scope check, so accepted amendments can legitimately clear the violation.
+
+## Constraints
+
+- Keep P2 over-classification untouched.
+- Preserve deterministic shortcuts only when the shortcut actually changed
+  state and the rerun oracle passes.
+- For runtime/toolchain failures, blocking issue plus existing
+  `PreflightRepairController` is the repair route.
+- For merge conflicts, honor merge-conflict safety: provide both sides and do
+  not use whole-file `--ours`/`--theirs` as the agent path.
+- Tests must prove old behavior fails by leaving tests in place while
+  reversing production-only changes, then reapplying the patch.
+
+## Open Questions Resolved
+
+- Scaffold failure item 1 is already enforced by P0 in this checkout:
+  install/build/compile failures are `block` and include the clean verifier
+  failure message.
+- For `no_npm` / `no_python`, manifest presence is enough to establish the
+  runtime is needed because `verify_from_clean` only emits those failures when
+  `package.json` or `pyproject.toml` was found.
+- Context-scope agent resolution cannot call an LLM from the pure slicer
+  module without changing the runner contract. The smallest safe change is an
+  explicit resolver hook plus an auditable `scope_resolution` record; runner
+  fallback remains last-resort and logged when no resolver is supplied.

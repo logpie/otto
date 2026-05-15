@@ -839,3 +839,86 @@ Codex MCP gate status: skipped because no `mcp__codex__codex` tool is available 
 - Riskiest assumption: treating clean-deploy start failures as repairable will not hide true product failures. Mitigation: repair attempts are capped and repeat failures still return `merge_blocked`.
 - Simpler alternative rejected: only changing field-test port allocation. That would avoid one environmental failure but would not fix `python` portability or any future agent-fixable `start.sh` failure.
 - Behavior docs/artifacts: append research/debug/plan/review trail; no user docs needed unless live rerun reveals UX-facing changes.
+
+---
+
+# Plan: P1 Agentic-Native Hardening
+
+Date: 2026-05-15
+
+## Objective
+
+Replace lenient router defaults with agent-repair-gated-by-oracle behavior for
+the P1 cohort without changing the P2 over-classification surface.
+
+## Steps
+
+1. Harden preflight failure mapping and retry semantics.
+   - Why: manifest-backed `no_npm`/`no_python` and timeouts are repairable
+     failures, not informational skips.
+   - Verify: tests show runtime-missing blocks, timeout retries once at a
+     larger budget, and failures still block with original output.
+
+2. Make deterministic preflight shortcuts honest.
+   - Why: a no-op rename/chmod must not be logged as repaired.
+   - Verify: tests show `renamed: []` and `chmod_x: []` fall through to agent
+     with no `auto_fix/repaired` log event.
+
+3. Return and consume honest stale-port cleanup state.
+   - Why: killed PIDs are not proof that the port is free.
+   - Verify: tests assert `killed_ports`, `freed_ports`, and
+     `still_bound_ports`; runner routes still-bound startup cleanup through the
+     repair loop.
+
+4. Remove integration worktree setup fallback to `project_dir`.
+   - Why: integration agents must run in the merged integration branch tree.
+   - Verify: setup failure triggers repair/retry or `merge_blocked`; no
+     integration Lead is dispatched with `project_dir` as fallback.
+
+5. Add v5 conflict-agent handoff and gate it.
+   - Why: deterministic merge conflicts should create an agent repair attempt
+     with both sides, then rerun merge and smoke before blocking.
+   - Verify: tests exercise conflict packet creation and a fake repair agent
+     resolving the source branch before clean re-merge.
+
+6. Fix audit-loop cap/orphan behavior.
+   - Why: arbitrary order and audit-pass caps should not starve first repair
+     attempts; spec/verdict mismatches are contract bugs.
+   - Verify: tests cover one attempt per failing group despite low cap, audit
+     cap reservation, and orphan mismatch raising.
+
+7. Make ambiguous context slicing explicit and resolver-ready.
+   - Why: full context fallback hides ID-resolution failures.
+   - Verify: tests cover resolver hook success and auditable last-resort full
+     fallback when no resolver is available.
+
+8. Make out-of-scope writes blocking unless amended or reverted.
+   - Why: sibling ownership corruption must not merge as a warning.
+   - Verify: tests show peer/dependency scope writes become
+     `failed_scope`/blocked while accepted amendments still clear scope.
+
+9. Run local gates.
+   - Verify: red proof via production-only patch rollback, requested pytest
+     commands, smoke tier, ruff, basedpyright on touched files, and
+     implementation gate review.
+
+## Plan Gate Review
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local `codex-gate` checklist applied:
+
+- Worktree confirmed: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`,
+  branch `cc-i2p-2`, clean before edits.
+- Owned files: `otto/v5_preflight.py`, `otto/v5_preflight_repair.py`,
+  `otto/v5_clean_verify.py`, `otto/v5_runner.py`, `otto/v5_branching.py`,
+  `otto/audit_loop.py`, `otto/v5_context_slicer.py`, `otto/build.py`, and
+  focused tests.
+- Riskiest assumptions: manifest presence is the right runtime-need signal;
+  conflict repair should edit the source branch, not the target branch; scope
+  blocking should retry once via the existing build loop rather than merge a
+  warning.
+- Simpler existing patterns: reuse `PreflightRepairController`,
+  `_run_preflight_repair_agent`, `commit_integration_worktree`,
+  amendment side-channel, and merge-queue conflict-context wording.
+- System checks: focused P1 tests, required P0/leaf/smoke tests, smoke tier,
+  ruff, basedpyright, and production-only rollback red proof.

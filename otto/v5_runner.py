@@ -340,6 +340,92 @@ def _status_path(line: str) -> str:
     return text
 
 
+def _port_cleanup_payload(cleanup: Any, *, project_dir: Path) -> dict[str, Any]:
+    still_bound = list(getattr(cleanup, "still_bound_ports", []) or [])
+    payload: dict[str, Any] = {
+        "check": "startup_port_cleanup",
+        "phase": "pipeline_start",
+        "cwd": str(project_dir),
+        "passed": not still_bound,
+        "issues": [],
+        "cleanup": {
+            "killed_ports": list(getattr(cleanup, "killed_ports", []) or []),
+            "freed_ports": list(getattr(cleanup, "freed_ports", []) or []),
+            "still_bound_ports": still_bound,
+            "killed_pids": getattr(cleanup, "killed_pids", {}) or {},
+            "pids_before": getattr(cleanup, "pids_before", {}) or {},
+            "pids_after": getattr(cleanup, "pids_after", {}) or {},
+            "ports_without_owned_process": list(
+                getattr(cleanup, "ports_without_owned_process", []) or []
+            ),
+        },
+        "error": None,
+    }
+    if still_bound:
+        payload["issues"] = [
+            {
+                "kind": "clean_deploy_port_busy",
+                "severity": "block",
+                "message": (
+                    "Declared ports still bound after startup cleanup: "
+                    + ", ".join(str(port) for port in still_bound)
+                ),
+            }
+        ]
+    return payload
+
+
+async def _run_startup_port_cleanup_with_repair(
+    *,
+    project_dir: Path,
+    session_dir: Path,
+    config: dict[str, Any],
+    on_event: Any = None,
+) -> dict[str, Any]:
+    from otto.v5_clean_verify import cleanup_stale_declared_ports
+
+    def run_once() -> dict[str, Any]:
+        cleanup = cleanup_stale_declared_ports(
+            project_dir,
+            logger_fn=lambda m: logger.info("preflight: %s", m),
+        )
+        payload = _port_cleanup_payload(cleanup, project_dir=project_dir)
+        if payload["cleanup"]["killed_ports"] or payload["cleanup"]["still_bound_ports"]:
+            _emit(on_event, {
+                "event": "stale_ports_checked",
+                "ports": payload["cleanup"],
+                "passed": payload["passed"],
+            })
+        return payload
+
+    first = run_once()
+    if not _integration_smoke_blocks(first):
+        return first
+
+    controller = PreflightRepairController(
+        session_dir=session_dir,
+        worktree_path=project_dir,
+        agent_repair=lambda request: _run_preflight_repair_agent(
+            request=request,
+            task_id=ROOT_TASK_ID,
+            project_dir=project_dir,
+            config=config,
+            integration_branch=None,
+            on_event=on_event,
+        ),
+    )
+    result = await controller.repair_until_clean(run_once, initial_payload=first)
+    payload = result.preflight_payload
+    payload["repair"] = result.to_jsonable()
+    _emit(on_event, {
+        "event": "startup_port_cleanup_repair_done",
+        "terminal_state": result.terminal_state,
+        "attempts": len(result.attempts),
+        "log_path": str(controller.log_path),
+    })
+    return payload
+
+
 def _git_diff_stat(project_dir: Path) -> str:
     try:
         proc = subprocess.run(
@@ -877,17 +963,19 @@ async def run_v5_pipeline(
         # session burns ~30-60s of agent time + tokens diagnosing it; one
         # cleanup pass up-front saves that across the whole run.
         try:
-            from otto.v5_clean_verify import cleanup_stale_declared_ports
-
-            killed = cleanup_stale_declared_ports(
-                project_dir,
-                logger_fn=lambda m: logger.info("preflight: %s", m),
+            port_cleanup = await _run_startup_port_cleanup_with_repair(
+                project_dir=project_dir,
+                session_dir=root_session_dir,
+                config=config,
+                on_event=on_event,
             )
-            if killed:
-                _emit(on_event, {
-                    "event": "stale_ports_cleaned",
-                    "ports": sorted(killed),
-                })
+            if _preflight_repair_escalated(port_cleanup) or _integration_smoke_blocks(port_cleanup):
+                result.verdict = "merge_blocked"
+                result.failure_reason = _preflight_blocking_summary(
+                    "Startup declared-port cleanup could not be repaired",
+                    port_cleanup,
+                )
+                return result
         except Exception as exc:  # noqa: BLE001
             logger.warning("port cleanup failed: %s", exc)
 
@@ -1688,14 +1776,36 @@ async def _run_child(
             full_charter_path = (child_worktree or project_dir) / "CHARTER.md"
             if not full_charter_path.exists():
                 full_charter_path = project_dir / "CHARTER.md"
+            child_scope = _child_scope_from_entry(tid, entry)
             slice_result = write_context_slice_for_child(
                 project_dir=project_dir,
                 child_session_dir=child_session_dir,
-                child_scope=_child_scope_from_entry(tid, entry),
+                child_scope=child_scope,
                 parent_spec_path=parent_spec,
                 full_charter_path=full_charter_path,
                 child_spec_path=child_spec_path,
             )
+            if _context_slice_needs_agent_resolution(slice_result.audit):
+                resolved_scope = await _resolve_child_scope_with_agent(
+                    project_dir=project_dir,
+                    child_session_dir=child_session_dir,
+                    child_task_id=tid,
+                    child_scope=child_scope,
+                    parent_spec_path=parent_spec,
+                    fallback_reason=str(slice_result.audit.get("fallback_reason") or ""),
+                    config=config,
+                    on_event=on_event,
+                )
+                if resolved_scope is not None:
+                    slice_result = write_context_slice_for_child(
+                        project_dir=project_dir,
+                        child_session_dir=child_session_dir,
+                        child_scope=child_scope,
+                        parent_spec_path=parent_spec,
+                        full_charter_path=full_charter_path,
+                        child_spec_path=child_spec_path,
+                        scope_resolver=lambda _spec, _scope, _reason: resolved_scope,
+                    )
             context_slice_note = slice_result.context_note
             _emit(on_event, {
                 "event": "context_slice",
@@ -1780,8 +1890,10 @@ async def _run_child(
                 project_dir=project_dir,
                 child_task_id=tid,
                 child_worktree=child_worktree,
+                child_session_dir=child_session_dir,
                 parent_integration_branch=parent_integration_branch,
                 result=result,
+                config=config,
                 on_event=on_event,
             )
 
@@ -1793,8 +1905,10 @@ async def _merge_child_branch(
     project_dir: Path,
     child_task_id: str,
     child_worktree: Path,
+    child_session_dir: Path,
     parent_integration_branch: str,
     result: LeadResult,
+    config: dict[str, Any],
     on_event: Any = None,
 ) -> None:
     """Commit the child's worktree changes and merge into parent's integration branch.
@@ -1830,6 +1944,48 @@ async def _merge_child_branch(
     except MergeWorktreeDirtyError as exc:
         ok = False
         detail = str(exc)
+    if not ok and _looks_like_merge_conflict(detail):
+        repaired, repair_detail = await _repair_child_merge_conflict_once(
+            project_dir=project_dir,
+            child_task_id=child_task_id,
+            child_worktree=child_worktree,
+            child_session_dir=child_session_dir,
+            parent_integration_branch=parent_integration_branch,
+            config=config,
+            original_detail=detail,
+            on_event=on_event,
+        )
+        if repaired:
+            try:
+                ok, detail = merge_child_into_integration(
+                    project_dir=project_dir,
+                    child_task_id=child_task_id,
+                    parent_integration_branch=parent_integration_branch,
+                )
+            except MergeWorktreeDirtyError as exc:
+                ok = False
+                detail = str(exc)
+            if ok:
+                oracle = await _run_integration_smoke_preflight_with_repair(
+                    project_dir=project_dir,
+                    worktree_path=project_dir,
+                    task_id=child_task_id,
+                    phase="child_merge_conflict_repair",
+                    session_dir=child_session_dir,
+                    config=config,
+                    integration_branch=parent_integration_branch,
+                    on_event=on_event,
+                )
+                if _preflight_repair_escalated(oracle) or _integration_smoke_blocks(oracle):
+                    ok = False
+                    detail = _preflight_blocking_summary(
+                        "Child merge conflict repair smoke oracle failed",
+                        oracle,
+                    )
+            else:
+                detail = f"{detail}; conflict repair attempt: {repair_detail}"
+        else:
+            detail = f"{detail}; conflict repair attempt: {repair_detail}"
     if not ok:
         logger.warning("merge_child_into_integration(%s) failed: %s", child_task_id, detail)
         _emit(on_event, {
@@ -1848,6 +2004,90 @@ async def _merge_child_branch(
         "task_id": child_task_id,
         "into": parent_integration_branch,
     })
+
+
+def _looks_like_merge_conflict(detail: str) -> bool:
+    lowered = detail.lower()
+    return "conflict on:" in lowered or "merge conflict" in lowered
+
+
+def _read_latest_conflict_packet(project_dir: Path) -> dict[str, Any]:
+    from otto.v5_branching import latest_conflict_packet_path
+
+    path = latest_conflict_packet_path(project_dir)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _repair_child_merge_conflict_once(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    child_worktree: Path,
+    child_session_dir: Path,
+    parent_integration_branch: str,
+    config: dict[str, Any],
+    original_detail: str,
+    on_event: Any = None,
+) -> tuple[bool, str]:
+    packet = _read_latest_conflict_packet(project_dir)
+    paths = tuple(str(path) for path in (packet.get("unmerged_paths") or ()) if str(path))
+    packet_path = ""
+    try:
+        from otto.v5_branching import latest_conflict_packet_path
+
+        packet_path = str(latest_conflict_packet_path(project_dir))
+    except Exception:  # noqa: BLE001
+        packet_path = ""
+    instruction = (
+        "Resolve this merge conflict on the source child branch, not by editing "
+        "the parent integration target. Read the conflict packet, analyze base, "
+        "ours, and theirs for every unmerged path, and preserve both sides' "
+        "product behavior. Never blindly run whole-file checkout --ours or "
+        "--theirs. After your edit, the runner will retry the merge and run the "
+        "smoke oracle.\n\n"
+        f"Conflict packet: {packet_path or '(missing)'}\n"
+        f"Original merge detail: {original_detail}"
+    )
+    request = AgentRepairRequest(
+        failure_kind="merge_conflict",
+        issue={
+            "kind": "merge_conflict",
+            "severity": "block",
+            "message": original_detail,
+            "conflict_packet": packet_path,
+            "unmerged_paths": list(paths),
+        },
+        worktree_path=child_worktree,
+        session_dir=child_session_dir,
+        attempt_index=1,
+        workspace_paths=paths,
+        instruction=instruction,
+    )
+    _emit(on_event, {
+        "event": "merge_conflict_repair_agent_start",
+        "task_id": child_task_id,
+        "paths": list(paths),
+        "conflict_packet": packet_path,
+    })
+    repair = await _run_preflight_repair_agent(
+        request=request,
+        task_id=child_task_id,
+        project_dir=project_dir,
+        config=config,
+        integration_branch=parent_integration_branch,
+        on_event=on_event,
+    )
+    _emit(on_event, {
+        "event": "merge_conflict_repair_agent_done",
+        "task_id": child_task_id,
+        "ok": repair.ok,
+        "summary": repair.summary,
+    })
+    return repair.ok, repair.summary
 
 
 async def _run_lead_with_fallback(
@@ -2207,12 +2447,20 @@ async def _run_preflight_repair_agent(
     ok = result.verdict not in ("catastrophic", "merge_blocked")
     commit_detail = ""
     if ok:
-        from otto.v5_branching import commit_integration_worktree
+        if request.failure_kind == "merge_conflict":
+            from otto.v5_branching import commit_worktree
 
-        commit_ok, commit_detail = commit_integration_worktree(
-            worktree_path=request.worktree_path,
-            task_id=f"{task_id}-preflight-{request.failure_kind}",
-        )
+            commit_ok, commit_detail = commit_worktree(
+                worktree_path=request.worktree_path,
+                message=f"v5 merge conflict repair: {task_id}",
+            )
+        else:
+            from otto.v5_branching import commit_integration_worktree
+
+            commit_ok, commit_detail = commit_integration_worktree(
+                worktree_path=request.worktree_path,
+                task_id=f"{task_id}-preflight-{request.failure_kind}",
+            )
         _emit(on_event, {
             "event": "preflight_repair_commit" if commit_ok else "preflight_repair_commit_failed",
             "task_id": task_id,
@@ -2254,6 +2502,172 @@ def _git_status_short(worktree_path: Path) -> str:
     if proc.returncode != 0:
         return ""
     return proc.stdout.strip()
+
+
+def _branch_checked_out(worktree_path: Path) -> str:
+    try:
+        proc = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return (proc.stdout or "").strip() if proc.returncode == 0 else ""
+
+
+def _integration_worktree_setup_payload(
+    *,
+    project_dir: Path,
+    task_id: str,
+    integration_branch: str,
+    worktree_path: Path | None,
+    detail: str,
+) -> dict[str, Any]:
+    actual_branch = _branch_checked_out(worktree_path) if worktree_path is not None else ""
+    passed = bool(worktree_path and worktree_path.exists() and actual_branch == integration_branch)
+    issue_kind = "integration_worktree_wrong_branch" if worktree_path and actual_branch else "integration_worktree_setup_failed"
+    message = detail
+    if worktree_path and actual_branch != integration_branch:
+        message = (
+            f"integration worktree {worktree_path} is on {actual_branch or 'unknown'}; "
+            f"expected {integration_branch}"
+        )
+    return {
+        "check": "integration_worktree_setup",
+        "task_id": task_id,
+        "cwd": str(worktree_path or project_dir),
+        "integration_branch": integration_branch,
+        "actual_branch": actual_branch,
+        "passed": passed,
+        "issues": [] if passed else [
+            {
+                "kind": issue_kind,
+                "severity": "block",
+                "message": message or "integration worktree setup failed",
+            }
+        ],
+        "error": None if passed else (message or "integration worktree setup failed"),
+    }
+
+
+def _setup_integration_worktree_once(
+    *,
+    project_dir: Path,
+    task_id: str,
+    own_integration_branch: str,
+    integration_session_dir: Path,
+) -> tuple[Path | None, str]:
+    from otto.v5_branching import child_worktree_path, ensure_branch_exists
+    from otto.worktree import add_worktree
+
+    existing = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=str(project_dir), capture_output=True, text=True,
+    )
+    existing_path: Path | None = None
+    if existing.returncode == 0:
+        block_path: str | None = None
+        for line in existing.stdout.splitlines():
+            if line.startswith("worktree "):
+                block_path = line[len("worktree "):].strip()
+            elif line.startswith("branch ") and block_path:
+                if line.endswith(f"/{own_integration_branch}") or line.endswith(own_integration_branch):
+                    existing_path = Path(block_path)
+                    break
+
+    if existing_path is not None and existing_path.exists():
+        integration_worktree = existing_path
+    else:
+        ensure_branch_exists(project_dir, own_integration_branch, base_ref="main")
+        integration_worktree = child_worktree_path(project_dir, f"integ-{task_id}")
+        if not (integration_worktree.exists() and (integration_worktree / ".git").exists()):
+            add_worktree(
+                project_dir=project_dir,
+                worktree_path=integration_worktree,
+                branch=own_integration_branch,
+            )
+
+    if not integration_worktree.exists():
+        return None, f"integration worktree path does not exist: {integration_worktree}"
+    branch = _branch_checked_out(integration_worktree)
+    if branch != own_integration_branch:
+        return integration_worktree, (
+            f"integration worktree {integration_worktree} is on "
+            f"{branch or 'unknown'}; expected {own_integration_branch}"
+        )
+
+    link_path = integration_session_dir / "worktree"
+    if not link_path.exists():
+        try:
+            link_path.symlink_to(integration_worktree)
+        except OSError as exc:
+            logger.warning("symlink worktree failed: %s", exc)
+    return integration_worktree, ""
+
+
+async def _prepare_integration_worktree_with_repair(
+    *,
+    project_dir: Path,
+    task_id: str,
+    integration_branch: str,
+    integration_session_dir: Path,
+    config: dict[str, Any],
+    on_event: Any = None,
+) -> tuple[Path | None, dict[str, Any]]:
+    prepared_path: Path | None = None
+
+    def run_once() -> dict[str, Any]:
+        nonlocal prepared_path
+        try:
+            prepared_path, detail = _setup_integration_worktree_once(
+                project_dir=project_dir,
+                task_id=task_id,
+                own_integration_branch=integration_branch,
+                integration_session_dir=integration_session_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            prepared_path = None
+            detail = f"{type(exc).__name__}: {exc}"
+            logger.warning("integration worktree setup failed for %s: %s", task_id, exc)
+        return _integration_worktree_setup_payload(
+            project_dir=project_dir,
+            task_id=task_id,
+            integration_branch=integration_branch,
+            worktree_path=prepared_path,
+            detail=detail,
+        )
+
+    first = run_once()
+    if not _integration_smoke_blocks(first):
+        return prepared_path, first
+
+    controller = PreflightRepairController(
+        session_dir=integration_session_dir,
+        worktree_path=project_dir,
+        agent_repair=lambda request: _run_preflight_repair_agent(
+            request=request,
+            task_id=task_id,
+            project_dir=project_dir,
+            config=config,
+            integration_branch=integration_branch,
+            on_event=on_event,
+        ),
+    )
+    result = await controller.repair_until_clean(run_once, initial_payload=first)
+    payload = result.preflight_payload
+    payload["repair"] = result.to_jsonable()
+    _emit(on_event, {
+        "event": "integration_worktree_setup_repair_done",
+        "task_id": task_id,
+        "terminal_state": result.terminal_state,
+        "attempts": len(result.attempts),
+        "log_path": str(controller.log_path),
+    })
+    return prepared_path, payload
 
 
 async def _run_integration(
@@ -2305,66 +2719,33 @@ async def _run_integration(
     # merged), namespaced as `i2p/<task_id>/integration`.
     from otto.v5_branching import integration_branch_name as _integ
     own_integration_branch = _integ(task_id)
-    integration_worktree: Path | None = None
-    try:
-        from otto.v5_branching import (
-            child_worktree_path,
-            ensure_branch_exists,
-        )
-        from otto.worktree import add_worktree
-
-        # Probe whether this branch is already checked out somewhere (e.g.
-        # the project_dir itself, in greenfield-where-root-merges-to-main
-        # cases). If so, use that path directly — git refuses to check the
-        # same branch out twice.
-        existing = subprocess.run(
-            ["git", "worktree", "list", "--porcelain"],
-            cwd=str(project_dir), capture_output=True, text=True,
-        )
-        existing_path: Path | None = None
-        if existing.returncode == 0:
-            block_path: str | None = None
-            for line in existing.stdout.splitlines():
-                if line.startswith("worktree "):
-                    block_path = line[len("worktree "):].strip()
-                elif line.startswith("branch ") and block_path:
-                    if line.endswith(f"/{own_integration_branch}") or line.endswith(own_integration_branch):
-                        existing_path = Path(block_path)
-                        break
-
-        if existing_path is not None and existing_path.exists():
-            integration_worktree = existing_path
-        else:
-            ensure_branch_exists(project_dir, own_integration_branch, base_ref="main")
-            wt_path = child_worktree_path(project_dir, f"integ-{task_id}")
-            if not (wt_path.exists() and (wt_path / ".git").exists()):
-                try:
-                    add_worktree(
-                        project_dir=project_dir,
-                        worktree_path=wt_path,
-                        branch=own_integration_branch,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "integration worktree add failed for %s: %s; falling back",
-                        task_id, exc,
-                    )
-                    wt_path = None  # type: ignore[assignment]
-            if wt_path is not None and wt_path.exists():
-                integration_worktree = wt_path
-
-        if integration_worktree is not None:
-            link_path = integration_session_dir / "worktree"
-            if not link_path.exists():
-                try:
-                    link_path.symlink_to(integration_worktree)
-                except OSError as exc:
-                    logger.warning("symlink worktree failed: %s", exc)
-    except Exception as exc:  # noqa: BLE001 — best-effort
-        logger.warning("integration worktree setup failed: %s", exc)
-
     parent_integration_branch = own_integration_branch
-    integration_cwd = integration_worktree or project_dir
+    integration_worktree, setup_preflight = await _prepare_integration_worktree_with_repair(
+        project_dir=project_dir,
+        task_id=task_id,
+        integration_branch=parent_integration_branch,
+        integration_session_dir=integration_session_dir,
+        config=config,
+        on_event=on_event,
+    )
+    if (
+        integration_worktree is None
+        or _preflight_repair_escalated(setup_preflight)
+        or _integration_smoke_blocks(setup_preflight)
+    ):
+        result = _preflight_blocked_result(
+            task_id=task_id,
+            preflight_result=setup_preflight,
+        )
+        integration_results[task_id] = result
+        _emit(on_event, {
+            "event": "integration_done",
+            "task_id": task_id,
+            "verdict": result.verdict,
+        })
+        return result
+
+    integration_cwd = integration_worktree
     preflight_result = await _run_integration_smoke_preflight_with_repair(
         project_dir=project_dir,
         worktree_path=integration_cwd,
@@ -3063,6 +3444,113 @@ def _write_context_slice_failure_log(
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def _context_slice_needs_agent_resolution(audit: dict[str, Any]) -> bool:
+    if not bool(audit.get("fallback_to_full")):
+        return False
+    resolution = audit.get("scope_resolution")
+    if not isinstance(resolution, dict):
+        return False
+    status = str(resolution.get("status") or "")
+    return status in {
+        "unresolved_last_resort_full_context",
+        "last_resort_full_context",
+    }
+
+
+async def _resolve_child_scope_with_agent(
+    *,
+    project_dir: Path,
+    child_session_dir: Path,
+    child_task_id: str,
+    child_scope: dict[str, Any],
+    parent_spec_path: Path,
+    fallback_reason: str,
+    config: dict[str, Any],
+    on_event: Any = None,
+) -> dict[str, Any] | None:
+    """Ask the spec/scope agent to resolve ambiguous child scope ids."""
+
+    log_dir = child_session_dir / "context-scope-resolver"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    prompt = (
+        "Resolve an Otto context-slice scope ambiguity. Do not edit files.\n"
+        f"Child task id: {child_task_id}\n"
+        f"Parent spec path: {parent_spec_path}\n"
+        f"Original child scope JSON: {json.dumps(child_scope, sort_keys=True)}\n"
+        f"Fallback reason: {fallback_reason}\n\n"
+        "Read the parent spec if needed and return only one JSON object with "
+        "keys: task_intent (string), owned_paths (array of strings), "
+        "action_ids (array of strings). Use exact ids from the parent spec. "
+        "If the scope cannot be resolved, return null."
+    )
+    _emit(on_event, {
+        "event": "context_scope_resolution_agent_start",
+        "task_id": child_task_id,
+        "fallback_reason": fallback_reason,
+        "log_dir": str(log_dir),
+    })
+    try:
+        from otto.agent import make_agent_options, run_agent_with_timeout
+
+        options = make_agent_options(project_dir, config, agent_type="spec")
+        text, _cost, session_id, _breakdown = await run_agent_with_timeout(
+            prompt,
+            options,
+            log_dir=log_dir,
+            phase_name="SCOPE_RESOLVE",
+            phase_label="scope-resolve",
+            timeout=int(config.get("scope_resolve_timeout_s") or 120),
+            project_dir=project_dir,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _emit(on_event, {
+            "event": "context_scope_resolution_agent_done",
+            "task_id": child_task_id,
+            "ok": False,
+            "summary": str(exc),
+            "log_dir": str(log_dir),
+        })
+        return None
+
+    payload = _extract_scope_resolution_payload(text)
+    _emit(on_event, {
+        "event": "context_scope_resolution_agent_done",
+        "task_id": child_task_id,
+        "ok": payload is not None,
+        "agent_session_id": session_id,
+        "resolved_scope": payload or {},
+        "log_dir": str(log_dir),
+    })
+    return payload
+
+
+def _extract_scope_resolution_payload(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped.lower() == "null":
+        return None
+    decoder = json.JSONDecoder()
+    for start, char in enumerate(stripped):
+        if char != "{":
+            continue
+        try:
+            payload, _end = decoder.raw_decode(stripped[start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return {
+                "task_intent": str(payload.get("task_intent") or ""),
+                "owned_paths": _string_list(payload.get("owned_paths")),
+                "action_ids": _string_list(payload.get("action_ids")),
+            }
+    return None
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item)]
 
 
 def _write_toolchain_preflight_log(

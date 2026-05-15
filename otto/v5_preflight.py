@@ -19,6 +19,7 @@ from typing import Any, Literal
 
 
 Severity = Literal["warn", "error", "block"]
+_TIMEOUT_FAILURE_KINDS = {"build_timeout", "install_timeout", "py_compile_timeout"}
 
 
 @dataclass
@@ -190,6 +191,37 @@ def run_preflight(
     return issues
 
 
+def _verify_from_clean_with_timeout_retry(
+    project_dir: Path,
+    *,
+    scope: Literal["scaffold", "subtree", "full"],
+    timeout_s: int,
+    port_wait_s: int | None = None,
+    logger_fn: Any = None,
+) -> Any:
+    """Run verify_from_clean, retrying timeout failures once with more budget."""
+    from otto.v5_clean_verify import verify_from_clean
+
+    kwargs: dict[str, Any] = {"scope": scope, "timeout_s": timeout_s}
+    if port_wait_s is not None:
+        kwargs["port_wait_s"] = port_wait_s
+    if logger_fn is not None:
+        kwargs["logger_fn"] = logger_fn
+    result = verify_from_clean(project_dir, **kwargs)
+    if result.passed or result.failure_kind not in _TIMEOUT_FAILURE_KINDS:
+        return result
+
+    retry_timeout = max(timeout_s * 2, timeout_s + 60)
+    retry_kwargs = dict(kwargs)
+    retry_kwargs["timeout_s"] = retry_timeout
+    if logger_fn is not None:
+        logger_fn(
+            f"verify_from_clean: {result.failure_kind} after {timeout_s}s; "
+            f"retrying once with {retry_timeout}s"
+        )
+    return verify_from_clean(project_dir, **retry_kwargs)
+
+
 def check_scaffold_compiles(
     project_dir: Path,
     timeout_s: int = 90,
@@ -208,9 +240,7 @@ def check_scaffold_compiles(
     architect's own self-verify and this preflight reach the same
     verdict on the same input.
     """
-    from otto.v5_clean_verify import verify_from_clean
-
-    result = verify_from_clean(
+    result = _verify_from_clean_with_timeout_retry(
         project_dir, scope="scaffold", timeout_s=timeout_s
     )
     if result.passed:
@@ -262,10 +292,11 @@ def check_scaffold_compiles(
     if kind in ("no_npm", "no_python"):
         return [
             PreflightIssue(
-                kind="scaffold_compile_skipped",
-                severity="warn",
+                kind="scaffold_compile_failed",
+                severity="block",
                 message=result.failure_message
-                or f"scaffold compile skipped: {kind}",
+                or f"scaffold compile missing required runtime: {kind}",
+                task_id=architect_task_id,
             )
         ]
     # internal_error or any unexpected kind: trigger repair/re-dispatch. Unknown
@@ -313,9 +344,7 @@ def smoke_clean_deploy(
         log("clean-deploy: no start.sh; skipping")
         return issues
 
-    from otto.v5_clean_verify import verify_from_clean
-
-    result = verify_from_clean(
+    result = _verify_from_clean_with_timeout_retry(
         project_dir,
         scope="subtree",
         timeout_s=timeout_s,

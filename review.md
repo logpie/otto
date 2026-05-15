@@ -745,3 +745,60 @@ Verification:
   passed.
 - Touched-file type check: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error ...`
   passed: 0 errors.
+
+---
+
+## Implementation Gate — 2026-05-15 — v5 P1 agentic-native hardening
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, focused diff review,
+red/green regression proof, smoke gates, ruff, and basedpyright were used
+instead.
+
+Findings during implementation review:
+- [IMPORTANT] Required runtime/build failures now stay in the repair lane:
+  missing required runtimes block instead of warn-skip, scaffold timeouts get
+  one larger-budget retry, and remaining failures route through the existing
+  preflight repair oracle.
+- [IMPORTANT] Deterministic preflight auto-fixes now have honest no-op
+  semantics. Empty filename/chmod repairs fall through to the agent instead of
+  logging repaired without a state change.
+- [IMPORTANT] Startup port cleanup now reports killed/freed/still-bound ports.
+  Still-bound ports after cleanup block startup unless agent repair plus the
+  cleanup oracle clears them.
+- [IMPORTANT] Integration worktree setup must produce the intended worktree and
+  branch. Setup failures now trigger repair and block if unresolved, instead of
+  running integration in `project_dir`.
+- [IMPORTANT] Non-driver merge conflicts now write a conflict packet with both
+  sides and dispatch a focused repair agent, then require a clean merge plus
+  smoke oracle before accepting the result.
+- [IMPORTANT] Audit repair scheduling now guarantees an initial repair attempt
+  for every failing group before caps can narrow work, reserves re-audit budget
+  for that first fix, and raises on spec/verdict group mismatches.
+- [IMPORTANT] Ambiguous context slicing now dispatches a focused spec/scope
+  resolver agent from the runner and records explicit last-resort full-context
+  fallback only when that resolution path is unavailable or unresolved.
+- [IMPORTANT] Out-of-scope leaf writes are now blocking scope failures that
+  require amendment/revert before merge.
+- [NOTE] Duplicate sweep found `setup_child_worktree(...); falling back to
+  project_dir` in `otto/v5_branching.py`. It is outside this P1 item list
+  (the requested fallback fix was integration worktree setup in
+  `otto/v5_runner.py`), so it was left unchanged for a separate pass.
+
+Verification:
+- Red proof used a reversible production-only patch rollback. With the P1
+  production patch reversed, `uv run --extra dev python -m pytest tests/test_v5_p1_hardening.py -q`
+  failed: 15 failed.
+- Green focused regression: `uv run --extra dev python -m pytest tests/test_v5_p1_hardening.py -q`
+  passed: 15 passed.
+- Required invariant/smoke suite: `uv run --extra dev python -m pytest tests/test_v5_p0_hardening.py tests/test_v5_leaf_runtime_invariants.py tests/smoke -q`
+  passed: 77 passed.
+- Required smoke tier: `uv run python scripts/test_tiers.py smoke`
+  passed: 306 passed, 2449 deselected.
+- Merge queue non-regression: `uv run --extra dev python -m pytest tests/test_merge_queue.py -q`
+  passed: 46 passed.
+- Touched-file lint: `uv run ruff check otto/v5_preflight.py otto/v5_preflight_repair.py otto/v5_clean_verify.py otto/v5_runner.py otto/v5_branching.py otto/audit_loop.py otto/v5_context_slicer.py otto/build.py tests/test_v5_p1_hardening.py tests/test_audit_loop_repair.py tests/test_build.py`
+  passed.
+- Touched-file type check: `uv run --extra dev basedpyright --level error otto/v5_preflight.py otto/v5_preflight_repair.py otto/v5_clean_verify.py otto/v5_runner.py otto/v5_branching.py otto/audit_loop.py otto/v5_context_slicer.py otto/build.py tests/test_v5_p1_hardening.py tests/test_audit_loop_repair.py tests/test_build.py`
+  passed: 0 errors, 0 warnings, 0 notes.
+- `git diff --check` passed.
