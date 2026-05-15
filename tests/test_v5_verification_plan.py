@@ -177,7 +177,14 @@ def _checks_by_kind(plan: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return out
 
 
-def _no_stub_check(project: Path, session: Path) -> dict[str, Any]:
+def _advisories_by_kind(plan: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for advisory in plan.get("advisories", []):
+        out.setdefault(advisory["kind"], []).append(advisory)
+    return out
+
+
+def _stub_text_advisory(project: Path, session: Path) -> dict[str, Any]:
     outcome = validate_lead_verdict(
         project_dir=project,
         worktree_dir=project,
@@ -185,7 +192,7 @@ def _no_stub_check(project: Path, session: Path) -> dict[str, Any]:
         agent_verdict=_verdict(),
         initial_verdict="pass",
     )
-    return _checks_by_kind(outcome.verification_plan)["no_stub_text"][0]
+    return _advisories_by_kind(outcome.verification_plan)["no_stub_text"][0]
 
 
 def test_verification_plan_all_checks_pass(tmp_path: Path) -> None:
@@ -222,10 +229,10 @@ def test_verification_plan_accepts_dict_from_roundtripped_spec(tmp_path: Path) -
     )
 
     assert outcome.final_verdict == "pass"
-    assert _checks_by_kind(outcome.verification_plan)["action_has_test"][0]["id"] == "issue.create"
+    assert _advisories_by_kind(outcome.verification_plan)["action_has_test"][0]["id"] == "issue.create"
 
 
-def test_route_resolves_failure_downgrades_pass(tmp_path: Path) -> None:
+def test_route_grep_failure_is_advisory_and_does_not_downgrade_pass(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
     _write_contract(tmp_path, session, ia=_ia(route_path="/missing-route"))
@@ -239,9 +246,12 @@ def test_route_resolves_failure_downgrades_pass(tmp_path: Path) -> None:
         matrix_scope="leaf",
     )
 
-    route_checks = _checks_by_kind(outcome.verification_plan)["route_resolves"]
-    assert route_checks[0]["status"] == "fail"
-    assert outcome.final_verdict == "partial"
+    assert "route_resolves" not in _checks_by_kind(outcome.verification_plan)
+    route_advisories = _advisories_by_kind(outcome.verification_plan)["route_resolves"]
+    assert route_advisories[0]["status"] == "warn"
+    assert route_advisories[0]["required"] is False
+    assert route_advisories[0]["refs"]["path"] == "/missing-route"
+    assert outcome.final_verdict == "pass"
 
 
 def test_leaf_integration_only_scope_skips_unrelated_full_matrix(tmp_path: Path) -> None:
@@ -281,13 +291,14 @@ def test_integration_node_runs_full_matrix_when_leaf_scope_skips(tmp_path: Path)
         matrix_scope="integration_only",
     )
 
-    route_checks = _checks_by_kind(outcome.verification_plan)["route_resolves"]
-    assert route_checks[0]["status"] == "fail"
+    assert "route_resolves" not in _checks_by_kind(outcome.verification_plan)
+    route_advisories = _advisories_by_kind(outcome.verification_plan)["route_resolves"]
+    assert route_advisories[0]["status"] == "warn"
     assert outcome.verification_plan["full_matrix"] is True
-    assert outcome.final_verdict == "partial"
+    assert outcome.final_verdict == "pass"
 
 
-def test_deprecation_warnings_downgrade_passing_verdict(tmp_path: Path) -> None:
+def test_deprecation_warnings_are_advisory_and_do_not_downgrade_pass(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
     _write_contract(tmp_path, session)
@@ -306,13 +317,18 @@ def test_deprecation_warnings_downgrade_passing_verdict(tmp_path: Path) -> None:
         initial_verdict="pass",
     )
 
-    checks = _checks_by_kind(outcome.verification_plan)
-    assert checks["deprecation_warnings"][0]["status"] == "fail"
-    assert outcome.final_verdict == "partial"
+    assert "deprecation_warnings" not in _checks_by_kind(outcome.verification_plan)
+    advisory = _advisories_by_kind(outcome.verification_plan)["deprecation_warnings"][0]
+    assert advisory["status"] == "warn"
+    assert advisory["required"] is False
+    assert advisory["refs"]["warnings"] == [
+        "DeprecationWarning: websockets.legacy is deprecated"
+    ]
+    assert outcome.final_verdict == "pass"
 
 
 @pytest.mark.asyncio
-async def test_deprecation_detection_filters_prose_dependencies_and_records_downgrade_reason(
+async def test_deprecation_telemetry_keeps_bug_b1_pass_and_structured_gates_still_downgrade(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -342,27 +358,26 @@ async def test_deprecation_detection_filters_prose_dependencies_and_records_down
             agent_verdict=verdict,
             initial_verdict="pass",
         )
-        check = _checks_by_kind(outcome.verification_plan)["deprecation_warnings"][0]
-        return outcome.final_verdict, str(check["status"]), list(check["refs"]["warnings"])
+        advisory = _advisories_by_kind(outcome.verification_plan)["deprecation_warnings"][0]
+        return outcome.final_verdict, str(advisory["status"]), list(advisory["refs"]["warnings"])
 
-    filtered = deprecation_outcome(
-        "filtered",
+    bug_b1 = deprecation_outcome(
+        "bug-b1",
         test_output=(
-            "pytest.ini added: asyncio_mode=auto, passlib DeprecationWarning "
-            "filtered — 7/7 tests pass with 0 warnings"
+            "DeprecationWarning filtered — 7/7 tests pass with 0 warnings\n"
         ),
-    )
-    observed["filtered_zeroed_line_passes"] = filtered[:2] == ("pass", "pass") and not filtered[2]
-
-    dependency_only = deprecation_outcome(
-        "dependency",
         evidence_text=(
             "/tmp/project/backend/.venv/lib/python3.11/site-packages/passlib/utils/__init__.py:854: "
             "DeprecationWarning: 'crypt' is deprecated and slated for removal\n"
         ),
     )
-    observed["site_packages_only_passes"] = (
-        dependency_only[:2] == ("pass", "pass") and not dependency_only[2]
+    observed["bug_b1_line_and_site_packages_warning_are_advisory"] = (
+        bug_b1[0] == "pass"
+        and bug_b1[1] == "warn"
+        and bug_b1[2] == [
+            "DeprecationWarning filtered — 7/7 tests pass with 0 warnings",
+            "test_output.log: /tmp/project/backend/.venv/lib/python3.11/site-packages/passlib/utils/__init__.py:854: DeprecationWarning: 'crypt' is deprecated and slated for removal",
+        ]
     )
 
     product_warning = deprecation_outcome(
@@ -372,10 +387,30 @@ async def test_deprecation_detection_filters_prose_dependencies_and_records_down
             "and scheduled for removal in a future version\n"
         ),
     )
-    observed["product_warning_downgrades"] = (
-        product_warning[0] == "partial"
-        and product_warning[1] == "fail"
+    observed["product_warning_is_advisory"] = (
+        product_warning[0] == "pass"
+        and product_warning[1] == "warn"
         and "backend/auth.py" in product_warning[2][0]
+    )
+
+    failing_journey_project = tmp_path / "failing-journey" / "project"
+    failing_journey_session = tmp_path / "failing-journey" / "session"
+    failing_journey_project.mkdir(parents=True)
+    _passing_project(failing_journey_project, failing_journey_session)
+    failing_journey_verdict = _verdict(
+        journeys=[{"id": "create_issue", "passed": False, "detail": "product test failed"}],
+        test_output="FAILED tests/test_issue.py::test_create_issue",
+    )
+    failing_journey = validate_lead_verdict(
+        project_dir=failing_journey_project,
+        worktree_dir=failing_journey_project,
+        session_dir=failing_journey_session,
+        agent_verdict=failing_journey_verdict,
+        initial_verdict="pass",
+    )
+    observed["genuine_product_failure_still_gates"] = (
+        failing_journey.final_verdict == "partial"
+        and failing_journey.journey_failures == ["create_issue"]
     )
 
     from otto import lead as lead_mod
@@ -401,10 +436,10 @@ async def test_deprecation_detection_filters_prose_dependencies_and_records_down
             verification_plan={"checks": []},
             runner_checks_summary=[
                 {
-                    "kind": "deprecation_warnings",
-                    "id": "test_output_deprecations",
+                    "kind": "verdict_consistency",
+                    "id": "intent_coverage",
                     "status": "fail",
-                    "detail": "product deprecation warning found",
+                    "detail": "built claims overlap partial/skipped claims",
                 }
             ],
             journey_failures=[],
@@ -430,13 +465,13 @@ async def test_deprecation_detection_filters_prose_dependencies_and_records_down
         lead_result.verdict == "partial"
         and bool(lead_result.failure_reason)
         and lead_result.failure_reason == lead_summary["failure_reason"]
-        and "deprecation_warnings" in lead_result.failure_reason
+        and "verdict_consistency" in lead_result.failure_reason
     )
 
     assert observed == {
-        "filtered_zeroed_line_passes": True,
-        "site_packages_only_passes": True,
-        "product_warning_downgrades": True,
+        "bug_b1_line_and_site_packages_warning_are_advisory": True,
+        "product_warning_is_advisory": True,
+        "genuine_product_failure_still_gates": True,
         "downgrade_reason_recorded": True,
     }
 
@@ -506,7 +541,7 @@ async def test_run_lead_passes_matrix_scope_to_runner_verifier(
     ]
 
 
-def test_check_matrix_page_resolves(tmp_path: Path) -> None:
+def test_page_grep_failure_is_advisory_and_does_not_downgrade_pass(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
     _write_contract(tmp_path, session, ia=_ia(route_path="/missing-pm-page"))
@@ -520,13 +555,15 @@ def test_check_matrix_page_resolves(tmp_path: Path) -> None:
         matrix_scope="leaf",
     )
 
-    page_checks = _checks_by_kind(outcome.verification_plan)["page_resolves"]
-    assert page_checks[0]["id"] == "team.backlog"
-    assert page_checks[0]["status"] == "fail"
-    assert outcome.final_verdict == "partial"
+    assert "page_resolves" not in _checks_by_kind(outcome.verification_plan)
+    page_advisories = _advisories_by_kind(outcome.verification_plan)["page_resolves"]
+    assert page_advisories[0]["id"] == "team.backlog"
+    assert page_advisories[0]["status"] == "warn"
+    assert page_advisories[0]["required"] is False
+    assert outcome.final_verdict == "pass"
 
 
-def test_endpoint_resolves_failure(tmp_path: Path) -> None:
+def test_endpoint_grep_failure_is_advisory(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
     _write_contract(tmp_path, session, ia=_ia(endpoint_path="/api/missing"))
@@ -540,10 +577,14 @@ def test_endpoint_resolves_failure(tmp_path: Path) -> None:
         matrix_scope="leaf",
     )
 
-    assert _checks_by_kind(outcome.verification_plan)["endpoint_resolves"][0]["status"] == "fail"
+    assert "endpoint_resolves" not in _checks_by_kind(outcome.verification_plan)
+    advisory = _advisories_by_kind(outcome.verification_plan)["endpoint_resolves"][0]
+    assert advisory["status"] == "warn"
+    assert advisory["required"] is False
+    assert outcome.final_verdict == "pass"
 
 
-def test_action_has_test_failure(tmp_path: Path) -> None:
+def test_action_has_test_text_search_is_advisory(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
     (tmp_path / "tests" / "issue_create.test.ts").unlink()
@@ -557,10 +598,14 @@ def test_action_has_test_failure(tmp_path: Path) -> None:
         matrix_scope="leaf",
     )
 
-    assert _checks_by_kind(outcome.verification_plan)["action_has_test"][0]["status"] == "fail"
+    assert "action_has_test" not in _checks_by_kind(outcome.verification_plan)
+    advisory = _advisories_by_kind(outcome.verification_plan)["action_has_test"][0]
+    assert advisory["status"] == "warn"
+    assert advisory["required"] is False
+    assert outcome.final_verdict == "pass"
 
 
-def test_mutating_action_feedback_failure(tmp_path: Path) -> None:
+def test_mutating_action_feedback_text_search_is_advisory(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
     _write(tmp_path / "src" / "App.tsx", "const a = 'issue.create';\n")
@@ -574,7 +619,11 @@ def test_mutating_action_feedback_failure(tmp_path: Path) -> None:
         matrix_scope="leaf",
     )
 
-    assert _checks_by_kind(outcome.verification_plan)["mutating_action_has_feedback"][0]["status"] == "fail"
+    assert "mutating_action_has_feedback" not in _checks_by_kind(outcome.verification_plan)
+    advisory = _advisories_by_kind(outcome.verification_plan)["mutating_action_has_feedback"][0]
+    assert advisory["status"] == "warn"
+    assert advisory["required"] is False
+    assert outcome.final_verdict == "pass"
 
 
 def test_entity_empty_state_failure(tmp_path: Path) -> None:
@@ -599,9 +648,10 @@ def test_no_stub_text_failure(tmp_path: Path) -> None:
     _passing_project(tmp_path, session)
     _write(tmp_path / "src" / "copy.tsx", "export function Copy() { return <button>TODO: implement</button>; }\n")
 
-    check = _no_stub_check(tmp_path, session)
+    check = _stub_text_advisory(tmp_path, session)
 
-    assert check["status"] == "fail"
+    assert check["status"] == "warn"
+    assert check["required"] is False
     assert check["refs"]["offenders"] == ["src/copy.tsx:1"]
 
 
@@ -610,7 +660,7 @@ def test_no_stub_text_ignores_import_identifiers(tmp_path: Path) -> None:
     _passing_project(tmp_path, session)
     _write(tmp_path / "src" / "Placeholder.tsx", "import { Placeholder } from 'react';\n")
 
-    assert _no_stub_check(tmp_path, session)["status"] == "pass"
+    assert _stub_text_advisory(tmp_path, session)["status"] == "info"
 
 
 def test_no_stub_text_ignores_comments(tmp_path: Path) -> None:
@@ -618,7 +668,7 @@ def test_no_stub_text_ignores_comments(tmp_path: Path) -> None:
     _passing_project(tmp_path, session)
     _write(tmp_path / "src" / "copy.ts", "// TODO: refactor\nexport const label = 'Ready';\n")
 
-    assert _no_stub_check(tmp_path, session)["status"] == "pass"
+    assert _stub_text_advisory(tmp_path, session)["status"] == "info"
 
 
 def test_no_stub_text_ignores_build_artifacts(tmp_path: Path) -> None:
@@ -626,7 +676,7 @@ def test_no_stub_text_ignores_build_artifacts(tmp_path: Path) -> None:
     _passing_project(tmp_path, session)
     _write(tmp_path / "dist" / "index-abc.js", "console.error('TODO: implement generated code');\n")
 
-    assert _no_stub_check(tmp_path, session)["status"] == "pass"
+    assert _stub_text_advisory(tmp_path, session)["status"] == "info"
 
 
 def test_no_stub_text_ignores_otto_worktrees(tmp_path: Path) -> None:
@@ -637,7 +687,7 @@ def test_no_stub_text_ignores_otto_worktrees(tmp_path: Path) -> None:
         "export function X() { return <p>Lorem ipsum dolor sit amet</p>; }\n",
     )
 
-    assert _no_stub_check(tmp_path, session)["status"] == "pass"
+    assert _stub_text_advisory(tmp_path, session)["status"] == "info"
 
 
 def test_no_stub_text_flags_lorem_jsx_text(tmp_path: Path) -> None:
@@ -645,9 +695,10 @@ def test_no_stub_text_flags_lorem_jsx_text(tmp_path: Path) -> None:
     _passing_project(tmp_path, session)
     _write(tmp_path / "src" / "copy.tsx", "export function Copy() { return <p>Lorem ipsum dolor sit amet</p>; }\n")
 
-    check = _no_stub_check(tmp_path, session)
+    check = _stub_text_advisory(tmp_path, session)
 
-    assert check["status"] == "fail"
+    assert check["status"] == "warn"
+    assert check["required"] is False
     assert check["refs"]["offenders"] == ["src/copy.tsx:1"]
 
 
@@ -656,9 +707,10 @@ def test_no_stub_text_flags_toast_message(tmp_path: Path) -> None:
     _passing_project(tmp_path, session)
     _write(tmp_path / "src" / "copy.ts", "toast.error(\"placeholder error message\");\n")
 
-    check = _no_stub_check(tmp_path, session)
+    check = _stub_text_advisory(tmp_path, session)
 
-    assert check["status"] == "fail"
+    assert check["status"] == "warn"
+    assert check["required"] is False
     assert check["refs"]["offenders"] == ["src/copy.ts:1"]
 
 
@@ -732,7 +784,7 @@ def test_missing_passed_journey_downgrades_pass(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_v5_pipeline_downgrades_agent_pass_and_preserves_input_verdict(
+async def test_v5_pipeline_preserves_agent_pass_when_only_route_grep_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -786,13 +838,14 @@ async def test_v5_pipeline_downgrades_agent_pass_and_preserves_input_verdict(
             config={"verification_plan": {"matrix_scope": "leaf"}},
         )
 
-    assert result.verdict == "partial"
+    assert result.verdict == "pass"
     graph = read_graph(project)
-    assert graph["tasks"]["root"]["verdict"] == "partial"
+    assert graph["tasks"]["root"]["verdict"] == "pass"
     sessions = sorted((project / "otto_logs" / "sessions").glob("*"))
     session = sessions[-1]
     assert json.loads((session / "verdict.json").read_text())["verdict"] == "pass"
     summary = json.loads((session / "summary.json").read_text())
-    assert summary["verdict"] == "partial"
+    assert summary["verdict"] == "pass"
     plan = json.loads((session / "verification_plan.json").read_text())
-    assert any(c["kind"] == "route_resolves" and c["status"] == "fail" for c in plan["checks"])
+    assert not any(c["kind"] == "route_resolves" for c in plan["checks"])
+    assert any(c["kind"] == "route_resolves" and c["status"] == "warn" for c in plan["advisories"])

@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OTTO_ROOT = REPO_ROOT / "otto"
@@ -106,6 +104,26 @@ SYMPTOM_CAP_STRINGS = {
     "repeated_fingerprint",
     "_attempts_by_kind",
 }
+VERDICT_TEXT_SCAN_GATE_MARKERS = {
+    "deprecation",
+    "stdout",
+    "stderr",
+    "test_output",
+    "transcript",
+    "stub_text",
+    "grep",
+    "page_resolves",
+    "pages_resolve",
+    "route_resolves",
+    "routes_resolve",
+    "endpoint_resolves",
+    "endpoints_resolve",
+    "action_has_test",
+    "actions_have_tests",
+    "mutating_action_has_feedback",
+}
+VERDICT_GATE_COLLECTIONS = {"checks", "failed_required"}
+VERDICT_ADVISORY_COLLECTIONS = {"advisories"}
 BAD_DEPENDENCY_VERDICTS = {"catastrophic", "merge_blocked", "unverified"}
 DEPENDENCY_CONTEXT = {"dependency", "dependencies", "ready", "done", "completed", "terminal"}
 IDENTITY_CONTEXT = {"branch", "worktree", "identity", "cwd", "project_dir", "base_ref"}
@@ -430,6 +448,7 @@ def _scan_file(path: Path) -> list[Violation]:
     visitor.visit(tree)
     visitor.violations.extend(_repair_prompt_packet_violations(tree, _rel(path)))
     visitor.violations.extend(_repair_symptom_cap_violations(tree, _rel(path)))
+    visitor.violations.extend(_verdict_text_scan_gate_violations(tree, _rel(path)))
     return visitor.violations
 
 
@@ -497,6 +516,81 @@ def _repair_symptom_cap_violations(tree: ast.AST, rel_path: str) -> list[Violati
     return violations
 
 
+def _call_receiver_name(node: ast.Call) -> str:
+    if isinstance(node.func, ast.Attribute):
+        return _name_text(node.func.value)
+    return ""
+
+
+def _is_collection_append_or_extend(node: ast.Call, collection_names: set[str]) -> bool:
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    if node.func.attr not in {"append", "extend"}:
+        return False
+    return _call_receiver_name(node) in collection_names
+
+
+def _uses_text_scan_gate_marker(node: ast.AST) -> bool:
+    return _contains_any(_name_text(node), VERDICT_TEXT_SCAN_GATE_MARKERS)
+
+
+def _assigns_to_name(node: ast.AST, names: set[str]) -> bool:
+    if isinstance(node, ast.Assign):
+        return any(_name_text(target) in names for target in node.targets)
+    if isinstance(node, ast.AnnAssign):
+        return _name_text(node.target) in names
+    return False
+
+
+def _verdict_text_scan_gate_violations(tree: ast.AST, rel_path: str) -> list[Violation]:
+    violations: list[Violation] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != "validate_lead_verdict":
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call):
+                if _is_collection_append_or_extend(child, VERDICT_GATE_COLLECTIONS):
+                    if any(_uses_text_scan_gate_marker(arg) for arg in child.args):
+                        violations.append(Violation(
+                            rel_path=rel_path,
+                            symbol=node.name,
+                            rule="verdict_text_scan_gate",
+                            line=getattr(child, "lineno", getattr(node, "lineno", 1)),
+                            detail=(
+                                "verdict gate collection receives an unstructured "
+                                "text/source scanner; route it to advisory telemetry"
+                            ),
+                        ))
+                if _is_collection_append_or_extend(child, VERDICT_ADVISORY_COLLECTIONS):
+                    continue
+            elif _assigns_to_name(child, {"failed_required"}):
+                if _contains_any(_name_text(child), VERDICT_ADVISORY_COLLECTIONS):
+                    violations.append(Violation(
+                        rel_path=rel_path,
+                        symbol=node.name,
+                        rule="advisory_controls_verdict",
+                        line=getattr(child, "lineno", getattr(node, "lineno", 1)),
+                        detail="failed-required verdict computation depends on advisory telemetry",
+                    ))
+            elif isinstance(child, ast.If):
+                assigns_final_verdict = any(
+                    _assigns_to_name(stmt, {"final_verdict"})
+                    for stmt in child.body
+                )
+                if assigns_final_verdict and _contains_any(
+                    _name_text(child.test),
+                    VERDICT_ADVISORY_COLLECTIONS,
+                ):
+                    violations.append(Violation(
+                        rel_path=rel_path,
+                        symbol=node.name,
+                        rule="advisory_controls_verdict",
+                        line=getattr(child, "lineno", getattr(node, "lineno", 1)),
+                        detail="final verdict branch depends on advisory telemetry",
+                    ))
+    return violations
+
+
 def test_brittleness_guardrail_has_reasoned_allowlist() -> None:
     assert ALLOWLIST, "ALLOWLIST must be explicit; do not hide violations inline"
     for key, allow in ALLOWLIST.items():
@@ -529,6 +623,8 @@ def test_otto_brittleness_guardrail() -> None:
         raise AssertionError("\n".join(rendered))
 
 
-@pytest.mark.skip(reason="Step 2 verdict de-brittling lands in a separate unit.")
-def test_verdict_text_scan_guardrail_step2_placeholder() -> None:
-    """Placeholder for the Step 2 unstructured verdict-text scan guardrail."""
+def test_verdict_text_scan_guardrail_step2() -> None:
+    path = OTTO_ROOT / "v5_verification_plan.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    violations = _verdict_text_scan_gate_violations(tree, _rel(path))
+    assert not violations, "\n".join(violation.render() for violation in violations)

@@ -3,7 +3,8 @@
 The agent-authored ``verdict.json`` remains the input record. This module reads
 that payload plus the structured spec and CHARTER IA, writes
 ``verification_plan.json``, and returns a final verdict after conservative
-downgrades.
+downgrades from hard gates only. Unstructured text/source heuristics are
+recorded as advisory telemetry and never participate in verdict computation.
 """
 
 from __future__ import annotations
@@ -18,15 +19,19 @@ from typing import Any
 from otto.v5_capability_inventory import parse_information_architecture_contract
 
 CHECK_KINDS = (
+    "structured_contract_present",
+    "page_has_ia_route",
+    "entity_has_empty_state",
+    "local_scope_check",
+    "verdict_consistency",
+)
+ADVISORY_KINDS = (
     "page_resolves",
     "route_resolves",
     "endpoint_resolves",
     "action_has_test",
     "mutating_action_has_feedback",
-    "entity_has_empty_state",
-    "local_scope_check",
     "no_stub_text",
-    "verdict_consistency",
     "deprecation_warnings",
 )
 
@@ -110,12 +115,14 @@ def validate_lead_verdict(
     full_matrix = matrix_scope != "integration_only" or node_kind == "integration"
 
     checks: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []
     if full_matrix and spec and isinstance(ia, dict) and _has_structured_spec(spec):
-        checks.extend(_check_pages_resolve(worktree_dir, spec, ia))
-        checks.extend(_check_routes_resolve(worktree_dir, ia))
-        checks.extend(_check_endpoints_resolve(worktree_dir, ia))
-        checks.extend(_check_actions_have_tests(worktree_dir, spec, agent_verdict))
-        checks.extend(_check_mutating_actions_have_feedback(worktree_dir, spec))
+        checks.extend(_check_page_ia_routes(spec, ia))
+        advisories.extend(_advise_pages_resolve(worktree_dir, spec, ia))
+        advisories.extend(_advise_routes_resolve(worktree_dir, ia))
+        advisories.extend(_advise_endpoints_resolve(worktree_dir, ia))
+        advisories.extend(_advise_actions_have_tests(worktree_dir, spec, agent_verdict))
+        advisories.extend(_advise_mutating_actions_have_feedback(worktree_dir, spec))
         checks.extend(_check_entities_have_empty_states(spec, ia))
     elif not full_matrix:
         checks.append(_check(
@@ -130,9 +137,9 @@ def validate_lead_verdict(
     else:
         checks.append(_structured_contract_presence_check(spec, ia))
 
-    checks.extend(_check_no_stub_text(worktree_dir))
+    advisories.extend(_advise_no_stub_text(worktree_dir))
     checks.extend(_check_verdict_consistency(agent_verdict))
-    checks.extend(_check_deprecation_warnings(
+    advisories.extend(_advise_deprecation_warnings(
         project_dir=project_dir,
         worktree_dir=worktree_dir,
         session_dir=session_dir,
@@ -159,11 +166,14 @@ def validate_lead_verdict(
         "agent_verdict": initial_verdict,
         "final_verdict": final_verdict,
         "checks": checks,
+        "advisories": advisories,
         "journey_failures": journey_failures,
         "summary": {
             "total": len(checks),
             "failed": len(failed_required),
             "skipped": len([c for c in checks if c.get("status") == "skipped"]),
+            "advisories": len(advisories),
+            "advisory_warnings": len([a for a in advisories if a.get("status") == "warn"]),
             "missing_passed_journeys": len(journey_failures),
         },
     }
@@ -289,6 +299,25 @@ def _check(
     }
 
 
+def _advisory(
+    kind: str,
+    advisory_id: str,
+    *,
+    status: str,
+    detail: str,
+    refs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "id": advisory_id,
+        "status": status,
+        "passed": status != "warn",
+        "required": False,
+        "detail": detail,
+        "refs": refs or {},
+    }
+
+
 def _iter_files(root: Path, *, include_tests: bool = False) -> list[Path]:
     if not root.exists():
         return []
@@ -345,7 +374,7 @@ def _ia_routes_by_id(ia: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return routes
 
 
-def _check_pages_resolve(root: Path, spec: dict[str, Any], ia: dict[str, Any]) -> list[dict[str, Any]]:
+def _check_page_ia_routes(spec: dict[str, Any], ia: dict[str, Any]) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     routes_by_id = _ia_routes_by_id(ia)
     for page in _spec_product_pages(spec):
@@ -353,12 +382,37 @@ def _check_pages_resolve(root: Path, spec: dict[str, Any], ia: dict[str, Any]) -
         if not page_id:
             continue
         route = routes_by_id.get(page_id)
+        checks.append(_check(
+            "page_has_ia_route",
+            page_id,
+            bool(route),
+            (
+                "PM page has a matching CHARTER IA route"
+                if route
+                else "PM page has no matching CHARTER IA route"
+            ),
+            refs={"purpose": str(page.get("purpose") or "")},
+        ))
+    return checks
+
+
+def _advise_pages_resolve(root: Path, spec: dict[str, Any], ia: dict[str, Any]) -> list[dict[str, Any]]:
+    advisories: list[dict[str, Any]] = []
+    routes_by_id = _ia_routes_by_id(ia)
+    for page in _spec_product_pages(spec):
+        page_id = str(page.get("id") or "")
+        if not page_id:
+            continue
+        route = routes_by_id.get(page_id)
         if not route:
-            checks.append(_check(
+            advisories.append(_advisory(
                 "page_resolves",
                 page_id,
-                False,
-                "PM page has no matching CHARTER IA route",
+                status="warn",
+                detail=(
+                    "PM page has no matching CHARTER IA route; structured "
+                    "page_has_ia_route gate records this contract issue"
+                ),
                 refs={"purpose": str(page.get("purpose") or "")},
             ))
             continue
@@ -366,20 +420,22 @@ def _check_pages_resolve(root: Path, spec: dict[str, Any], ia: dict[str, Any]) -
         key_text = str(route.get("key_text") or "")
         needles = [path, key_text, _componentish(page_id)]
         passed = _grep_any(root, needles)
-        checks.append(_check(
+        advisories.append(_advisory(
             "page_resolves",
             page_id,
-            passed,
-            "PM page route/component appears in code"
-            if passed
-            else "PM page route/component not found in code",
+            status="info" if passed else "warn",
+            detail=(
+                "PM page route/component appears in code"
+                if passed
+                else "PM page route/component not found by text search"
+            ),
             refs={"path": path, "key_text": key_text, "purpose": str(page.get("purpose") or "")},
         ))
-    return checks
+    return advisories
 
 
-def _check_routes_resolve(root: Path, ia: dict[str, Any]) -> list[dict[str, Any]]:
-    checks: list[dict[str, Any]] = []
+def _advise_routes_resolve(root: Path, ia: dict[str, Any]) -> list[dict[str, Any]]:
+    advisories: list[dict[str, Any]] = []
     for route in ia.get("routes") or []:
         if not isinstance(route, dict):
             continue
@@ -388,18 +444,22 @@ def _check_routes_resolve(root: Path, ia: dict[str, Any]) -> list[dict[str, Any]
         key_text = str(route.get("key_text") or "")
         needles = [path, _componentish(route_id)]
         passed = _grep_any(root, needles)
-        checks.append(_check(
+        advisories.append(_advisory(
             "route_resolves",
             route_id or path,
-            passed,
-            "route path/component appears in code" if passed else "route path/component not found in code",
+            status="info" if passed else "warn",
+            detail=(
+                "route path/component appears in code"
+                if passed
+                else "route path/component not found by text search"
+            ),
             refs={"path": path, "key_text": key_text},
         ))
-    return checks
+    return advisories
 
 
-def _check_endpoints_resolve(root: Path, ia: dict[str, Any]) -> list[dict[str, Any]]:
-    checks: list[dict[str, Any]] = []
+def _advise_endpoints_resolve(root: Path, ia: dict[str, Any]) -> list[dict[str, Any]]:
+    advisories: list[dict[str, Any]] = []
     for endpoint in ia.get("api_endpoints") or []:
         if not isinstance(endpoint, dict):
             continue
@@ -407,14 +467,18 @@ def _check_endpoints_resolve(root: Path, ia: dict[str, Any]) -> list[dict[str, A
         path = str(endpoint.get("path") or "")
         method = str(endpoint.get("method") or "").upper()
         passed = _grep_any(root, [path, endpoint_id])
-        checks.append(_check(
+        advisories.append(_advisory(
             "endpoint_resolves",
             endpoint_id or path,
-            passed,
-            "endpoint path/id appears in code" if passed else "endpoint path/id not found in code",
+            status="info" if passed else "warn",
+            detail=(
+                "endpoint path/id appears in code"
+                if passed
+                else "endpoint path/id not found by text search"
+            ),
             refs={"method": method, "path": path},
         ))
-    return checks
+    return advisories
 
 
 def _spec_actions(spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -454,7 +518,7 @@ def _is_test_path(rel_text: str) -> bool:
     )
 
 
-def _check_actions_have_tests(
+def _advise_actions_have_tests(
     root: Path,
     spec: dict[str, Any],
     agent_verdict: dict[str, Any],
@@ -462,7 +526,7 @@ def _check_actions_have_tests(
     test_files = _test_files(root)
     test_index = "\n".join(str(p.relative_to(root)) + "\n" + _read_text(p) for p in test_files)
     evidence_text = json.dumps(agent_verdict.get("evidence") or [], sort_keys=True)
-    checks: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []
     for action in _spec_actions(spec):
         action_id = str(action.get("id") or "")
         safe_id = action_id.replace(".", "_").replace("-", "_")
@@ -472,17 +536,21 @@ def _check_actions_have_tests(
             or action_id in evidence_text
             or safe_id in evidence_text
         )
-        checks.append(_check(
+        advisories.append(_advisory(
             "action_has_test",
             action_id,
-            passed,
-            "action is named in tests or evidence" if passed else "action is not named in tests or evidence",
+            status="info" if passed else "warn",
+            detail=(
+                "action is named in tests or evidence"
+                if passed
+                else "action is not named in tests or evidence by text search"
+            ),
         ))
-    return checks
+    return advisories
 
 
-def _check_mutating_actions_have_feedback(root: Path, spec: dict[str, Any]) -> list[dict[str, Any]]:
-    checks: list[dict[str, Any]] = []
+def _advise_mutating_actions_have_feedback(root: Path, spec: dict[str, Any]) -> list[dict[str, Any]]:
+    advisories: list[dict[str, Any]] = []
     for action in _spec_actions(spec):
         action_id = str(action.get("id") or "")
         if not str(action.get("success_observable") or "").strip():
@@ -497,13 +565,17 @@ def _check_mutating_actions_have_feedback(root: Path, spec: dict[str, Any]) -> l
             if any(n and n.lower() in lower for n in needles) and any(p in lower for p in _FEEDBACK_PATTERNS):
                 passed = True
                 break
-        checks.append(_check(
+        advisories.append(_advisory(
             "mutating_action_has_feedback",
             action_id,
-            passed,
-            "action code includes a feedback pattern" if passed else "no toast/notification/redirect-style feedback found near action",
+            status="info" if passed else "warn",
+            detail=(
+                "action code includes a feedback pattern"
+                if passed
+                else "no toast/notification/redirect-style feedback found near action by text search"
+            ),
         ))
-    return checks
+    return advisories
 
 
 def _check_entities_have_empty_states(spec: dict[str, Any], ia: dict[str, Any]) -> list[dict[str, Any]]:
@@ -530,7 +602,7 @@ def _check_entities_have_empty_states(spec: dict[str, Any], ia: dict[str, Any]) 
     return checks
 
 
-def _check_no_stub_text(root: Path) -> list[dict[str, Any]]:
+def _advise_no_stub_text(root: Path) -> list[dict[str, Any]]:
     offenders: list[str] = []
     for path in _iter_files(root, include_tests=False):
         rel = str(path.relative_to(root))
@@ -541,11 +613,11 @@ def _check_no_stub_text(root: Path) -> list[dict[str, Any]]:
                 offenders.append(f"{rel}:{line_no}")
                 break
     passed = not offenders
-    return [_check(
+    return [_advisory(
         "no_stub_text",
         "no_stub_text",
-        passed,
-        "no stub text found" if passed else "stub text found in user-facing artifacts",
+        status="info" if passed else "warn",
+        detail="no stub text found" if passed else "stub text found by broad source scanner",
         refs={"offenders": offenders[:20]},
     )]
 
@@ -651,25 +723,9 @@ def _check_verdict_consistency(agent_verdict: dict[str, Any]) -> list[dict[str, 
     )]
 
 
-_DEPRECATION_EMISSION_RE = re.compile(
-    r"^(?:(?P<path>.+?):(?P<line>\d+):\s*)?"
-    r"(?P<category>DeprecationWarning|PendingDeprecationWarning)\s*:\s*"
-    r"(?P<message>.+)$",
+_DEPRECATION_WARNING_TEXT_RE = re.compile(
+    r"\b(?:DeprecationWarning|PendingDeprecationWarning)\b",
     re.IGNORECASE,
-)
-_NO_DEPRECATION_WARNING_RE = re.compile(
-    r"\b(?:0|zero)\s+(?:deprecation\s+)?warnings?\b|"
-    r"\b0\s+deprecations?\b|"
-    r"\bno\s+(?:deprecation\s+)?warnings?\b|"
-    r"\bno\s+deprecations?\b|"
-    r"\bwithout\s+(?:deprecation\s+)?warnings?\b|"
-    r"\bdeprecation(?:warning)?s?\s+filtered\b",
-    re.IGNORECASE,
-)
-_THIRD_PARTY_WARNING_PATH_PARTS = (
-    "/site-packages/",
-    "/dist-packages/",
-    "/node_modules/",
 )
 
 
@@ -701,26 +757,16 @@ def _iter_evidence_path_strings(value: Any) -> list[str]:
     return out
 
 
-def _deprecation_lines(text: str) -> list[str]:
+def _deprecation_warning_lines(text: str) -> list[str]:
     hits: list[str] = []
     for line in text.splitlines():
         normalized = line.strip()
         if not normalized:
             continue
-        if _NO_DEPRECATION_WARNING_RE.search(normalized):
-            continue
-        match = _DEPRECATION_EMISSION_RE.search(normalized)
-        if match is None:
-            continue
-        if _is_third_party_warning_path(str(match.group("path") or "")):
+        if not _DEPRECATION_WARNING_TEXT_RE.search(normalized):
             continue
         hits.append(normalized[:240])
     return hits
-
-
-def _is_third_party_warning_path(path: str) -> bool:
-    normalized = path.replace("\\", "/")
-    return any(part in normalized for part in _THIRD_PARTY_WARNING_PATH_PARTS)
 
 
 def _resolve_evidence_path(raw: str, roots: list[Path]) -> Path | None:
@@ -734,17 +780,17 @@ def _resolve_evidence_path(raw: str, roots: list[Path]) -> Path | None:
     return None
 
 
-def _check_deprecation_warnings(
+def _advise_deprecation_warnings(
     *,
     project_dir: Path,
     worktree_dir: Path,
     session_dir: Path,
     agent_verdict: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Fail a passing verdict that leaves deprecation warnings unresolved."""
+    """Record deprecation warning text as non-gating telemetry."""
     hits: list[str] = []
     for text in _iter_agent_verdict_strings(agent_verdict):
-        hits.extend(_deprecation_lines(text))
+        hits.extend(_deprecation_warning_lines(text))
 
     evidence_roots = [session_dir, worktree_dir, project_dir]
     for raw_path in _iter_evidence_path_strings(agent_verdict.get("evidence") or []):
@@ -754,7 +800,7 @@ def _check_deprecation_warnings(
         text = _read_text(resolved)
         if not text:
             continue
-        for line in _deprecation_lines(text):
+        for line in _deprecation_warning_lines(text):
             hits.append(f"{resolved.name}: {line}")
 
     # Dedupe without losing order.
@@ -766,15 +812,14 @@ def _check_deprecation_warnings(
         seen.add(hit)
         unique_hits.append(hit)
 
-    passed = not unique_hits
-    return [_check(
+    return [_advisory(
         "deprecation_warnings",
         "test_output_deprecations",
-        passed,
-        (
-            "no product deprecation warnings found in verdict output or evidence logs"
-            if passed
-            else "deprecation warnings found in passing test output; fix them or downgrade"
+        status="info" if not unique_hits else "warn",
+        detail=(
+            "no deprecation warning text found in verdict output or evidence logs"
+            if not unique_hits
+            else "deprecation warning text found in verdict output or evidence logs"
         ),
         refs={"warnings": unique_hits[:20]},
     )]
