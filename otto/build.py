@@ -45,6 +45,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Callable, Protocol, cast
 
 from otto.checks import Evidence, run_checks
+from otto.path_ownership import path_matches_any_ownership_pattern
 from otto.prompts import render_prompt
 from otto.setup_gitignore import (
     is_common_build_artifact_path,
@@ -788,36 +789,7 @@ def _transitive_deps(group_id: str, spec: Spec) -> set[str]:
 
 
 def _matches_any(path: str, globs: list[str]) -> bool:
-    from fnmatch import fnmatch
-
-    for g in globs:
-        text = str(g or "").strip()
-        if not text:
-            continue
-        if fnmatch(path, text):
-            return True
-        # `**` recursive globs: fnmatch does not handle them; expand to two
-        # patterns "x/**/y" → "x/*/y" + "x/y" + "x/*/*/y" up to 4 levels.
-        # Pragmatic v1 — tests cover the common cases.
-        if "**" in text:
-            parts = text.split("**")
-            # Pattern "a/**/b" matches a/b, a/*/b, a/*/*/b, etc.
-            if len(parts) == 2:
-                left, right = parts
-                left = left.rstrip("/")
-                right = right.lstrip("/")
-                # ``a/**`` means descendants under ``a``, not ``a`` itself.
-                # For ``a/**/b`` keep the usual zero-or-more middle segment
-                # behavior so it still matches ``a/b``.
-                min_depth = 1 if not right else 0
-                for depth in range(min_depth, 6):
-                    middle = "/".join(["*"] * depth) if depth else ""
-                    candidate = "/".join(
-                        part for part in (left, middle, right) if part
-                    )
-                    if fnmatch(path, candidate):
-                        return True
-    return False
+    return path_matches_any_ownership_pattern(path, globs)
 
 
 # Path-segment patterns excluded from the no-progress hash. Pattern A

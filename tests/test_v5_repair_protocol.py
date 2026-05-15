@@ -383,6 +383,88 @@ async def test_composite_gate_blocks_scope_and_conflict_before_commit_hook_commi
     assert _git(repo, "rev-parse", "HEAD").stdout.strip() == pre_repair_head
 
 
+@pytest.mark.asyncio
+async def test_post_commit_gate_allows_committed_change_matching_owned_glob(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-postcommit-glob",
+        budget=RepairBudget(agent_turns=0, oracle_invocations=0),
+        allowed_paths=("src/features/foo/**",),
+        scope_policy="allowed_paths",
+    )
+    packet.latest_oracle_result = _oracle_result(passed=True).to_jsonable()
+    packet.capture_scope_baseline()
+
+    async def forbidden_agent(prompt: str, options: Any, **kwargs: Any) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt, options, kwargs
+        raise AssertionError("passing oracle should not dispatch a repair agent")
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: CleanOracleResult) -> tuple[bool, str]:
+        changed_path = repo / "src" / "features" / "foo" / "panel.tsx"
+        changed_path.parent.mkdir(parents=True, exist_ok=True)
+        changed_path.write_text("export const panel = 'ok';\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        proc = _git(repo, "commit", "-q", "-m", "repair foo panel")
+        return proc.returncode == 0, proc.stderr or proc.stdout
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=forbidden_agent,
+        oracle_runner=lambda _packet: _oracle_result(passed=True),
+        commit_hook=commit_hook,
+    )
+
+    assert result.verdict == "pass"
+    assert result.composite_gate is not None
+    assert result.composite_gate["scope_ok"] is True
+    assert result.composite_gate["changed_paths"] == ["src/features/foo/panel.tsx"]
+
+
+@pytest.mark.asyncio
+async def test_post_commit_gate_blocks_committed_change_outside_owned_glob(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-postcommit-outside-glob",
+        budget=RepairBudget(agent_turns=0, oracle_invocations=0),
+        allowed_paths=("src/features/foo/**",),
+        scope_policy="allowed_paths",
+    )
+    packet.latest_oracle_result = _oracle_result(passed=True).to_jsonable()
+    packet.capture_scope_baseline()
+
+    async def forbidden_agent(prompt: str, options: Any, **kwargs: Any) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt, options, kwargs
+        raise AssertionError("passing oracle should not dispatch a repair agent")
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: CleanOracleResult) -> tuple[bool, str]:
+        changed_path = repo / "src" / "other" / "x.tsx"
+        changed_path.parent.mkdir(parents=True, exist_ok=True)
+        changed_path.write_text("export const x = 'blocked';\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        proc = _git(repo, "commit", "-q", "-m", "repair outside scope")
+        return proc.returncode == 0, proc.stderr or proc.stdout
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=forbidden_agent,
+        oracle_runner=lambda _packet: _oracle_result(passed=True),
+        commit_hook=commit_hook,
+    )
+
+    assert result.verdict == "merge_blocked"
+    assert result.composite_gate is not None
+    assert result.composite_gate["scope_ok"] is False
+    assert result.composite_gate["scope_violations"] == ["src/other/x.tsx"]
+
+
 def test_clean_verify_oracle_serialization_omits_secret_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -495,6 +577,88 @@ async def test_repair_budget_replays_prior_usage_and_preserves_closeout_reserve(
     assert result.oracle_invocations == 1
     assert result.cost_usd == pytest.approx(0.13)
     assert result.escalation is not None
+    assert result.escalation["closeout_source"] == "agent_reserve"
+
+
+@pytest.mark.asyncio
+async def test_cost_exhaustion_writes_packet_escalation_without_closeout_agent(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-cost-exhausted-no-closeout",
+        budget=RepairBudget(
+            agent_turns=2,
+            oracle_invocations=2,
+            cost_usd=0.10,
+            closeout_agent_turns=1,
+        ),
+    )
+    packet.persist()
+    packet.append_event("agent_turn", digest="old-agent", payload={"turn": 1, "cost_usd": 0.10})
+
+    async def forbidden_agent(prompt: str, options: Any, **kwargs: Any) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt, options, kwargs
+        raise AssertionError("cost exhaustion must not spend a closeout agent turn")
+
+    async def forbidden_oracle(_packet: RepairPacket) -> CleanOracleResult:
+        raise AssertionError("cost exhaustion should block before spending another oracle")
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=forbidden_agent,
+        oracle_runner=forbidden_oracle,
+    )
+
+    assert result.verdict == "merge_blocked"
+    assert result.agent_turns_used == 1
+    assert result.cost_usd == pytest.approx(0.10)
+    assert result.escalation is not None
+    assert result.escalation["reason"] == "cost_exhausted"
+    assert result.escalation["closeout_source"] == "packet"
+    assert not any(event["event"]["type"] == "closeout_agent_turn" for event in packet.events())
+
+
+@pytest.mark.asyncio
+async def test_turn_budget_exhaustion_can_use_single_closeout_agent_when_cost_remains(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-turn-exhausted-closeout",
+        budget=RepairBudget(
+            agent_turns=1,
+            oracle_invocations=2,
+            cost_usd=1.00,
+            closeout_agent_turns=1,
+        ),
+    )
+    phases: list[str] = []
+
+    async def fake_agent(prompt: str, options: Any, **kwargs: Any) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt, options
+        phases.append(str(kwargs.get("phase_name") or ""))
+        return "closeout: turn budget exhausted", 0.05, "sess-turn-closeout", {}
+
+    async def forbidden_oracle(_packet: RepairPacket) -> CleanOracleResult:
+        raise AssertionError("turn exhaustion should close out before spending another oracle")
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=fake_agent,
+        oracle_runner=forbidden_oracle,
+    )
+
+    assert phases == ["REPAIR_CLOSEOUT"]
+    assert result.verdict == "merge_blocked"
+    assert result.agent_turns_used == 1
+    assert result.cost_usd == pytest.approx(0.05)
+    assert result.escalation is not None
+    assert result.escalation["reason"] == "budget_exhausted"
     assert result.escalation["closeout_source"] == "agent_reserve"
 
 

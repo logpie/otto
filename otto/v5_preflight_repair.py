@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from otto.path_ownership import path_matches_any_ownership_pattern
 from otto.safe_slug import short_hash
 from otto.setup_gitignore import is_common_build_artifact_path, is_otto_owned_path
 from otto.v5_clean_verify import (
@@ -217,6 +218,7 @@ class _BudgetUsage:
 OracleRunner = Callable[[RepairPacket], CleanOracleResult | Awaitable[CleanOracleResult]]
 AgentRunner = Callable[..., Awaitable[tuple[str, float, str, dict[str, Any]]]]
 CommitHook = Callable[[RepairPacket, CleanOracleResult], tuple[bool, str] | Awaitable[tuple[bool, str]]]
+_CLOSEOUT_AGENT_REASONS = frozenset({"budget_exhausted", "oracle_budget_exhausted"})
 
 
 def _iso_now() -> str:
@@ -421,12 +423,15 @@ def _modified_paths_since_baseline(
 def _path_allowed(path: str, allowed_paths: list[str]) -> bool:
     if not allowed_paths:
         return True
-    normalized = path.strip("/")
-    for allowed in allowed_paths:
-        prefix = str(allowed).strip("/")
-        if normalized == prefix or normalized.startswith(prefix.rstrip("/") + "/"):
-            return True
-    return False
+    return path_matches_any_ownership_pattern(
+        path,
+        allowed_paths,
+        allow_literal_prefix=True,
+    )
+
+
+def _reason_allows_closeout_agent(reason: str) -> bool:
+    return reason in _CLOSEOUT_AGENT_REASONS
 
 
 def _has_conflict_markers(worktree: Path, paths: list[str]) -> bool:
@@ -1002,6 +1007,7 @@ async def run_oracle_repair_agent(
         closeout_summary = ""
         if (
             allow_closeout
+            and _reason_allows_closeout_agent(reason)
             and closeout_turns_used < packet.budget.closeout_agent_turns
             and agent_turns_used < packet.budget.agent_turns
         ):
