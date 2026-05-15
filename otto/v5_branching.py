@@ -13,11 +13,13 @@ conflicts (best-effort, with bounded retry).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 logger = logging.getLogger("otto.v5_branching")
@@ -75,6 +77,76 @@ def git_current_branch(project_dir: Path) -> str:
     if cp.returncode == 0 and branch:
         return branch
     return "HEAD"
+
+
+def _worktree_path_for_branch(project_dir: Path, branch: str) -> Path | None:
+    """Return the existing worktree that has ``branch`` checked out, if any."""
+    cp = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    if cp.returncode != 0:
+        return None
+    target_ref = f"refs/heads/{branch}"
+    block_path: Path | None = None
+    for raw_line in (cp.stdout or "").splitlines():
+        if raw_line.startswith("worktree "):
+            block_path = Path(raw_line[len("worktree "):].strip())
+            continue
+        if not raw_line.startswith("branch ") or block_path is None:
+            continue
+        ref = raw_line[len("branch "):].strip()
+        if ref == target_ref or ref == branch:
+            return block_path
+    return None
+
+
+def _git_common_dir(project_dir: Path) -> Path:
+    cp = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    if cp.returncode != 0:
+        return project_dir / ".git"
+    raw = (cp.stdout or "").strip()
+    if not raw:
+        return project_dir / ".git"
+    path = Path(raw)
+    if not path.is_absolute():
+        path = project_dir / path
+    return path
+
+
+@contextlib.contextmanager
+def _merge_target_lock(project_dir: Path, target_branch: str) -> Iterator[None]:
+    """Serialize merges that mutate the same integration target branch."""
+    import fcntl
+
+    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", target_branch).strip("-") or "target"
+    lock_dir = _git_common_dir(project_dir) / "otto-merge-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{safe}.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(
+            "target_branch="
+            + target_branch
+            + "\n"
+            + "_written_at="
+            + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            + "\n"
+        )
+        lock_file.flush()
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def git_status_porcelain(project_dir: Path) -> list[str]:
@@ -189,6 +261,7 @@ def _write_conflict_packet(
     source_branch: str,
     target_branch: str,
     files: list[str],
+    packet_project_dir: Path | None = None,
 ) -> Path:
     packet_dir = project_dir / ".otto" / "merge-conflicts"
     packet_dir.mkdir(parents=True, exist_ok=True)
@@ -219,6 +292,13 @@ def _write_conflict_packet(
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     packet_path.write_text(text, encoding="utf-8")
     latest_conflict_packet_path(project_dir).write_text(text, encoding="utf-8")
+    if packet_project_dir is not None and packet_project_dir.resolve() != project_dir.resolve():
+        mirror_dir = packet_project_dir / ".otto" / "merge-conflicts"
+        mirror_dir.mkdir(parents=True, exist_ok=True)
+        mirror_path = mirror_dir / packet_path.name
+        mirror_path.write_text(text, encoding="utf-8")
+        latest_conflict_packet_path(packet_project_dir).write_text(text, encoding="utf-8")
+        return mirror_path
     return packet_path
 
 
@@ -591,159 +671,184 @@ def merge_branch_into(
     branch = source_branch
     parent_integration_branch = target_branch
     try:
-        assert_clean_before_checkout(
-            project_dir=project_dir,
-            source_branch=branch,
-            target_branch=parent_integration_branch,
-        )
-        # Switch to integration branch.
+        with _merge_target_lock(project_dir, parent_integration_branch):
+            owner_worktree = _worktree_path_for_branch(
+                project_dir,
+                parent_integration_branch,
+            )
+            if owner_worktree is not None:
+                merge_worktree = owner_worktree
+            else:
+                merge_worktree = project_dir
+            return _merge_branch_into_worktree(
+                project_dir=project_dir,
+                merge_worktree=merge_worktree,
+                branch=branch,
+                parent_integration_branch=parent_integration_branch,
+            )
+    except MergeWorktreeDirtyError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        return False, f"merge crashed: {exc}"
+
+
+def _merge_branch_into_worktree(
+    *,
+    project_dir: Path,
+    merge_worktree: Path,
+    branch: str,
+    parent_integration_branch: str,
+) -> tuple[bool, str]:
+    assert_clean_before_checkout(
+        project_dir=merge_worktree,
+        source_branch=branch,
+        target_branch=parent_integration_branch,
+    )
+    if git_current_branch(merge_worktree) != parent_integration_branch:
         cp = subprocess.run(
             ["git", "checkout", parent_integration_branch],
-            cwd=str(project_dir),
+            cwd=str(merge_worktree),
             capture_output=True,
             text=True,
         )
         if cp.returncode != 0:
             return False, f"checkout {parent_integration_branch} failed: {(cp.stderr or '').strip()}"
-        # Attempt merge --no-ff (preserve graph).
-        cp = subprocess.run(
-            ["git", "merge", "--no-ff", "--no-edit", branch],
-            cwd=str(project_dir),
-            capture_output=True,
-            text=True,
-        )
-        if cp.returncode == 0:
-            return True, f"merged {branch} into {parent_integration_branch}"
-        # Conflict — identify conflicting files.
-        diag = subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=U"],
-            cwd=str(project_dir),
-            capture_output=True,
-            text=True,
-        )
-        files = [f for f in (diag.stdout or "").strip().split("\n") if f]
-        # Layer 2: gitignore-aware noise auto-resolve.
-        noise_set = _gitignored_paths(project_dir, files)
-        noise_files = [f for f in files if f in noise_set]
-        non_noise = [f for f in files if f not in noise_set]
+    # Attempt merge --no-ff (preserve graph).
+    cp = subprocess.run(
+        ["git", "merge", "--no-ff", "--no-edit", branch],
+        cwd=str(merge_worktree),
+        capture_output=True,
+        text=True,
+    )
+    if cp.returncode == 0:
+        return True, f"merged {branch} into {parent_integration_branch}"
+    # Conflict — identify conflicting files.
+    diag = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=U"],
+        cwd=str(merge_worktree),
+        capture_output=True,
+        text=True,
+    )
+    files = [f for f in (diag.stdout or "").strip().split("\n") if f]
+    # Layer 2: gitignore-aware noise auto-resolve.
+    noise_set = _gitignored_paths(merge_worktree, files)
+    noise_files = [f for f in files if f in noise_set]
+    non_noise = [f for f in files if f not in noise_set]
 
-        # Layer 3: structured-file merge drivers for non-noise conflicts.
-        from otto.v5_merge_drivers import find_driver, is_discard_signal
-        structured_resolved: list[str] = []
-        truly_blocked: list[str] = []
-        for f in non_noise:
-            driver = find_driver(f)
-            if driver is None:
-                truly_blocked.append(f)
-                continue
-            # Read --ours and --theirs versions and ask the driver to merge.
-            ours_proc = subprocess.run(
-                ["git", "show", f":2:{f}"],
-                cwd=str(project_dir), capture_output=True, text=True,
-            )
-            theirs_proc = subprocess.run(
-                ["git", "show", f":3:{f}"],
-                cwd=str(project_dir), capture_output=True, text=True,
-            )
-            if ours_proc.returncode != 0 or theirs_proc.returncode != 0:
-                truly_blocked.append(f)
-                continue
-            merged = driver(ours_proc.stdout, theirs_proc.stdout, None)
-            if merged is None:
-                truly_blocked.append(f)
-                continue
-            full_path = project_dir / f
-            if is_discard_signal(merged):
-                # Lockfile — delete it. The next build will regenerate.
-                try:
-                    full_path.unlink(missing_ok=True)
-                    subprocess.run(
-                        ["git", "rm", "-f", "--", f],
-                        cwd=str(project_dir), capture_output=True,
-                    )
-                except OSError:
-                    truly_blocked.append(f)
-                    continue
-            else:
-                try:
-                    full_path.parent.mkdir(parents=True, exist_ok=True)
-                    full_path.write_text(merged, encoding="utf-8")
-                    subprocess.run(
-                        ["git", "add", "--", f],
-                        cwd=str(project_dir), capture_output=True,
-                    )
-                except OSError:
-                    truly_blocked.append(f)
-                    continue
-            structured_resolved.append(f)
-
-        # If everything resolvable (noise or structured), complete the merge.
-        if files and not truly_blocked:
-            # Apply noise resolution.
-            for f in noise_files:
+    # Layer 3: structured-file merge drivers for non-noise conflicts.
+    from otto.v5_merge_drivers import find_driver, is_discard_signal
+    structured_resolved: list[str] = []
+    truly_blocked: list[str] = []
+    for f in non_noise:
+        driver = find_driver(f)
+        if driver is None:
+            truly_blocked.append(f)
+            continue
+        # Read --ours and --theirs versions and ask the driver to merge.
+        ours_proc = subprocess.run(
+            ["git", "show", f":2:{f}"],
+            cwd=str(merge_worktree), capture_output=True, text=True,
+        )
+        theirs_proc = subprocess.run(
+            ["git", "show", f":3:{f}"],
+            cwd=str(merge_worktree), capture_output=True, text=True,
+        )
+        if ours_proc.returncode != 0 or theirs_proc.returncode != 0:
+            truly_blocked.append(f)
+            continue
+        merged = driver(ours_proc.stdout, theirs_proc.stdout, None)
+        if merged is None:
+            truly_blocked.append(f)
+            continue
+        full_path = merge_worktree / f
+        if is_discard_signal(merged):
+            # Lockfile — delete it. The next build will regenerate.
+            try:
+                full_path.unlink(missing_ok=True)
                 subprocess.run(
-                    ["git", "checkout", "--ours", "--", f],
-                    cwd=str(project_dir), capture_output=True,
+                    ["git", "rm", "-f", "--", f],
+                    cwd=str(merge_worktree), capture_output=True,
                 )
+            except OSError:
+                truly_blocked.append(f)
+                continue
+        else:
+            try:
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                full_path.write_text(merged, encoding="utf-8")
                 subprocess.run(
                     ["git", "add", "--", f],
-                    cwd=str(project_dir), capture_output=True,
+                    cwd=str(merge_worktree), capture_output=True,
                 )
-            parts: list[str] = []
-            if noise_files:
-                parts.append(f"{len(noise_files)} noise")
-            if structured_resolved:
-                parts.append(f"{len(structured_resolved)} structured")
-            commit = subprocess.run(
-                [
-                    "git", "commit", "--no-edit",
-                    "-m", f"merge {branch} (auto-resolved: {'; '.join(parts) or 'clean'})",
-                ],
-                cwd=str(project_dir), capture_output=True, text=True,
-            )
-            if commit.returncode == 0:
-                return True, (
-                    f"merged {branch} into {parent_integration_branch} "
-                    f"(auto-resolved: {'; '.join(parts) or 'clean'})"
-                )
-            # Auto-resolve commit failed; fall through to abort.
+            except OSError:
+                truly_blocked.append(f)
+                continue
+        structured_resolved.append(f)
 
-        conflict_packet: Path | None = None
-        if truly_blocked:
-            try:
-                conflict_packet = _write_conflict_packet(
-                    project_dir=project_dir,
-                    source_branch=branch,
-                    target_branch=parent_integration_branch,
-                    files=truly_blocked,
-                )
-            except OSError as exc:
-                logger.warning("could not write merge conflict packet: %s", exc)
-        subprocess.run(
-            ["git", "merge", "--abort"],
-            cwd=str(project_dir), capture_output=True,
-        )
-        if truly_blocked:
-            detail = f"conflict on: {', '.join(truly_blocked[:5])}"
-            if conflict_packet is not None:
-                detail += f"; conflict packet: {conflict_packet}"
-            return False, detail
-        # All files were auto-resolvable individually, but commit failed
-        # (something downstream like hooks / index in bad state). Report
-        # the *original* conflict set so the log isn't a bare "?". Without
-        # this, the auto-resolution path emptied truly_blocked + the
-        # working file list before we abort, and we'd lose track of what
-        # the merge actually tripped on.
-        if files:
-            return False, (
-                f"auto-resolve commit failed for {branch}; "
-                f"originally conflicted on: {', '.join(files[:5])}"
+    # If everything resolvable (noise or structured), complete the merge.
+    if files and not truly_blocked:
+        # Apply noise resolution.
+        for f in noise_files:
+            subprocess.run(
+                ["git", "checkout", "--ours", "--", f],
+                cwd=str(merge_worktree), capture_output=True,
             )
-        return False, f"merge of {branch} aborted with no conflict files reported"
-    except MergeWorktreeDirtyError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        return False, f"merge crashed: {exc}"
+            subprocess.run(
+                ["git", "add", "--", f],
+                cwd=str(merge_worktree), capture_output=True,
+            )
+        parts: list[str] = []
+        if noise_files:
+            parts.append(f"{len(noise_files)} noise")
+        if structured_resolved:
+            parts.append(f"{len(structured_resolved)} structured")
+        commit = subprocess.run(
+            [
+                "git", "commit", "--no-edit",
+                "-m", f"merge {branch} (auto-resolved: {'; '.join(parts) or 'clean'})",
+            ],
+            cwd=str(merge_worktree), capture_output=True, text=True,
+        )
+        if commit.returncode == 0:
+            return True, (
+                f"merged {branch} into {parent_integration_branch} "
+                f"(auto-resolved: {'; '.join(parts) or 'clean'})"
+            )
+        # Auto-resolve commit failed; fall through to abort.
+
+    conflict_packet: Path | None = None
+    if truly_blocked:
+        try:
+            conflict_packet = _write_conflict_packet(
+                project_dir=merge_worktree,
+                packet_project_dir=project_dir,
+                source_branch=branch,
+                target_branch=parent_integration_branch,
+                files=truly_blocked,
+            )
+        except OSError as exc:
+            logger.warning("could not write merge conflict packet: %s", exc)
+    subprocess.run(
+        ["git", "merge", "--abort"],
+        cwd=str(merge_worktree), capture_output=True,
+    )
+    if truly_blocked:
+        detail = f"conflict on: {', '.join(truly_blocked[:5])}"
+        if conflict_packet is not None:
+            detail += f"; conflict packet: {conflict_packet}"
+        return False, detail
+    # All files were auto-resolvable individually, but commit failed
+    # (something downstream like hooks / index in bad state). Report
+    # the *original* conflict set so the log isn't a bare "?". Without
+    # this, the auto-resolution path emptied truly_blocked + the
+    # working file list before we abort, and we'd lose track of what
+    # the merge actually tripped on.
+    if files:
+        return False, (
+            f"auto-resolve commit failed for {branch}; "
+            f"originally conflicted on: {', '.join(files[:5])}"
+        )
+    return False, f"merge of {branch} aborted with no conflict files reported"
 
 
 def merge_child_into_integration(

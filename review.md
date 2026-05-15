@@ -672,6 +672,53 @@ Verification:
 
 ---
 
+## Implementation Gate — 2026-05-15 — Round 6 nested integration worktree binding
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, diff inspection,
+red/green regression proof, requested non-regression suites, ruff,
+basedpyright, and `git diff --check` were used instead.
+
+Findings during implementation review:
+- [HIGH] Confirmed root cause in `otto/v5_branching.py`: the merge primitive
+  checked out the target integration branch in caller `project_dir`, even when
+  that branch was already legally checked out by a dedicated integration
+  worktree. Git rejects that with "already used by worktree".
+- [HIGH] Fixed by resolving the target branch owner through
+  `git worktree list --porcelain` and running the merge in that owner
+  worktree. This applies to child-build to parent-integration merges and
+  subtree-integration to grandparent-integration merges because both use
+  `merge_branch_into()`.
+- [MEDIUM] Added a per-target branch lock under the git common dir so two
+  completions cannot mutate the same integration branch at the same time.
+- [MEDIUM] Preserved repair observability by mirroring conflict packets back
+  to `project_dir` when the merge ran in a separate target worktree.
+- [NOTE] The e469 all-pass subtree was not this Git checkout failure. Its
+  branch reached `main`; it stayed `partial` due runner-check failures. The
+  bc66 serving child was blocked by dependencies and was not a separate
+  orphaning mechanism.
+
+Verification:
+- Red proof before production patch: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_integration_worktree.py::test_child_merge_uses_existing_integration_worktree_owner -q`
+  failed as expected with `checkout i2p/integ/v5-parent failed: fatal:
+  'i2p/integ/v5-parent' is already used by worktree .../.worktrees/integ-v5-parent`.
+- Focused regression after implementation: same command passed, 1 passed.
+- Existing merge/worktree suites: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_integration_worktree.py tests/test_v5_merge_noise.py tests/test_v5_phase5.py -q`
+  passed: 37 passed.
+- Required hardening/leaf/smoke/guardrail batch plus the new regression:
+  `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p0_hardening.py tests/test_v5_p1_hardening.py tests/test_v5_p2_hardening.py tests/test_v5_pass4_hardening.py tests/test_v5_leaf_runtime_invariants.py tests/test_brittleness_guardrail.py tests/smoke tests/test_v5_integration_worktree.py::test_child_merge_uses_existing_integration_worktree_owner -q`
+  passed after replacing an implicit `or project_dir` fallback flagged by the
+  guardrail: 113 passed.
+- Required smoke tier: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke`
+  passed: 306 passed, 2471 deselected.
+- Required merge queue: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_merge_queue.py -q`
+  passed: 46 passed.
+- Touched-file ruff passed.
+- Touched-file basedpyright passed: 0 errors, 0 warnings, 0 notes.
+- `git diff --check` passed.
+
+---
+
 ## Implementation Gate — 2026-05-15 — modular decomposition repair
 
 Codex MCP gate status: skipped because no `mcp__codex__codex` tool is

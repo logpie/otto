@@ -1493,3 +1493,62 @@ Branch: `cc-i2p-2`
   partial.
 - Child worktree setup failure is not a valid reason to run a child in the
   project root. The child should become `merge_blocked` before dispatch.
+
+---
+
+# Research: Round 6 Nested Integration Worktree Binding
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+
+## Live Evidence
+
+- Field test:
+  `/Users/yuxuan/otto-projects/field-tests/20260515-081853/08-data-platform/`.
+- `field-test-otto.log` shows every grandchild merge into subtree
+  `v5-212ea51688a9` failed with:
+  `fatal: 'i2p/integ/v5-212ea51688a9' is already used by worktree at .../.worktrees/integ-v5-212ea51688a9`.
+- `git worktree list --porcelain` confirms that
+  `i2p/integ/v5-212ea51688a9` was legitimately checked out by the dedicated
+  integration worktree while the root project worktree was on `main`.
+- The 06 SaaS comparison avoided this exact failure because the nested
+  integration branch was being mutated through whatever branch the root
+  project worktree currently held. That ordering is non-general: if the
+  integration branch is already bound to a linked worktree, a second checkout
+  from the project root fails by Git design.
+
+## Source Findings
+
+- `otto/v5_branching.py:575` `merge_branch_into()` always runs
+  `git checkout <target_branch>` in the caller's `project_dir`.
+- `otto/v5_branching.py:749` `merge_child_into_integration()` is only a thin
+  wrapper over that checkout-based primitive, so child-build to
+  parent-integration merges inherit the same branch-binding bug.
+- `otto/v5_runner.py:2623` `_setup_integration_worktree_once()` can create or
+  reuse a dedicated integration worktree for a task's own integration branch.
+  Once it does, later merges into that branch must operate in that owning
+  worktree rather than trying to bind the same branch elsewhere.
+- `otto/v5_runner.py:2895` restores `project_dir` after a nested integration,
+  which means subsequent child merges cannot rely on the root worktree still
+  being on the subtree integration branch.
+
+## Related Cases
+
+- `v5-e4696c23651d` is not the same Git checkout failure. Its logs show
+  grandchild merges completed and `i2p/integ/v5-e4696c23651d` reached `main`;
+  it remained `partial` because runner checks failed despite product tests
+  passing.
+- `v5-bc66f4349b3c` was emitted but never resolved because it depended on both
+  subtrees. The blocked dependencies prevented dispatch; no separate orphaning
+  mechanism was found.
+
+## Constraints
+
+- Do not special-case field-test 08 or task ids.
+- Preserve fail-closed merge behavior: real conflicts still produce conflict
+  packets and block/repair; no whole-file ours/theirs shortcuts.
+- Merges into an integration branch should use the existing owning worktree
+  when Git reports the target branch is bound there.
+- Guard the merge primitive so concurrent nested child completions cannot
+  mutate the same integration branch simultaneously.

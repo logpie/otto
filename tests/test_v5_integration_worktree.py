@@ -12,7 +12,11 @@ import pytest
 from otto.lead import LeadResult, _render_prompt
 from otto.queue.task_graph import record_task, set_verdict
 from otto.spec_compile_flat import FlatSpec
-from otto.v5_branching import integration_branch_name
+from otto.v5_branching import (
+    child_branch_name,
+    integration_branch_name,
+    merge_child_into_integration,
+)
 from otto.v5_preflight import PreflightIssue
 
 
@@ -154,6 +158,61 @@ def test_modular_tier_prompt_allows_nested_child_when_explicit(tmp_path: Path) -
     assert "Honor the architecture-first shape from the parent" in rendered
     assert "explicitly asks for recursive sub-decomposition" in rendered
     assert "emit a small nested subtree" in rendered
+
+
+def test_child_merge_uses_existing_integration_worktree_owner(tmp_path: Path) -> None:
+    """Grandchildren merge into the integration branch's owning worktree."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    parent_task = "v5-parent"
+    integration = integration_branch_name(parent_task)
+    _git(repo, "branch", integration, "main")
+
+    integration_worktree = repo / ".worktrees" / f"integ-{parent_task}"
+    integration_worktree.parent.mkdir()
+    add_integration = _git(
+        repo,
+        "worktree",
+        "add",
+        "-q",
+        str(integration_worktree),
+        integration,
+    )
+    assert add_integration.returncode == 0, add_integration.stderr
+    assert _git(integration_worktree, "branch", "--show-current").stdout.strip() == integration
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "main"
+
+    child_task = "v5-grandchild"
+    child_worktree = repo / ".worktrees" / child_task
+    add_child = _git(
+        repo,
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        child_branch_name(child_task),
+        str(child_worktree),
+        integration,
+    )
+    assert add_child.returncode == 0, add_child.stderr
+    (child_worktree / "grandchild.txt").write_text("nested child output\n", encoding="utf-8")
+    _git(child_worktree, "add", "grandchild.txt")
+    commit = _git(child_worktree, "commit", "-q", "-m", "grandchild")
+    assert commit.returncode == 0, commit.stderr
+
+    ok, detail = merge_child_into_integration(
+        project_dir=repo,
+        child_task_id=child_task,
+        parent_integration_branch=integration,
+    )
+
+    assert ok, detail
+    assert "already used by worktree" not in detail
+    assert (integration_worktree / "grandchild.txt").read_text(encoding="utf-8") == (
+        "nested child output\n"
+    )
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "main"
 
 
 @pytest.mark.asyncio
