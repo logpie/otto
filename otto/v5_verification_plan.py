@@ -651,10 +651,25 @@ def _check_verdict_consistency(agent_verdict: dict[str, Any]) -> list[dict[str, 
     )]
 
 
-_DEPRECATION_RE = re.compile(
-    r"\b(?:DeprecationWarning|PendingDeprecationWarning)\b|"
-    r"(?:\bdeprecated\b.*\bwarning\b|\bwarning\b.*\bdeprecated\b)",
+_DEPRECATION_EMISSION_RE = re.compile(
+    r"^(?:(?P<path>.+?):(?P<line>\d+):\s*)?"
+    r"(?P<category>DeprecationWarning|PendingDeprecationWarning)\s*:\s*"
+    r"(?P<message>.+)$",
     re.IGNORECASE,
+)
+_NO_DEPRECATION_WARNING_RE = re.compile(
+    r"\b(?:0|zero)\s+(?:deprecation\s+)?warnings?\b|"
+    r"\b0\s+deprecations?\b|"
+    r"\bno\s+(?:deprecation\s+)?warnings?\b|"
+    r"\bno\s+deprecations?\b|"
+    r"\bwithout\s+(?:deprecation\s+)?warnings?\b|"
+    r"\bdeprecation(?:warning)?s?\s+filtered\b",
+    re.IGNORECASE,
+)
+_THIRD_PARTY_WARNING_PATH_PARTS = (
+    "/site-packages/",
+    "/dist-packages/",
+    "/node_modules/",
 )
 
 
@@ -692,16 +707,20 @@ def _deprecation_lines(text: str) -> list[str]:
         normalized = line.strip()
         if not normalized:
             continue
-        lowered = normalized.lower()
-        if (
-            "no deprecation" in lowered
-            or "without deprecation" in lowered
-            or "0 deprecation" in lowered
-        ):
+        if _NO_DEPRECATION_WARNING_RE.search(normalized):
             continue
-        if _DEPRECATION_RE.search(normalized):
-            hits.append(normalized[:240])
+        match = _DEPRECATION_EMISSION_RE.search(normalized)
+        if match is None:
+            continue
+        if _is_third_party_warning_path(str(match.group("path") or "")):
+            continue
+        hits.append(normalized[:240])
     return hits
+
+
+def _is_third_party_warning_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return any(part in normalized for part in _THIRD_PARTY_WARNING_PATH_PARTS)
 
 
 def _resolve_evidence_path(raw: str, roots: list[Path]) -> Path | None:
@@ -753,7 +772,7 @@ def _check_deprecation_warnings(
         "test_output_deprecations",
         passed,
         (
-            "no deprecation warnings found in verdict output or evidence logs"
+            "no product deprecation warnings found in verdict output or evidence logs"
             if passed
             else "deprecation warnings found in passing test output; fix them or downgrade"
         ),

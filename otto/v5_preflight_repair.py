@@ -93,6 +93,7 @@ class PreflightRepairController:
         chmod_repair: AutoRepairCallable | None = None,
         max_attempts_per_kind: int = 2,
         max_total_attempts: int = 3,
+        max_absolute_attempts: int = 10,
     ) -> None:
         self.session_dir = Path(session_dir)
         self.worktree_path = Path(worktree_path)
@@ -103,8 +104,10 @@ class PreflightRepairController:
         self.chmod_repair = chmod_repair or self._repair_permissions
         self.max_attempts_per_kind = max_attempts_per_kind
         self.max_total_attempts = max_total_attempts
+        self.max_absolute_attempts = max_absolute_attempts
         self._attempts_by_kind: defaultdict[str, int] = defaultdict(int)
         self._total_attempts = 0
+        self._consecutive_non_progress_attempts = 0
         self._seen_fingerprints: set[str] = set()
 
     @property
@@ -149,7 +152,14 @@ class PreflightRepairController:
                     preflight_payload=payload,
                     attempts=tuple(attempts),
                 )
-            payload = run_preflight()
+            next_payload = run_preflight()
+            next_issue = _first_blocking_issue(next_payload)
+            self._record_progress_after_attempt(
+                previous_issue=issue,
+                attempt=attempt,
+                next_issue=next_issue,
+            )
+            payload = next_payload
 
     async def repair_issue(self, issue: dict[str, Any]) -> RepairAttemptResult:
         classification = classify_preflight_issue(issue)
@@ -165,7 +175,15 @@ class PreflightRepairController:
                 reason="repeated_fingerprint",
                 fingerprint=fingerprint,
             )
-        if self._total_attempts >= self.max_total_attempts:
+        if self._total_attempts >= self.max_absolute_attempts:
+            return self._escalate(
+                issue,
+                failure_kind=failure_kind,
+                action=action,
+                reason="absolute_attempt_cap",
+                fingerprint=fingerprint,
+            )
+        if self._consecutive_non_progress_attempts >= self.max_total_attempts:
             return self._escalate(
                 issue,
                 failure_kind=failure_kind,
@@ -188,6 +206,18 @@ class PreflightRepairController:
         if action == "auto_fix":
             return await self._auto_fix(issue, classification, fingerprint)
         return await self._agent_fix(issue, classification, fingerprint)
+
+    def _record_progress_after_attempt(
+        self,
+        *,
+        previous_issue: dict[str, Any],
+        attempt: RepairAttemptResult,
+        next_issue: dict[str, Any] | None,
+    ) -> None:
+        if next_issue is None or _repair_attempt_made_progress(previous_issue, attempt, next_issue):
+            self._consecutive_non_progress_attempts = 0
+            return
+        self._consecutive_non_progress_attempts += 1
 
     async def _auto_fix(
         self,
@@ -492,6 +522,42 @@ def failure_fingerprint(issue: dict[str, Any], *, failure_kind: str) -> str:
     normalized = re.sub(r"/private/[^ \n]+|/tmp/[^ \n]+", "<tmp-path>", message)
     normalized = re.sub(r"\d+\.\d+s", "<duration>", normalized)
     return short_hash(f"{failure_kind}\n{normalized}", length=12)
+
+
+def _repair_attempt_made_progress(
+    previous_issue: dict[str, Any],
+    attempt: RepairAttemptResult,
+    next_issue: dict[str, Any],
+) -> bool:
+    if attempt.outcome == "repaired":
+        return True
+    previous_kind = classify_preflight_issue(previous_issue)["failure_kind"]
+    next_kind = classify_preflight_issue(next_issue)["failure_kind"]
+    if next_kind != previous_kind:
+        return True
+    previous_fingerprint = failure_fingerprint(previous_issue, failure_kind=previous_kind)
+    next_fingerprint = failure_fingerprint(next_issue, failure_kind=next_kind)
+    if next_fingerprint != previous_fingerprint:
+        return True
+    previous_ports = _unsatisfied_ports(previous_issue)
+    next_ports = _unsatisfied_ports(next_issue)
+    return (
+        previous_ports is not None
+        and next_ports is not None
+        and len(next_ports) < len(previous_ports)
+    )
+
+
+def _unsatisfied_ports(issue: dict[str, Any]) -> set[int] | None:
+    message = str(issue.get("message") or "")
+    match = re.search(r"ports?\s*\[([0-9,\s]+)\]\s+did\s+not\s+bind", message, re.IGNORECASE)
+    if not match:
+        return None
+    ports = {
+        int(raw)
+        for raw in re.findall(r"\d+", match.group(1))
+    }
+    return ports or None
 
 
 def _port_cleanup_repaired(detail: dict[str, Any]) -> bool:

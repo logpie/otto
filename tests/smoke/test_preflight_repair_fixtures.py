@@ -309,6 +309,72 @@ async def test_repeated_fingerprint_escalates_without_looping(tmp_path: Path) ->
     assert events[-1]["reason"] == "repeated_fingerprint"
 
 
+@pytest.mark.asyncio
+async def test_progressing_preflight_repairs_do_not_hit_old_total_cap(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    worktree = tmp_path / "repo"
+    session_dir.mkdir()
+    worktree.mkdir()
+    repairs: list[str] = []
+    payloads = [
+        _blocking_payload("clean_deploy_start_failed", "npm run build failed in frontend: TS2339"),
+        _blocking_payload(
+            "clean_deploy_ports_not_listening",
+            "After clean-state deploy, ports [5173, 8000, 8001] did not bind within 102s. Listening: none.",
+        ),
+        _blocking_payload(
+            "clean_deploy_port_busy",
+            "Declared ports [8000, 8001] already bound (likely zombies from prior runs). Cannot run clean-deploy.",
+        ),
+        _blocking_payload(
+            "clean_deploy_ports_not_listening",
+            "After clean-state deploy, ports [5173] did not bind within 102s. Listening: [8000, 8001].",
+        ),
+        _passing_payload(),
+    ]
+
+    def run_preflight() -> dict[str, Any]:
+        return payloads.pop(0)
+
+    async def repair(request: AgentRepairRequest) -> AgentRepairResult:
+        repairs.append(request.failure_kind)
+        return AgentRepairResult(ok=True, summary=f"fixed {request.failure_kind}")
+
+    controller = PreflightRepairController(
+        session_dir=session_dir,
+        worktree_path=worktree,
+        agent_repair=repair,
+        port_cleanup=lambda *_args: {"killed_ports": [8000], "bound_after": [], "repaired": True},
+    )
+
+    result = await controller.repair_until_clean(run_preflight)
+
+    assert result.terminal_state == "continued"
+    assert len(result.attempts) == 4
+    assert repairs == [
+        "clean_deploy_start_failed",
+        "clean_deploy_ports_not_listening",
+        "clean_deploy_ports_not_listening",
+    ]
+    events = _log_events(session_dir)
+    assert not any(event.get("reason") == "total_attempt_cap" for event in events)
+
+    no_progress_session = tmp_path / "no-progress-session"
+    no_progress_session.mkdir()
+    no_progress = PreflightRepairController(
+        session_dir=no_progress_session,
+        worktree_path=worktree,
+        port_cleanup=lambda *_args: {"killed_ports": [18080], "bound_after": [], "repaired": True},
+    )
+
+    stuck = await no_progress.repair_until_clean(
+        lambda: _blocking_payload("clean_deploy_port_busy", "Declared ports [18080] already bound")
+    )
+
+    assert stuck.terminal_state == "escalated"
+    assert _log_events(no_progress_session)[-1]["reason"] == "repeated_fingerprint"
+
+
 def test_safe_slug_handles_270_char_curl_verification_label(tmp_path: Path) -> None:
     label = "curl verification: " + (
         "GET http://127.0.0.1:3000/api/health?include=status&require=json "

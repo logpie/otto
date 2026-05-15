@@ -70,6 +70,7 @@ from otto.queue.task_graph import (
     record_task,
     set_verdict,
     tree_total_cost,
+    update_task_metadata,
 )
 from otto.spec_compile_flat import compile_flat_spec, FlatSpec
 from otto.v5_branching import MergeWorktreeDirtyError
@@ -753,6 +754,13 @@ def _block_child_before_upward_merge(
 ) -> LeadResult:
     logger.error("child %s blocked before upward merge: %s", child_task_id, reason)
     set_verdict(project_dir, child_task_id, "merge_blocked", cost_usd=result.cost_usd)
+    update_task_metadata(
+        project_dir,
+        child_task_id,
+        failure_reason=reason,
+        merge_blocked_origin="verification",
+        merge_blocked_reason=reason,
+    )
     result.verdict = "merge_blocked"
     result.failure_reason = reason
     if result.verify_result is None:
@@ -3312,6 +3320,17 @@ def _reconcile_recovered_children(
         child = get_task(project_dir, cid) or {}
         if child.get("verdict") != "merge_blocked":
             continue
+        if _merge_blocked_by_verification(child):
+            logger.info(
+                "reconcile: child %s remains merge_blocked because blocker origin is verification",
+                cid,
+            )
+            _emit(on_event, {
+                "event": "child_recovery_not_reconciled",
+                "task_id": cid,
+                "reason": "verification_blocked",
+            })
+            continue
         build_branch = child_branch_name(cid)
         # is-ancestor: build branch is reachable from integration branch
         try:
@@ -3346,6 +3365,22 @@ def _reconcile_recovered_children(
             "integration_branch": integration_branch,
         })
     return reconciled
+
+
+def _merge_blocked_by_verification(child: dict[str, Any]) -> bool:
+    origin = str(child.get("merge_blocked_origin") or "").strip().lower()
+    if origin in {"verification", "verify_repair", "runner_verification"}:
+        return True
+    reason = str(
+        child.get("merge_blocked_reason")
+        or child.get("failure_reason")
+        or ""
+    ).lower()
+    return (
+        "verify/repair" in reason
+        or "runner verification" in reason
+        or "verification downgraded" in reason
+    )
 
 
 def _emit(on_event: Any, payload: dict[str, Any]) -> None:

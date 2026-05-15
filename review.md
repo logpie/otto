@@ -899,6 +899,53 @@ Verification:
 
 ---
 
+## Implementation Gate — 2026-05-15 — Overnight iTracker correctness bugs
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, research/plan notes,
+red/green regression proof, requested regression batch, smoke tier, ruff,
+basedpyright, and direct diff review were used instead.
+
+Findings during implementation review:
+- [HIGH] The preflight repair cap was counting successful repairs as total
+  failure pressure. It now keeps the old repeated-fingerprint and per-kind
+  guards, treats repaired/changed/narrowed oracle output as progress, and adds
+  a separate absolute ceiling for pathological loops.
+- [HIGH] Deprecation detection was matching prose that merely mentioned
+  warnings. It now requires an emitted `DeprecationWarning:` line, ignores
+  zeroed/filtered success summaries, and filters third-party path origins such
+  as `site-packages`.
+- [HIGH] Runner downgrades were not written into `failure_reason`, leaving
+  partial summaries with an empty reason. Downgrades now update the session
+  result, summary reason, and mutable verify result consistently.
+- [HIGH] Step 0b reconciliation was branch-ancestry-only. Verification-blocked
+  children now carry durable `merge_blocked_origin=verification`, and
+  reconciliation refuses to convert those to `pass` without a real oracle
+  re-verification.
+- [NOTE] Unknown legacy `merge_blocked` children still reconcile by ancestry to
+  preserve the existing recovered-child behavior. New verification-blocked
+  paths are explicitly marked so they do not rely on ambiguous legacy state.
+
+Verification:
+- Red proof before production patch:
+  `uv run pytest -q tests/smoke/test_preflight_repair_fixtures.py::test_progressing_preflight_repairs_do_not_hit_old_total_cap tests/test_v5_verification_plan.py::test_deprecation_detection_filters_prose_dependencies_and_records_downgrade_reason tests/test_v5_step0b_recovery.py::test_reconcile_does_not_upgrade_verification_blocked_child_by_ancestry`
+  failed as expected: 3 failed.
+- Same focused command after implementation passed: 3 passed.
+- Required regression batch:
+  `uv run pytest -q tests/test_v5_p0_hardening.py tests/test_v5_p1_hardening.py tests/test_v5_p2_hardening.py tests/test_v5_pass4_hardening.py tests/test_v5_leaf_runtime_invariants.py tests/test_brittleness_guardrail.py tests/test_v5_integration_worktree.py tests/smoke tests/test_merge_queue.py tests/test_v5_verification_plan.py tests/test_v5_step0b_recovery.py`
+  passed: 210 passed.
+- Required smoke tier:
+  `uv run python scripts/test_tiers.py smoke` passed:
+  307 passed, 2473 deselected.
+- Touched-file lint:
+  `uv run ruff check otto/v5_preflight_repair.py otto/v5_verification_plan.py otto/lead.py otto/v5_runner.py otto/queue/task_graph.py tests/smoke/test_preflight_repair_fixtures.py tests/test_v5_verification_plan.py tests/test_v5_step0b_recovery.py`
+  passed.
+- Touched-file type check:
+  `uv run basedpyright --level error otto/v5_preflight_repair.py otto/v5_verification_plan.py otto/lead.py otto/v5_runner.py otto/queue/task_graph.py tests/smoke/test_preflight_repair_fixtures.py tests/test_v5_verification_plan.py tests/test_v5_step0b_recovery.py`
+  passed: 0 errors, 0 warnings, 0 notes.
+
+---
+
 ## Implementation Gate — 2026-05-15 — Pass 4 brittleness containment
 
 Codex MCP gate status: skipped because no `mcp__codex__codex` tool is

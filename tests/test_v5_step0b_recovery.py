@@ -21,6 +21,7 @@ These tests pin the fix:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from otto.lead import LeadResult, _render_prompt
@@ -323,6 +324,56 @@ def test_reconcile_leaves_unrecovered_children_alone(tmp_path: Path) -> None:
     final = get_task(tmp_path, child_tid)
     assert final is not None
     assert final.get("verdict") == "merge_blocked"  # preserved honest verdict
+
+
+def test_reconcile_does_not_upgrade_verification_blocked_child_by_ancestry(
+    tmp_path: Path,
+) -> None:
+    from otto.queue.task_graph import get_task, task_graph_path
+    from otto.v5_branching import child_branch_name
+    from otto.v5_runner import _reconcile_recovered_children
+    import subprocess
+
+    _init_git(tmp_path)
+    _commit(tmp_path, "initial")
+
+    verification_blocked = "v5-verify-blocked"
+    merge_blocked = "v5-merge-blocked"
+    for child_tid in (verification_blocked, merge_blocked):
+        child_branch = child_branch_name(child_tid)
+        subprocess.run(
+            ["git", "checkout", "-q", "-b", child_branch, "main"],
+            cwd=tmp_path,
+            check=True,
+        )
+        (tmp_path / f"{child_tid}.txt").write_text(f"{child_tid}\n", encoding="utf-8")
+        subprocess.run(["git", "add", f"{child_tid}.txt"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", child_tid], cwd=tmp_path, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "merge", "-q", "--no-ff", "--no-edit", child_branch],
+            cwd=tmp_path,
+            check=True,
+        )
+
+    record_task(tmp_path, task_id="root", intent="r", parent_task_id=None)
+    record_task(tmp_path, task_id=verification_blocked, intent="c", parent_task_id="root")
+    record_task(tmp_path, task_id=merge_blocked, intent="c", parent_task_id="root")
+    set_verdict(tmp_path, verification_blocked, "merge_blocked")
+    set_verdict(tmp_path, merge_blocked, "merge_blocked")
+    graph_path = task_graph_path(tmp_path)
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    graph["tasks"][verification_blocked]["merge_blocked_origin"] = "verification"
+    graph["tasks"][verification_blocked]["merge_blocked_reason"] = (
+        "Child remained 'partial' after verify/repair; refusing upward merge"
+    )
+    graph_path.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+
+    n = _reconcile_recovered_children(tmp_path, "root")
+
+    assert n == 1
+    assert (get_task(tmp_path, verification_blocked) or {}).get("verdict") == "merge_blocked"
+    assert (get_task(tmp_path, merge_blocked) or {}).get("verdict") == "pass"
 
 
 def test_managed_gitignore_migrates_legacy_sentinel(tmp_path: Path) -> None:

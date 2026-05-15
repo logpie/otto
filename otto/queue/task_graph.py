@@ -20,6 +20,8 @@ Schema:
                 "started_at": "iso8601",
                 "completed_at": "iso8601 or null",
                 "cost_usd": 0.0,
+                "failure_reason": "...",
+                "merge_blocked_origin": "merge | verification | ...",
                 "child_task_ids": ["..."],
                 "depends_on": ["..."]
             }
@@ -218,6 +220,32 @@ def set_verdict(
         graph["tasks"][task_id]["completed_at"] = _now_iso()
         if cost_usd is not None:
             graph["tasks"][task_id]["cost_usd"] = float(cost_usd)
+
+
+def update_task_metadata(
+    project_dir: Path,
+    task_id: str,
+    **metadata: Any,
+) -> None:
+    """Update extra durable task metadata without changing verdict semantics."""
+    clean = {key: value for key, value in metadata.items() if value is not None}
+    if not clean:
+        return
+    with _locked_graph(project_dir) as (_path, graph):
+        if task_id not in graph["tasks"]:
+            graph["tasks"][task_id] = {
+                "parent_task_id": None,
+                "intent": "",
+                "decomposition": "unknown",
+                "verdict": None,
+                "integration_branch": None,
+                "started_at": _now_iso(),
+                "completed_at": None,
+                "cost_usd": 0.0,
+                "child_task_ids": [],
+                "depends_on": [],
+            }
+        graph["tasks"][task_id].update(clean)
 
 
 def mark_reviewed_partial(

@@ -283,6 +283,7 @@ async def run_lead(
                     node_kind=("integration" if is_integration else "leaf"),
                     matrix_scope=_verification_matrix_scope(config),
                 )
+                previous_verdict = result.verdict
                 if runner_outcome.final_verdict in (
                     "pass",
                     "partial",
@@ -290,6 +291,11 @@ async def run_lead(
                     "merge_blocked",
                 ):
                     result.verdict = runner_outcome.final_verdict  # type: ignore[assignment]
+                if result.verdict != previous_verdict:
+                    failure_reason = _runner_downgrade_failure_reason(runner_outcome)
+                    result.verify_result["verdict"] = result.verdict
+                    result.verify_result["runner_downgrade_reason"] = failure_reason
+                    result.verify_result["failure_reason"] = failure_reason
                 if runner_outcome.runner_checks_summary:
                     result.verify_result["runner_checks"] = runner_outcome.runner_checks_summary
                     existing_summary = str(result.verify_result.get("summary") or "").strip()
@@ -671,6 +677,29 @@ def _verification_matrix_scope(config: dict[str, Any]) -> str:
     if value in {"leaf", "integration_only"}:
         return str(value)
     return "integration_only"
+
+
+def _runner_downgrade_failure_reason(runner_outcome: Any) -> str:
+    failed = [
+        c for c in (getattr(runner_outcome, "runner_checks_summary", []) or [])
+        if isinstance(c, dict) and c.get("status") == "fail"
+    ]
+    if failed:
+        details = []
+        for check in failed[:5]:
+            kind = str(check.get("kind") or check.get("id") or "runner_check")
+            detail = str(check.get("detail") or "failed").strip()
+            details.append(f"{kind}: {detail}")
+        suffix = "; ".join(details)
+        return f"runner verification downgraded verdict to {runner_outcome.final_verdict}: {suffix}"
+    journey_failures = list(getattr(runner_outcome, "journey_failures", []) or [])
+    if journey_failures:
+        joined = ", ".join(str(item) for item in journey_failures[:10])
+        return (
+            "runner verification downgraded verdict to "
+            f"{runner_outcome.final_verdict}: missing passed journeys: {joined}"
+        )
+    return f"runner verification downgraded verdict to {runner_outcome.final_verdict}"
 
 
 def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]:

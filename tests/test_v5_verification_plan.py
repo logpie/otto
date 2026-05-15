@@ -312,6 +312,136 @@ def test_deprecation_warnings_downgrade_passing_verdict(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_deprecation_detection_filters_prose_dependencies_and_records_downgrade_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, Any] = {}
+
+    def deprecation_outcome(
+        name: str,
+        *,
+        test_output: str = "",
+        evidence_text: str = "",
+    ) -> tuple[str, str, list[str]]:
+        project = tmp_path / name / "project"
+        session = tmp_path / name / "session"
+        project.mkdir(parents=True)
+        _passing_project(project, session)
+        verdict = _verdict()
+        if test_output:
+            verdict["test_output"] = test_output
+        if evidence_text:
+            log_path = session / "test_output.log"
+            _write(log_path, evidence_text)
+            verdict["evidence"] = [str(log_path)]
+        outcome = validate_lead_verdict(
+            project_dir=project,
+            worktree_dir=project,
+            session_dir=session,
+            agent_verdict=verdict,
+            initial_verdict="pass",
+        )
+        check = _checks_by_kind(outcome.verification_plan)["deprecation_warnings"][0]
+        return outcome.final_verdict, str(check["status"]), list(check["refs"]["warnings"])
+
+    filtered = deprecation_outcome(
+        "filtered",
+        test_output=(
+            "pytest.ini added: asyncio_mode=auto, passlib DeprecationWarning "
+            "filtered — 7/7 tests pass with 0 warnings"
+        ),
+    )
+    observed["filtered_zeroed_line_passes"] = filtered[:2] == ("pass", "pass") and not filtered[2]
+
+    dependency_only = deprecation_outcome(
+        "dependency",
+        evidence_text=(
+            "/tmp/project/backend/.venv/lib/python3.11/site-packages/passlib/utils/__init__.py:854: "
+            "DeprecationWarning: 'crypt' is deprecated and slated for removal\n"
+        ),
+    )
+    observed["site_packages_only_passes"] = (
+        dependency_only[:2] == ("pass", "pass") and not dependency_only[2]
+    )
+
+    product_warning = deprecation_outcome(
+        "product",
+        evidence_text=(
+            "backend/auth.py:38: DeprecationWarning: datetime.datetime.utcnow() is deprecated "
+            "and scheduled for removal in a future version\n"
+        ),
+    )
+    observed["product_warning_downgrades"] = (
+        product_warning[0] == "partial"
+        and product_warning[1] == "fail"
+        and "backend/auth.py" in product_warning[2][0]
+    )
+
+    from otto import lead as lead_mod
+
+    async def fake_agent(
+        _prompt: str,
+        _options: Any,
+        *,
+        log_dir: Path,
+        phase_name: str,
+        phase_label: str,
+        timeout: int,
+        project_dir: Path,
+    ) -> tuple[str, float, str, dict[str, Any]]:
+        del phase_name, phase_label, timeout, project_dir
+        session_dir = log_dir.parent
+        _write(session_dir / "verdict.json", json.dumps(_verdict()))
+        return "done", 0.0, "agent-session", {}
+
+    def fake_validate(**kwargs: Any) -> RunnerVerificationOutcome:
+        return RunnerVerificationOutcome(
+            final_verdict="partial",
+            verification_plan={"checks": []},
+            runner_checks_summary=[
+                {
+                    "kind": "deprecation_warnings",
+                    "id": "test_output_deprecations",
+                    "status": "fail",
+                    "detail": "product deprecation warning found",
+                }
+            ],
+            journey_failures=[],
+        )
+
+    monkeypatch.setattr("otto.agent.make_agent_options", lambda *_a, **_k: SimpleNamespace())
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_agent)
+    monkeypatch.setattr("otto.mcp_tools.create_otto_mcp_server", lambda **_k: object())
+    monkeypatch.setattr("otto.v5_verification_plan.validate_lead_verdict", fake_validate)
+
+    lead_session = tmp_path / "lead-session"
+    lead_result = await lead_mod.run_lead(
+        task_id="leaf",
+        intent="leaf",
+        project_dir=tmp_path / "lead-project",
+        session_dir=lead_session,
+        integration_branch="main",
+        config={},
+        kind="plan_or_inline",
+    )
+    lead_summary = json.loads((lead_session / "summary.json").read_text(encoding="utf-8"))
+    observed["downgrade_reason_recorded"] = (
+        lead_result.verdict == "partial"
+        and bool(lead_result.failure_reason)
+        and lead_result.failure_reason == lead_summary["failure_reason"]
+        and "deprecation_warnings" in lead_result.failure_reason
+    )
+
+    assert observed == {
+        "filtered_zeroed_line_passes": True,
+        "site_packages_only_passes": True,
+        "product_warning_downgrades": True,
+        "downgrade_reason_recorded": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_run_lead_passes_matrix_scope_to_runner_verifier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

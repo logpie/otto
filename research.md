@@ -1552,3 +1552,67 @@ Branch: `cc-i2p-2`
   when Git reports the target branch is bound there.
 - Guard the merge primitive so concurrent nested child completions cannot
   mutate the same integration branch simultaneously.
+
+---
+
+# Research: Overnight iTracker Correctness Bugs
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+Evidence project: `/Users/yuxuan/otto-projects/v5-itracker-overnight-024432`
+
+## Bug A: Preflight Repair Progress Cap
+
+- `otto/v5_preflight_repair.py` currently has a flat `max_total_attempts=3`.
+  `_total_attempts` increments before every repair, including successful repairs.
+- The evidence `preflight-repair.jsonl` shows three successful progress-making
+  repairs:
+  `clean_deploy_start_failed` repaired, then
+  `clean_deploy_ports_not_listening` repaired for ports `[5173, 8000, 8001]`,
+  then `port_busy` repaired. The fourth failure was narrower:
+  only `[5173]` missing while `[8000, 8001]` were listening.
+- Existing repeated-fingerprint and per-kind caps are still valid loop guards.
+  The flat total cap is the incorrect guard because it counts progress as
+  failure.
+
+## Bug B1: Deprecation Detector and Empty Downgrade Reasons
+
+- `otto/v5_verification_plan.py:_deprecation_lines()` currently matches broad
+  word combinations and only skips a few zero/negative phrases. That makes
+  prose such as `passlib DeprecationWarning filtered - 7/7 tests pass with 0
+  warnings` fail the deprecation check even though it says the warning was
+  filtered and zero warnings remain.
+- The evidence also shows dependency-only warnings under `.venv/.../site-packages`
+  from `passlib`, `pytest_asyncio`, `fastapi`, `starlette`, and `jose`. Those
+  should not become product-blocking leaf downgrades.
+- Some real product warnings are present in the Cycles leaf:
+  `backend/models.py`, `backend/auth.py`, `backend/main.py`, and
+  `backend/webhook_service.py` emitted `DeprecationWarning: datetime.utcnow()`
+  lines. The detector must still catch these.
+- `otto/lead.py` overwrites `result.verdict` with the runner-adjusted verdict
+  and appends `runner_checks`, but it does not set `failure_reason` when a
+  runner check downgrades a pass to partial/unverified/merge_blocked. The
+  capstone summaries therefore show `verdict=partial` with an empty
+  `failure_reason`.
+
+## Bug B2: Recovery Reconciliation Scope
+
+- `otto/v5_runner.py:_reconcile_recovered_children()` updates any direct child
+  with `verdict=merge_blocked` to `pass` when its child branch is an ancestor of
+  the parent integration branch.
+- That is valid for branch/merge-blocked children where Step 0b actually merged
+  the child branch and integration verification passed.
+- It is invalid for verification-blocked children. If a child was blocked
+  because runner verification downgraded its verdict or verify-repair remained
+  partial, branch ancestry only proves code reached the branch; it does not prove
+  the blocking oracle condition is now fixed.
+
+## Constraints
+
+- Keep detector-to-agent-repair gated by the oracle. Do not make warnings lenient
+  by default.
+- Keep per-kind and repeated-fingerprint preflight caps.
+- Add an absolute preflight safety ceiling so a pathological loop still ends.
+- Add focused regressions that fail on current production code and pass after the
+  patch.
