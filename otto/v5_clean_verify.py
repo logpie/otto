@@ -40,10 +40,14 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
+
+from otto.journey_scope_policy import ExecutionScope, applicability_for
+from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdicts
+from otto.spec_compile_flat import StructuredSpecValidationError, load_flat_spec
 
 Scope = Literal["scaffold", "subtree", "full"]
 
@@ -64,6 +68,11 @@ FailureKind = Literal[
     "port_busy",
     "start_failed",
     "ports_not_listening",
+    "ui_journey_failed",
+    "oracle_infra_error",
+    "verification_contract_invalid",
+    "verification_contract_missing",
+    "real_project_dirty",
     "internal_error",
 ]
 
@@ -628,6 +637,9 @@ def build_clean_verify_oracle_command(
     worktree_path: Path,
     verify_scope: Scope,
     repair_packet_path: Path | None = None,
+    spec_path: Path | None = None,
+    journey_scope: ExecutionScope = "subtree_integration",
+    journey_artifact_dir: Path | None = None,
 ) -> CleanVerifyOracleCommand:
     """Return the resolved CLI command stored in repair packets.
 
@@ -668,6 +680,17 @@ def build_clean_verify_oracle_command(
         repair_packet = str(Path(repair_packet_path).resolve(strict=False))
         command.extend(["--repair-packet", repair_packet])
         env["OTTO_REPAIR_PACKET_PATH"] = repair_packet
+    if spec_path is not None:
+        resolved_spec = str(Path(spec_path).resolve(strict=False))
+        command.extend(["--spec-path", resolved_spec])
+        env["OTTO_CLEAN_VERIFY_SPEC_PATH"] = resolved_spec
+    if journey_scope != "subtree_integration":
+        command.extend(["--journey-scope", journey_scope])
+    env["OTTO_CLEAN_VERIFY_JOURNEY_SCOPE"] = journey_scope
+    if journey_artifact_dir is not None:
+        resolved_artifacts = str(Path(journey_artifact_dir).resolve(strict=False))
+        command.extend(["--journey-artifact-dir", resolved_artifacts])
+        env["OTTO_CLEAN_VERIFY_JOURNEY_ARTIFACT_DIR"] = resolved_artifacts
     return CleanVerifyOracleCommand(
         command=command,
         env=env,
@@ -812,6 +835,163 @@ def _first_failed_step_id(steps: list[CleanOracleStepResult]) -> str | None:
     return None
 
 
+def _load_clean_oracle_journeys(
+    *,
+    behavior_journeys: list[dict[str, Any]] | None,
+    spec_path: Path | None,
+) -> tuple[list[dict[str, Any]], CleanOracleIssue | None]:
+    if behavior_journeys is not None:
+        return [dict(journey) for journey in behavior_journeys], None
+    if spec_path is None:
+        return [], None
+    if not spec_path.exists():
+        return [], None
+    try:
+        spec = load_flat_spec(spec_path)
+    except (OSError, json.JSONDecodeError, StructuredSpecValidationError) as exc:
+        step = _oracle_step(
+            step_id="ui_journeys",
+            status="failed",
+            return_code=1,
+            command=["load_flat_spec", str(spec_path)],
+            cwd=spec_path.parent,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        issue_kind = "verification_contract_invalid"
+        message = f"behavior journey contract could not be loaded: {type(exc).__name__}: {exc}"
+        return [], _issue_from_step(kind=issue_kind, message=message, step=step)
+    return [dict(journey) for journey in spec.behavior_journeys], None
+
+
+def _ui_journeys_for_scope(
+    journeys: list[dict[str, Any]],
+    journey_scope: ExecutionScope,
+) -> list[dict[str, Any]]:
+    if applicability_for(journey_scope, "ui") != "run":
+        return []
+    return [
+        journey
+        for journey in journeys
+        if isinstance(journey, dict)
+        and str(journey.get("verification_level") or "").strip() == "ui"
+    ]
+
+
+def _frontend_base_url(port_envs: list[tuple[str | None, int]], ports: list[int]) -> str:
+    preferred_names = ("FE", "FRONTEND", "WEB", "UI", "CLIENT")
+    for env_name, port in port_envs:
+        name = str(env_name or "").upper()
+        if any(marker in name for marker in preferred_names):
+            return f"http://127.0.0.1:{port}"
+    if ports:
+        return f"http://127.0.0.1:{ports[0]}"
+    return ""
+
+
+def _ui_journey_step_from_issue(issue: CleanOracleIssue) -> CleanOracleStepResult:
+    return CleanOracleStepResult(
+        id=issue.step_id,
+        status="failed",
+        return_code=1,
+        command_identity=issue.command_identity,
+        command=["ui_journeys"],
+        cwd="",
+        reason=issue.message,
+    )
+
+
+def _run_ui_journeys_clean_oracle_step(
+    *,
+    journeys: list[dict[str, Any]],
+    project: Path,
+    temp_root: Path,
+    base_url: str,
+    artifact_dir: Path,
+    timeout_s: int,
+    journey_scope: ExecutionScope,
+) -> tuple[CleanOracleStepResult, CleanOracleIssue | None]:
+    started_at = _iso_now()
+    started = time.monotonic()
+    if not base_url:
+        step = _oracle_step(
+            step_id="ui_journeys",
+            status="failed",
+            return_code=1,
+            command=["ui_journey_executor"],
+            cwd=temp_root,
+            started_at=started_at,
+            duration_s=time.monotonic() - started,
+            reason="ui journeys require at least one declared frontend port",
+        )
+        return step, _issue_from_step(
+            kind="oracle_infra_error",
+            message="ui journeys require at least one declared frontend port",
+            step=step,
+        )
+
+    from otto.journey_ui_executor import run_ui_journey_executor
+
+    probe = run_ui_journey_executor(
+        journeys=journeys,
+        base_url=base_url,
+        project_dir=project,
+        clean_project_dir=temp_root,
+        artifact_dir=artifact_dir,
+        timeout_s=timeout_s,
+    )
+    verdicts = resolve_journey_verdicts(
+        journeys=journeys,
+        execution_scope=journey_scope,
+        legacy_results=[],
+        executor_results=probe.executor_results,
+        registered_executor_levels={"ui"},
+    )
+    verdict_path = artifact_dir / "journey-verdicts.json"
+    verdict_path.parent.mkdir(parents=True, exist_ok=True)
+    verdict_path.write_text(
+        json.dumps(
+            {
+                "_written_at": _iso_now(),
+                "source": "journey_verdict_sink",
+                "journey_scope": journey_scope,
+                "base_url": base_url,
+                "executor_results": probe.executor_results,
+                "journey_verdicts": verdicts,
+                "artifact_paths": [str(path) for path in probe.artifact_paths],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    artifacts = [str(path) for path in probe.artifact_paths]
+    artifacts.append(str(verdict_path))
+    failures = failed_journey_ids(verdicts)
+    infra_error = probe.infra_error or ""
+    passed = not failures and not infra_error
+    reason = (
+        f"{len(verdicts)}/{len(verdicts)} ui journeys passed"
+        if passed
+        else infra_error or f"ui journeys failed: {', '.join(failures)}"
+    )
+    step = _oracle_step(
+        step_id="ui_journeys",
+        status="passed" if passed else "failed",
+        return_code=0 if passed else 1,
+        command=["ui_journey_executor", base_url],
+        cwd=temp_root,
+        started_at=started_at,
+        duration_s=time.monotonic() - started,
+        reason=reason,
+    )
+    step.artifact_paths.extend(artifacts)
+    if passed:
+        return step, None
+    issue_kind = "oracle_infra_error" if infra_error else "ui_journey_failed"
+    return step, _issue_from_step(kind=issue_kind, message=reason, step=step)
+
+
 def verify_from_clean_oracle(
     project_dir: Path,
     *,
@@ -820,6 +1000,10 @@ def verify_from_clean_oracle(
     port_wait_s: int = 12,
     preserve_temp: bool = False,
     logger_fn: Any = None,
+    journey_scope: ExecutionScope = "subtree_integration",
+    spec_path: Path | None = None,
+    behavior_journeys: list[dict[str, Any]] | None = None,
+    journey_artifact_dir: Path | None = None,
 ) -> CleanOracleResult:
     """Clean-state verifier with packet-grade step DAG evidence.
 
@@ -836,15 +1020,29 @@ def verify_from_clean_oracle(
     command_spec = build_clean_verify_oracle_command(
         worktree_path=project,
         verify_scope=scope,
+        spec_path=spec_path,
+        journey_scope=journey_scope,
+        journey_artifact_dir=journey_artifact_dir,
     )
     steps: list[CleanOracleStepResult] = []
     issues: list[CleanOracleIssue] = []
     artifact_refs: list[str] = []
     declared_ports: list[int] = []
+    declared_port_envs: list[tuple[str | None, int]] = []
     port_block_step_id: str | None = None
+    if applicability_for(journey_scope, "ui") == "run":
+        loaded_journeys, journey_contract_issue = _load_clean_oracle_journeys(
+            behavior_journeys=behavior_journeys,
+            spec_path=spec_path,
+        )
+        ui_journeys = _ui_journeys_for_scope(loaded_journeys, journey_scope)
+    else:
+        journey_contract_issue = None
+        ui_journeys = []
 
     if scope in ("subtree", "full"):
-        declared_ports = _parse_declared_ports(project)
+        declared_port_envs = _parse_declared_port_envs(project)
+        declared_ports = sorted({port for _env_name, port in declared_port_envs})
         busy = _check_ports_free(declared_ports)
         step = _oracle_step(
             step_id="precheck_ports",
@@ -870,6 +1068,8 @@ def verify_from_clean_oracle(
 
     temp_root = Path(tempfile.mkdtemp(prefix="otto-clean-"))
     artifact_refs.append(str(temp_root))
+    if journey_artifact_dir is not None:
+        artifact_refs.append(str(journey_artifact_dir))
     try:
         copy_started = time.monotonic()
         copied, copy_err = _copy_project_clean(project, temp_root)
@@ -1095,6 +1295,21 @@ def verify_from_clean_oracle(
                     cwd=temp_root,
                     reason="no start.sh",
                 ))
+                if ui_journeys:
+                    step = _oracle_step(
+                        step_id="ui_journeys",
+                        status="failed",
+                        return_code=1,
+                        command=["ui_journey_executor"],
+                        cwd=temp_root,
+                        reason="ui journeys require start.sh clean deployment",
+                    )
+                    steps.append(step)
+                    issues.append(_issue_from_step(
+                        kind="oracle_infra_error",
+                        message="ui journeys require start.sh clean deployment",
+                        step=step,
+                    ))
             elif upstream:
                 steps.append(_oracle_step(
                     step_id="start",
@@ -1104,6 +1319,48 @@ def verify_from_clean_oracle(
                     cwd=temp_root,
                 ))
             else:
+                ui_step: CleanOracleStepResult | None = None
+                ui_issue: CleanOracleIssue | None = None
+
+                def run_ui_probe(listening_ports: list[int]) -> None:
+                    nonlocal ui_step, ui_issue
+                    if journey_contract_issue is not None:
+                        ui_step = _ui_journey_step_from_issue(journey_contract_issue)
+                        ui_issue = journey_contract_issue
+                        return
+                    if not ui_journeys:
+                        return
+                    try:
+                        artifact_root = (
+                            journey_artifact_dir
+                            if journey_artifact_dir is not None
+                            else temp_root / "otto_artifacts" / "journeys"
+                        )
+                        base_url = _frontend_base_url(declared_port_envs, listening_ports)
+                        ui_step, ui_issue = _run_ui_journeys_clean_oracle_step(
+                            journeys=ui_journeys,
+                            project=project,
+                            temp_root=temp_root,
+                            base_url=base_url,
+                            artifact_dir=artifact_root,
+                            timeout_s=timeout_s,
+                            journey_scope=journey_scope,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        ui_step = _oracle_step(
+                            step_id="ui_journeys",
+                            status="failed",
+                            return_code=1,
+                            command=["ui_journey_executor"],
+                            cwd=temp_root,
+                            reason=f"{type(exc).__name__}: {exc}",
+                        )
+                        ui_issue = _issue_from_step(
+                            kind="oracle_infra_error",
+                            message=f"ui journey executor raised: {type(exc).__name__}: {exc}",
+                            step=ui_step,
+                        )
+
                 start_started = time.monotonic()
                 passed, kind, message, _start_steps, listening = _subtree_verify_start_sh(
                     temp_root,
@@ -1111,6 +1368,7 @@ def verify_from_clean_oracle(
                     timeout_s=timeout_s,
                     port_wait_s=port_wait_s,
                     log=log,
+                    after_listening=run_ui_probe,
                 )
                 start_step = _oracle_step(
                     step_id="start",
@@ -1135,6 +1393,11 @@ def verify_from_clean_oracle(
                     start_step.artifact_paths.append(
                         "listening_ports:" + ",".join(str(port) for port in listening)
                     )
+                if ui_step is not None:
+                    steps.append(ui_step)
+                    artifact_refs.extend(ui_step.artifact_paths)
+                if ui_issue is not None:
+                    issues.append(ui_issue)
 
         return CleanOracleResult.from_parts(
             passed=not issues,
@@ -1797,6 +2060,7 @@ def _subtree_verify_start_sh(
     timeout_s: int,
     port_wait_s: int,
     log: Any,
+    after_listening: Callable[[list[int]], None] | None = None,
 ) -> tuple[bool, FailureKind | None, str | None, list[str], list[int]]:
     """Run start.sh in temp_root, poll for declared ports. Returns
     (passed, failure_kind, message, steps_run, listening_ports)."""
@@ -1875,6 +2139,8 @@ def _subtree_verify_start_sh(
                     steps,
                     sorted(listening),
                 )
+        if after_listening is not None:
+            after_listening(sorted(listening))
         return True, None, None, steps, sorted(listening)
     finally:
         if proc and proc.poll() is None:

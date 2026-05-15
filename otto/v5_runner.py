@@ -756,6 +756,9 @@ def _build_repair_packet(
     scope_policy: str = "unrestricted",
     branch: str | None = None,
     repair_unit_extra: dict[str, Any] | None = None,
+    oracle_spec_path: Path | None = None,
+    oracle_journey_scope: ExecutionScope = "subtree_integration",
+    oracle_journey_artifact_dir: Path | None = None,
 ) -> RepairPacket:
     packet_dir = session_dir / "repair" / repair_slug
     packet_path = packet_dir / "repair_packet.json"
@@ -771,6 +774,9 @@ def _build_repair_packet(
         worktree_path=worktree_path,
         verify_scope=verify_scope,
         repair_packet_path=packet_path,
+        spec_path=oracle_spec_path,
+        journey_scope=oracle_journey_scope,
+        journey_artifact_dir=oracle_journey_artifact_dir,
     )
     if callable(latest_oracle_result):
         latest_payload = latest_oracle_result(oracle_command)
@@ -880,6 +886,7 @@ async def _run_preflight_payload_repair_session(
     integration_context: dict[str, Any] | None = None,
     allowed_paths: list[str] | None = None,
     scope_policy: str = "unrestricted",
+    journey_scope: ExecutionScope = "subtree_integration",
 ) -> dict[str, Any]:
     repair_slug = safe_slug(
         f"{task_id}-{repair_phase}-{initial_payload.get('phase') or initial_payload.get('check') or 'repair'}",
@@ -924,6 +931,9 @@ async def _run_preflight_payload_repair_session(
         allowed_paths=list(allowed_paths or []),
         scope_policy=scope_policy,
         branch=branch or integration_branch or "",
+        oracle_spec_path=session_dir / "spec" / "spec.json",
+        oracle_journey_scope=journey_scope,
+        oracle_journey_artifact_dir=session_dir / "journeys" / safe_slug(repair_phase, max_len=48),
     )
     _emit(on_event, {
         "event": f"{event_prefix}_repair_start",
@@ -1755,6 +1765,7 @@ async def run_v5_pipeline(
                     session_dir=integration_session_dir,
                     config=config,
                     integration_branch=None,
+                    journey_scope="root_integration",
                     on_event=on_event,
                 )
             if _preflight_repair_escalated(preflight_result):
@@ -1805,6 +1816,7 @@ async def run_v5_pipeline(
                     session_dir=integration_session_dir,
                     config=config,
                     integration_branch=None,
+                    journey_scope="root_integration",
                     on_event=on_event,
                 )
             if integration_result.verify_result is None:
@@ -3152,6 +3164,9 @@ def _run_integration_smoke_preflight(
     worktree_path: Path,
     task_id: str,
     phase: str,
+    journey_scope: ExecutionScope = "subtree_integration",
+    spec_path: Path | None = None,
+    journey_artifact_dir: Path | None = None,
     on_event: Any = None,
 ) -> dict[str, Any]:
     """Run clean-deploy smoke for an integration worktree and serialize it."""
@@ -3176,6 +3191,9 @@ def _run_integration_smoke_preflight(
             timeout_s=90,
             port_wait_s=12,
             logger_fn=lambda m: logger.info("preflight: %s", m),
+            journey_scope=journey_scope,
+            spec_path=spec_path,
+            journey_artifact_dir=journey_artifact_dir,
         )
         payload["clean_oracle_result"] = clean_oracle_result.to_jsonable()
         smoke_issues = preflight_issues_from_clean_oracle(
@@ -3237,15 +3255,21 @@ async def _run_integration_smoke_preflight_with_repair(
     session_dir: Path,
     config: dict[str, Any],
     integration_branch: str | None,
+    journey_scope: ExecutionScope = "subtree_integration",
     on_event: Any = None,
 ) -> dict[str, Any]:
     """Run clean-deploy smoke and repair blocking issues before continuing."""
+    spec_path = session_dir / "spec" / "spec.json"
+    journey_artifact_dir = session_dir / "journeys" / safe_slug(phase, max_len=48)
 
     def run_once() -> dict[str, Any]:
         return _run_integration_smoke_preflight(
             worktree_path=worktree_path,
             task_id=task_id,
             phase=phase,
+            journey_scope=journey_scope,
+            spec_path=spec_path,
+            journey_artifact_dir=journey_artifact_dir,
             on_event=on_event,
         )
 
@@ -3269,6 +3293,7 @@ async def _run_integration_smoke_preflight_with_repair(
         integration_context={
             "smoke_phase": phase,
         },
+        journey_scope=journey_scope,
     )
 
 

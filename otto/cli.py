@@ -298,15 +298,51 @@ def web_command(
     default=None,
     help="Repair packet snapshot path; also read from OTTO_REPAIR_PACKET_PATH.",
 )
+@click.option(
+    "--spec-path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Flat spec path containing behavior_journeys for journey probes.",
+)
+@click.option(
+    "--journey-scope",
+    type=click.Choice(["leaf", "subtree_integration", "root_integration"]),
+    default=None,
+    help="Behavior journey execution scope for clean-oracle probes.",
+)
+@click.option(
+    "--journey-artifact-dir",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Directory for UI journey probe artifacts.",
+)
 def clean_verify_command(
     json_output: bool,
     verify_scope: str,
     repair_packet: Path | None,
+    spec_path: Path | None,
+    journey_scope: str | None,
+    journey_artifact_dir: Path | None,
 ) -> None:
     """Run the deterministic clean-deploy oracle for this worktree."""
     from otto.v5_clean_verify import Scope, verify_from_clean_oracle
 
-    result = verify_from_clean_oracle(Path.cwd(), scope=cast(Scope, verify_scope))
+    env_spec = os.environ.get("OTTO_CLEAN_VERIFY_SPEC_PATH", "").strip()
+    env_journey_scope = os.environ.get("OTTO_CLEAN_VERIFY_JOURNEY_SCOPE", "").strip()
+    env_artifact_dir = os.environ.get("OTTO_CLEAN_VERIFY_JOURNEY_ARTIFACT_DIR", "").strip()
+    result = verify_from_clean_oracle(
+        Path.cwd(),
+        scope=cast(Scope, verify_scope),
+        spec_path=spec_path or (Path(env_spec) if env_spec else None),
+        journey_scope=cast(
+            Any,
+            journey_scope or env_journey_scope or "subtree_integration",
+        ),
+        journey_artifact_dir=(
+            journey_artifact_dir
+            or (Path(env_artifact_dir) if env_artifact_dir else None)
+        ),
+    )
     packet_path = repair_packet
     if packet_path is None:
         env_packet = os.environ.get("OTTO_REPAIR_PACKET_PATH", "").strip()
