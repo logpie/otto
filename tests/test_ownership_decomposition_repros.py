@@ -127,7 +127,7 @@ async def test_shared_foundation_contracts_block_feature_dispatch_after_architec
         parent_task_id=ROOT_TASK_ID,
         intent="Architect scaffold",
         integration_branch="main",
-        owned_paths=["backend/"],
+        owned_paths=["backend/", "frontend/"],
     )
     set_verdict(repo, "architect", "pass")
     update_task_metadata(

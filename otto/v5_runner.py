@@ -525,7 +525,7 @@ def _foundation_contract_write_feedback(
         owner_id = str(contract.get("owner_task_id") or "").strip()
         if not contract_path:
             continue
-        if acting_task_id == owner_id or role == "contract_amendment":
+        if acting_task_id == owner_id:
             continue
         overlapping = [path for path in normalized_changes if _path_overlaps(path, contract_path)]
         if overlapping:
@@ -2083,6 +2083,10 @@ def _branch_is_ancestor(project_dir: Path, branch: str, target: str) -> tuple[bo
 
 
 def _task_entry_allows_upward_merge(entry: dict[str, Any]) -> bool:
+    if str(entry.get("verdict") or "") == "merge_blocked":
+        return False
+    if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
+        return False
     verdict = str(entry.get("verdict") or "")
     if verdict == "pass":
         return True
@@ -2946,16 +2950,9 @@ def _foundation_scheduler_feedback(
     foundation_ids = [
         task_id
         for task_id, task in sibling_items
-        if _is_foundation_task(task)
+        if task.get("task_role") == "foundation"
     ]
     if not foundation_ids:
-        return None
-    has_declared_contracts = bool(contracts) or any(
-        bool((task or {}).get("foundation_contracts"))
-        for _task_id, task in sibling_items
-        if _is_foundation_task(task)
-    )
-    if not has_declared_contracts:
         return None
     ready_features = [
         str(entry.get("task_id") or "")
@@ -2970,21 +2967,41 @@ def _foundation_scheduler_feedback(
         if task_id in in_flight_task_ids
         or not _task_entry_allows_upward_merge(tasks.get(task_id) or {})
     ]
+    terminal_blocked_foundations = [
+        task_id
+        for task_id in foundation_ids
+        if _foundation_entry_is_terminal_blocked(tasks.get(task_id) or {})
+    ]
     contract_findings = _foundation_contract_findings(contracts)
     if unverified_foundations or not contracts or contract_findings:
+        affected_features = [
+            str(task_id)
+            for task_id, task in sibling_items
+            if str((task or {}).get("task_role") or "feature") == "feature"
+            and not _task_entry_allows_upward_merge(task or {})
+            and str((task or {}).get("verdict") or "") != "merge_blocked"
+        ]
         return {
             "kind": "shared_foundation_not_ready",
             "step_id": "foundation_scheduler_ordering",
             "message": "feature dispatch held until foundation siblings pass and foundation contracts are valid",
             "parent_task_id": parent_task_id,
             "ready_feature_task_ids": ready_features,
+            "affected_feature_task_ids": affected_features,
             "foundation_task_ids": foundation_ids,
             "unverified_foundation_task_ids": unverified_foundations,
+            "terminal_blocked_foundation_task_ids": terminal_blocked_foundations,
             "contracts_present": bool(contracts),
             "contract_findings": contract_findings,
             "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
     return None
+
+
+def _foundation_entry_is_terminal_blocked(entry: dict[str, Any]) -> bool:
+    if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
+        return True
+    return str(entry.get("verdict") or "") in {"merge_blocked", "catastrophic", "unverified"}
 
 
 def _foundation_isolation_feedback(
@@ -3039,6 +3056,30 @@ def _foundation_isolation_feedback(
                     "kind": "feature_overlaps_foundation_contract",
                     "task_id": str(task_id),
                     "owned_paths": overlaps,
+                    "contract_path": contract_path,
+                    "owner_task_id": owner_id,
+                })
+            owner = tasks.get(owner_id) if owner_id else None
+            owner_paths = _task_owned_paths(owner) if isinstance(owner, dict) else []
+            exclusive_trees = [
+                owned
+                for owned in owner_paths
+                if owned and _path_overlaps(contract_path, owned)
+            ]
+            nested_under_foundation = [
+                {
+                    "owned_path": owned,
+                    "foundation_tree": tree,
+                }
+                for owned in owned_paths
+                for tree in exclusive_trees
+                if _path_overlaps(owned, tree)
+            ]
+            if nested_under_foundation:
+                findings.append({
+                    "kind": "feature_nested_under_foundation_tree",
+                    "task_id": str(task_id),
+                    "overlaps": nested_under_foundation,
                     "contract_path": contract_path,
                     "owner_task_id": owner_id,
                 })
@@ -3618,6 +3659,44 @@ async def _process_children(
         )
         if scheduler_feedback is not None:
             ready_feature_ids = set(scheduler_feedback.get("ready_feature_task_ids") or [])
+            terminal_foundation_ids = [
+                str(task_id)
+                for task_id in (scheduler_feedback.get("terminal_blocked_foundation_task_ids") or [])
+                if str(task_id)
+            ]
+            if terminal_foundation_ids:
+                affected_feature_ids = [
+                    str(task_id)
+                    for task_id in (scheduler_feedback.get("affected_feature_task_ids") or ready_feature_ids)
+                    if str(task_id)
+                ]
+                block_reason = dict(scheduler_feedback)
+                block_reason["kind"] = "foundation_unsatisfied"
+                block_reason["step_id"] = "foundation_scheduler_terminal_block"
+                block_reason["message"] = (
+                    "feature blocked because a sibling foundation task is terminal and "
+                    "foundation contracts cannot be satisfied"
+                )
+                for feature_id in affected_feature_ids:
+                    result = child_results.get(feature_id) or LeadResult(
+                        task_id=feature_id,
+                        verdict="merge_blocked",
+                        decomposition="inline",
+                    )
+                    _record_task_merge_blocked_reason(
+                        project_dir=project_dir,
+                        task_id=feature_id,
+                        result=result,
+                        reason=block_reason["message"],
+                        origin="foundation_scheduler",
+                        structured_reason=block_reason,
+                    )
+                    child_results[feature_id] = result
+                _emit(on_event, {
+                    "event": "foundation_feature_dispatch_blocked",
+                    "parent_task_id": parent_task_id,
+                    "structured_reason": block_reason,
+                })
             ready = [
                 entry for entry in ready if str(entry.get("task_id") or "") not in ready_feature_ids
             ]
