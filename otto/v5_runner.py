@@ -857,6 +857,275 @@ def _schedule_foundation_contract_amendment(
     return amendment_id
 
 
+def _smoke_payload_paths(payload: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    for issue in payload.get("issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        for key in ("path", "file"):
+            normalized = _normalize_contract_path(str(issue.get(key) or ""))
+            if normalized:
+                paths.append(normalized)
+        for raw in issue.get("paths") or []:
+            normalized = _normalize_contract_path(str(raw))
+            if normalized:
+                paths.append(normalized)
+    repair = payload.get("repair")
+    if isinstance(repair, dict):
+        for raw in repair.get("attempted_paths") or []:
+            normalized = _normalize_contract_path(str(raw))
+            if normalized:
+                paths.append(normalized)
+    return sorted(dict.fromkeys(paths))
+
+
+def _smoke_payload_within_task_scope(
+    payload: dict[str, Any],
+    task: dict[str, Any],
+) -> bool:
+    issue_paths = _smoke_payload_paths(payload)
+    owned_paths = _task_owned_paths(task)
+    if not issue_paths or not owned_paths:
+        return False
+    return all(
+        any(_path_overlaps(issue_path, owned) for owned in owned_paths)
+        for issue_path in issue_paths
+    )
+
+
+def _smoke_repair_feedback(
+    *,
+    child_task_id: str,
+    parent_task_id: str,
+    parent_integration_branch: str,
+    source_branch: str,
+    pre_merge_ref: str,
+    smoke_payload: dict[str, Any],
+    repair_path: str,
+    owner_id: str,
+    repair_route: str,
+    event_name: str,
+) -> dict[str, Any]:
+    messages = [
+        str(issue.get("message") or issue.get("kind"))
+        for issue in smoke_payload.get("issues") or []
+        if isinstance(issue, dict)
+        and issue.get("severity") in ("error", "block")
+    ]
+    message = (
+        "integration smoke detected an out-of-scope clean-deploy failure"
+        + (": " + "; ".join(messages) if messages else "")
+    )
+    return {
+        "kind": event_name,
+        "step_id": repair_route,
+        "message": message,
+        "task_id": child_task_id,
+        "parent_task_id": parent_task_id,
+        "parent_integration_branch": parent_integration_branch,
+        "source_branch": source_branch,
+        "pre_merge_ref": pre_merge_ref,
+        "paths": _smoke_payload_paths(smoke_payload),
+        "repair_path": repair_path,
+        "owner_task_id": owner_id,
+        "smoke_payload": smoke_payload,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def _schedule_smoke_repair_needed(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    child_worktree: Path,
+    child_session_dir: Path,
+    parent_task_id: str,
+    parent_integration_branch: str,
+    source_branch: str,
+    pre_merge_ref: str,
+    smoke_payload: dict[str, Any],
+    contract: dict[str, Any] | None,
+    on_event: Any = None,
+) -> str:
+    issue_paths = _smoke_payload_paths(smoke_payload)
+    repair_path = _normalize_contract_path(
+        str((contract or {}).get("path") or (issue_paths[0] if issue_paths else ""))
+    )
+    owner_id = str((contract or {}).get("owner_task_id") or parent_task_id).strip()
+    is_foundation = contract is not None
+    repair_route = "foundation_contract_amendment" if is_foundation else "integration_smoke_repair"
+    event_name = "foundation_repair_needed" if is_foundation else "integration_repair_needed"
+    attempt_count = _increment_contract_amendment_attempt(
+        project_dir,
+        child_task_id,
+        repair_path or "integration_smoke_repair",
+    )
+    intent = (
+        "Repair integration smoke clean-deploy failure for "
+        f"`{repair_path or 'the integration surface'}` after leaf `{child_task_id}` "
+        "detected an out-of-scope failure. Preserve the blocked leaf's scoped "
+        "conflict repair and satisfy the integration smoke check."
+    )
+    amendment_id = enqueue_subtask(
+        project_dir=project_dir,
+        parent_task_id=parent_task_id,
+        parent_session_dir=child_session_dir,
+        intent=intent,
+        owned_paths=[repair_path] if repair_path else [],
+        task_role="contract_amendment",
+        parent_integration_branch=parent_integration_branch,
+    )
+    record_task(
+        project_dir,
+        task_id=amendment_id,
+        parent_task_id=parent_task_id,
+        intent=intent,
+        integration_branch=parent_integration_branch,
+        owned_paths=[repair_path] if repair_path else [],
+        task_role="contract_amendment",
+    )
+    feedback = _smoke_repair_feedback(
+        child_task_id=child_task_id,
+        parent_task_id=parent_task_id,
+        parent_integration_branch=parent_integration_branch,
+        source_branch=source_branch,
+        pre_merge_ref=pre_merge_ref,
+        smoke_payload=smoke_payload,
+        repair_path=repair_path,
+        owner_id=owner_id,
+        repair_route=repair_route,
+        event_name=event_name,
+    )
+    update_task_metadata(
+        project_dir,
+        amendment_id,
+        contract_amendment={
+            "contract_path": repair_path,
+            "owner_task_id": owner_id,
+            "blocked_task_id": child_task_id,
+            "source_branch": source_branch,
+            "pre_merge_ref": pre_merge_ref,
+            "attempt_count": attempt_count,
+            "max_attempts": MAX_CONTRACT_AMENDMENT_ATTEMPTS,
+            "repair_route": repair_route,
+        },
+        contract_amendment_path=repair_path,
+        contract_amendment_owner_task_id=owner_id,
+        repair_route=repair_route,
+        smoke_repair_payload=smoke_payload,
+    )
+    set_contract_amendment_blocked(
+        project_dir,
+        child_task_id,
+        amendment_id,
+        reason=feedback["message"],
+        merge_context={
+            "child_session_dir": str(child_session_dir),
+            "child_worktree": str(child_worktree),
+            "parent_integration_branch": parent_integration_branch,
+            "source_branch": source_branch,
+            "pre_merge_ref": pre_merge_ref,
+            "union_feedback": feedback,
+        },
+    )
+    _emit(on_event, {
+        "event": event_name,
+        "task_id": child_task_id,
+        "amendment_task_id": amendment_id,
+        "repair_task_id": amendment_id,
+        "repair_route": repair_route,
+        "repair_path": repair_path,
+        "owner_task_id": owner_id,
+        "parent_task_id": parent_task_id,
+        "attempt_count": attempt_count,
+        "max_attempts": MAX_CONTRACT_AMENDMENT_ATTEMPTS,
+        "structured_reason": feedback,
+    })
+    return amendment_id
+
+
+def _route_out_of_scope_smoke_failure(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    child_worktree: Path,
+    child_session_dir: Path,
+    parent_integration_branch: str,
+    source_branch: str,
+    pre_merge_ref: str,
+    smoke_payload: dict[str, Any],
+    result: LeadResult,
+    on_event: Any = None,
+) -> bool:
+    if not _integration_smoke_blocks(smoke_payload):
+        return False
+    child = get_task(project_dir, child_task_id) or {}
+    if _smoke_payload_within_task_scope(smoke_payload, child):
+        return False
+    parent_task_id = _parent_task_id_for_child(
+        project_dir,
+        child_task_id,
+        parent_integration_branch,
+    )
+    feedback = {
+        "paths": _smoke_payload_paths(smoke_payload),
+        "integration_context": {"smoke_payload": smoke_payload},
+    }
+    contract = _foundation_contract_for_feedback_path(
+        project_dir=project_dir,
+        parent_task_id=parent_task_id,
+        child_task_id=child_task_id,
+        feedback=feedback,
+    )
+    repair_path = _normalize_contract_path(
+        str((contract or {}).get("path") or ((_smoke_payload_paths(smoke_payload) or [""])[0]))
+    )
+    current_attempts = _contract_amendment_attempt_count(child, repair_path)
+    if current_attempts >= MAX_CONTRACT_AMENDMENT_ATTEMPTS:
+        exhausted = _contract_amendment_exhausted_feedback(
+            child_task_id=child_task_id,
+            parent_task_id=parent_task_id,
+            parent_integration_branch=parent_integration_branch,
+            source_branch=source_branch,
+            pre_merge_ref=pre_merge_ref,
+            contract_path=repair_path,
+            owner_id=str((contract or {}).get("owner_task_id") or parent_task_id),
+            union_feedback={
+                "message": _preflight_blocking_summary(
+                    "Integration smoke repair attempts exhausted",
+                    smoke_payload,
+                ),
+                "smoke_payload": smoke_payload,
+            },
+            attempt_count=current_attempts,
+        )
+        _record_structured_merge_failed(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=str(exhausted["message"]),
+            origin="contract_amendment",
+            phase="integration_smoke_repair",
+            structured_reason=exhausted,
+            on_event=on_event,
+        )
+        return True
+    _schedule_smoke_repair_needed(
+        project_dir=project_dir,
+        child_task_id=child_task_id,
+        child_worktree=child_worktree,
+        child_session_dir=child_session_dir,
+        parent_task_id=parent_task_id,
+        parent_integration_branch=parent_integration_branch,
+        source_branch=source_branch,
+        pre_merge_ref=pre_merge_ref,
+        smoke_payload=smoke_payload,
+        contract=contract,
+        on_event=on_event,
+    )
+    return True
+
+
 def _tasks_blocked_on_amendment(project_dir: Path, amendment_id: str) -> list[str]:
     graph = read_graph(project_dir)
     blocked: list[str] = []
@@ -5368,22 +5637,56 @@ async def _repair_stale_target_and_retry_merge(
 
     if ok and run_smoke_preflight:
         try:
-            oracle = await _run_integration_smoke_preflight_with_repair(
-                project_dir=project_dir,
+            oracle = _run_integration_smoke_preflight(
                 worktree_path=project_dir,
                 task_id=child_task_id,
                 phase="child_merge_conflict_repair",
-                session_dir=child_session_dir,
-                config=config,
-                integration_branch=parent_integration_branch,
+                spec_path=child_session_dir / "spec" / "spec.json",
+                journey_artifact_dir=(
+                    child_session_dir
+                    / "journeys"
+                    / safe_slug("child_merge_conflict_repair", max_len=48)
+                ),
                 on_event=on_event,
             )
             if _preflight_repair_escalated(oracle) or _integration_smoke_blocks(oracle):
-                ok = False
-                merge_detail = _preflight_blocking_summary(
-                    "Child merge conflict repair smoke oracle failed",
-                    oracle,
+                if _route_out_of_scope_smoke_failure(
+                    project_dir=project_dir,
+                    child_task_id=child_task_id,
+                    child_worktree=child_worktree,
+                    child_session_dir=child_session_dir,
+                    parent_integration_branch=parent_integration_branch,
+                    source_branch=source_branch,
+                    pre_merge_ref=pre_merge_ref,
+                    smoke_payload=oracle,
+                    result=result,
+                    on_event=on_event,
+                ):
+                    return _StaleTargetRetryResult(
+                        ok=False,
+                        detail=_preflight_blocking_summary(
+                            "Child merge conflict repair smoke routed to owner",
+                            oracle,
+                        ),
+                        pre_merge_ref=pre_merge_ref,
+                        terminal_recorded=True,
+                    )
+                oracle = await _run_integration_smoke_preflight_with_repair(
+                    project_dir=project_dir,
+                    worktree_path=project_dir,
+                    task_id=child_task_id,
+                    phase="child_merge_conflict_repair",
+                    session_dir=child_session_dir,
+                    config=config,
+                    integration_branch=parent_integration_branch,
+                    on_event=on_event,
                 )
+                if _preflight_repair_escalated(oracle) or _integration_smoke_blocks(oracle):
+                    ok = False
+                    merge_detail = _preflight_blocking_summary(
+                        "Child merge conflict repair smoke oracle failed",
+                        oracle,
+                    )
         except Exception as exc:  # noqa: BLE001 - keep stale-target terminal structured
             ok = False
             merge_detail = (
@@ -5615,14 +5918,16 @@ async def _merge_child_branch(
                 detail = f"merge after conflict repair crashed: {type(exc).__name__}: {exc}"
             if ok:
                 try:
-                    oracle = await _run_integration_smoke_preflight_with_repair(
-                        project_dir=project_dir,
+                    oracle = _run_integration_smoke_preflight(
                         worktree_path=project_dir,
                         task_id=child_task_id,
                         phase="child_merge_conflict_repair",
-                        session_dir=child_session_dir,
-                        config=config,
-                        integration_branch=parent_integration_branch,
+                        spec_path=child_session_dir / "spec" / "spec.json",
+                        journey_artifact_dir=(
+                            child_session_dir
+                            / "journeys"
+                            / safe_slug("child_merge_conflict_repair", max_len=48)
+                        ),
                         on_event=on_event,
                     )
                 except Exception as exc:  # noqa: BLE001 - terminal block must stay structured
@@ -5684,6 +5989,65 @@ async def _merge_child_branch(
                     )
                     return
                 if smoke_blocks:
+                    if _route_out_of_scope_smoke_failure(
+                        project_dir=project_dir,
+                        child_task_id=child_task_id,
+                        child_worktree=child_worktree,
+                        child_session_dir=child_session_dir,
+                        parent_integration_branch=parent_integration_branch,
+                        source_branch=source_branch,
+                        pre_merge_ref=pre_merge_ref,
+                        smoke_payload=oracle,
+                        result=result,
+                        on_event=on_event,
+                    ):
+                        return
+                    try:
+                        oracle = await _run_integration_smoke_preflight_with_repair(
+                            project_dir=project_dir,
+                            worktree_path=project_dir,
+                            task_id=child_task_id,
+                            phase="child_merge_conflict_repair",
+                            session_dir=child_session_dir,
+                            config=config,
+                            integration_branch=parent_integration_branch,
+                            on_event=on_event,
+                        )
+                        if not (
+                            _preflight_repair_escalated(oracle)
+                            or _integration_smoke_blocks(oracle)
+                        ):
+                            smoke_blocks = False
+                    except Exception as exc:  # noqa: BLE001 - terminal block must stay structured
+                        detail = (
+                            "Child merge conflict repair smoke oracle crashed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        feedback = _child_merge_conflict_smoke_failed_feedback(
+                            child_task_id=child_task_id,
+                            parent_integration_branch=parent_integration_branch,
+                            source_branch=source_branch,
+                            pre_merge_ref=pre_merge_ref,
+                            detail=detail,
+                            oracle=oracle if isinstance(oracle, dict) else None,
+                            exc=exc,
+                        )
+                        _record_structured_merge_failed(
+                            project_dir=project_dir,
+                            task_id=child_task_id,
+                            result=result,
+                            reason=detail,
+                            origin="child_merge_conflict_smoke",
+                            phase="child_merge_conflict_repair",
+                            structured_reason=feedback,
+                            on_event=on_event,
+                        )
+                        return
+                if smoke_blocks:
+                    detail = _preflight_blocking_summary(
+                        "Child merge conflict repair smoke oracle failed",
+                        oracle,
+                    )
                     feedback = _child_merge_conflict_smoke_failed_feedback(
                         child_task_id=child_task_id,
                         parent_integration_branch=parent_integration_branch,

@@ -986,10 +986,21 @@ async def _maybe_await(value: Any) -> Any:
 
 
 def _repair_prompt(packet: RepairPacket) -> str:
+    allowed_paths = [str(path) for path in packet.repair_unit.get("allowed_paths") or []]
+    if allowed_paths:
+        scope_text = (
+            "Repair only the scoped paths in this repair unit so the scoped "
+            "conflict/merge gate can proceed. Do not widen the repair to the "
+            "full acceptance oracle or unrelated clean-deploy failures. "
+        )
+    else:
+        scope_text = (
+            "Repair this worktree so the full acceptance oracle passes: clean-deploy "
+            "plus the composite landing gate (scope, conflict markers, dirty state, "
+            "and graph/verdict invariants). "
+        )
     return (
-        "Repair this worktree so the full acceptance oracle passes: clean-deploy "
-        "plus the composite landing gate (scope, conflict markers, dirty state, "
-        "and graph/verdict invariants). Preserve the product contract, P0-P4 "
+        f"{scope_text}Preserve the product contract, P0-P4 "
         "merge invariants, and owned-path/scope rules. "
         "Diagnose from the complete evidence packet. Run the oracle as your "
         "acceptance loop. Stop only when the oracle passes or you can produce a "

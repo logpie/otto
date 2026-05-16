@@ -230,7 +230,8 @@ async def test_merge_conflict_repair_does_not_expand_leaf_scope_into_clean_deplo
     session_dir = repo / "otto_logs" / "sessions" / "session-leaf"
     _write_session_spec(session_dir)
     merge_calls = 0
-    smoke_calls: list[dict[str, Any]] = []
+    smoke_repair_calls: list[dict[str, Any]] = []
+    detection_smoke_calls: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
 
     def fake_merge(**_kwargs: Any) -> tuple[bool, str]:
@@ -243,8 +244,12 @@ async def test_merge_conflict_repair_does_not_expand_leaf_scope_into_clean_deplo
     async def fake_conflict_repair(**_kwargs: Any) -> tuple[bool, str]:
         return True, "resolved backend/auth.py only"
 
-    async def fake_smoke(**kwargs: Any) -> dict[str, Any]:
-        smoke_calls.append(kwargs)
+    async def fake_smoke_repair(**kwargs: Any) -> dict[str, Any]:
+        smoke_repair_calls.append(kwargs)
+        return {"passed": True, "issues": []}
+
+    def fake_detection_smoke(**kwargs: Any) -> dict[str, Any]:
+        detection_smoke_calls.append(kwargs)
         return {
             "passed": False,
             "issues": [
@@ -264,7 +269,8 @@ async def test_merge_conflict_repair_does_not_expand_leaf_scope_into_clean_deplo
     monkeypatch.setattr(v5_branching, "commit_worktree", lambda **_kwargs: (True, "committed"))
     monkeypatch.setattr(v5_branching, "merge_child_into_integration", fake_merge)
     monkeypatch.setattr(v5_runner, "_repair_child_merge_conflict_once", fake_conflict_repair)
-    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight_with_repair", fake_smoke)
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight", fake_detection_smoke)
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight_with_repair", fake_smoke_repair)
 
     result = LeadResult(task_id="leaf", verdict="pass", decomposition="inline", verify_called=True)
     await v5_runner._merge_child_branch(
@@ -283,8 +289,25 @@ async def test_merge_conflict_repair_does_not_expand_leaf_scope_into_clean_deplo
         for event in events
         if event.get("event") in {"foundation_repair_needed", "integration_repair_needed"}
     ]
-    assert smoke_calls == []
+    assert detection_smoke_calls
+    assert smoke_repair_calls == []
     assert repair_need_events, events
+    graph = read_graph(repo)
+    repair_tasks = [
+        (task_id, task)
+        for task_id, task in (graph.get("tasks") or {}).items()
+        if task.get("repair_route") == "integration_smoke_repair"
+    ]
+    assert len(repair_tasks) == 1
+    repair_task_id, repair_task = repair_tasks[0]
+    assert repair_task["owned_paths"] == ["frontend/vite.config.ts"]
+    assert {entry["task_id"] for entry in take_ready(repo, completed_task_ids=set(), in_flight_task_ids=set())} == {
+        repair_task_id
+    }
+    leaf = get_task(repo, "leaf") or {}
+    assert leaf["blocked_pending_contract_amendment"] is True
+    assert leaf["blocked_on_task_id"] == repair_task_id
+    assert leaf["verdict"] is None
     assert result.verdict != "merge_blocked"
 
 
