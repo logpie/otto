@@ -626,6 +626,21 @@ def register_run_command(main: click.Group) -> None:
         """
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
+        error_console.print(
+            "[yellow]"
+            "────────────────────────────────────────────────────────────\n"
+            "⚠  `otto run` uses the LEGACY groups/features compile "
+            "(otto/prompts/compile-spec.md).\n"
+            "   It does NOT converge on large/complex intents and is NOT "
+            "the v5 i2p path.\n"
+            "   All recent successful i2p runs use the flat compile:\n"
+            "       [bold]otto v5 run \"<intent>\"[/bold]   "
+            "(schema v4, behavior-journey spec)\n"
+            "   Use `otto v5 run` unless you specifically need the legacy "
+            "pipeline.\n"
+            "────────────────────────────────────────────────────────────"
+            "[/yellow]"
+        )
         if review_gate and auto_approve:
             raise click.UsageError(
                 "--review-gate and --auto-approve are mutually exclusive."

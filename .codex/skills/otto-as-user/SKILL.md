@@ -407,16 +407,21 @@ uv run --extra dev python -m otto.cli queue run --no-dashboard
 
 ### Direct i2p CLI
 
-Use for power-user/agent pressure tests:
+Use for power-user/agent pressure tests. **Use `otto v5 run`** — it is the
+current i2p path (flat compile, schema v4, behavior-journey spec) that
+converges on large/complex intents. `otto run` is the LEGACY pipeline whose
+groups/features compile (`otto/prompts/compile-spec.md`) does NOT converge on
+large intents — do not use it for i2p pressure unless you specifically need
+the legacy path.
 
 ```bash
-uv run --extra dev python -m otto.cli run "build a product..." --project-kind webapp --budget 3600 --max-turns 160 --verbose
-uv run --extra dev python -m otto.cli run "build a CLI tool..." --project-kind cli --effort high --budget 2400
-uv run --extra dev python -m otto.cli run --from-spec otto_logs/sessions/<id>/spec/spec.json --budget 2400
-uv run --extra dev python -m otto.cli run --resume --auto-approve
+uv run --extra dev python -m otto.cli v5 run "build a product..." --budget 3600
+uv run --extra dev python -m otto.cli v5 run "build a CLI tool..." --provider claude --budget 2400
+# Legacy only (not i2p; non-converging compile on large intents):
+#   uv run --extra dev python -m otto.cli run "..." --from-spec <spec.json> --budget 2400
 ```
 
-Important `otto run` flags:
+Important `otto run` (legacy) flags:
 
 - `--provider`, `--model`, `--effort`
 - `--build-provider`, `--build-model`, `--build-effort`
@@ -429,7 +434,8 @@ Important `otto run` flags:
 
 `otto build`, `otto improve`, and `otto certify` remain compatibility or
 specialized surfaces. Use them when testing those surfaces or when Mission
-Control queues them. Prefer `otto run` for direct redesigned i2p pressure.
+Control queues them. Prefer `otto v5 run` for direct i2p pressure (`otto run`
+is the legacy, non-converging-compile path — see warning above).
 
 ## Harnesses
 
