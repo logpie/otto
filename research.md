@@ -2038,3 +2038,149 @@ capstone; needs a doc-fix-vs-dispatch-fix decision.
 Relaunch the capstone via **`otto v5 run`** (the exact path jv2 used and
 proved converges on this intent), with the cc-i2p-2 venv (fixed seam +
 timeout code). No staged-compile work needed to unblock.
+
+---
+
+# RESEARCH — Ownership-first decomposition redesign (2026-05-16)
+
+_Author: Claude. Status: for user review BEFORE the plan (per written-
+artifacts protocol). Evidence: dual Claude+Codex audit of the true logs
+of capstone `v5-itracker-v5run2-093628` (task #49). Run killed by user._
+
+## What happened (ground truth)
+
+`otto v5 run` flat-compiled the iTracker intent (schema v4, 5 journeys,
+converged) and decomposed into 5 children. Outcome: **3 pass, 2
+merge_blocked, root stuck `pending_children` ~65 min, repair agents
+timing out at 1799s, cost only $5** (USD cap never relevant).
+
+Children + `owned_paths` (from `otto_logs/cross-sessions/task_graph.json`):
+
+| child | role | owned_paths |
+|---|---|---|
+| v5-dc39b504a195 | Architect/Scaffold | **`backend/`, `frontend/`** (whole trees), start.sh, CHARTER.md, decisions.md, data/ |
+| v5-94fe5e2942c1 | Auth | backend/routers/auth.py, routers/users.py, frontend/src/features/auth/, … |
+| v5-2765268c215d | Core | backend/routers/{workspaces,teams,issues,labels,webhooks}.py, … |
+| v5-b15e4b438572 | Collab/Realtime | backend/routers/comments.py, notifications.py, backend/ws_manager.py, features/comments/, … |
+| v5-f3efd65be0d4 | Cycles | backend/routers/cycles.py, features/{cycles,search}/ |
+
+## Root causes (evidence-cited; Claude + Codex agreed, Codex sharpened)
+
+**A. Ownership model defect (the architectural root).** Scaffold owns
+the *entire* `backend/`+`frontend/` trees, **nested/overlapping** with
+every leaf's owned_paths. Shared foundation contracts —
+`backend/auth.py`, `backend/routers/auth.py`, `frontend/src/lib/ws.ts`,
+`frontend/src/lib/api.ts`, App/Layout/`routes.tsx`, Vite/DB/session
+config — were **assigned to no one exclusively and mutated by every
+child**. Git proof of parallel authorship: scaffold `3f6111d` added
+`ws.ts`; b15 `f019940` added `backend/auth.py` + modified `ws.ts`; f3
+`6337e91` independently added `backend/auth.py`; auth `f6d367e` /
+core `06c8d9e` independently added `backend/routers/auth.py`.
+`git merge-base i2p/build/v5-f3efd65be0d4 main` = `f8b7493`, where
+`backend/auth.py` does not exist → **true add/add with empty base**.
+Registration isolation (auto-discovered `routers/*.py` /
+`features/*/`) correctly solved the *registry* collision class but
+**never covered the shared-foundation-contract class**.
+
+**B. Repair-scope bloat.** The f3 merge-conflict repair agent actually
+*resolved* the `backend/auth.py` add/add early (committed a merged
+auth.py — narrative turn-1:49). It then **widened into whole-product
+clean-deploy debugging** (TypeScript, Vite IPv4/IPv6 port binding) and
+timed out at 1799s; final recorded failure = `ports_not_listening`,
+NOT the auth conflict (repair_packet.events.jsonl:9). A leaf
+merge-conflict repair is being asked to prove whole-product
+clean-deploy.
+
+**C. Verification isolation bug.** `v5-2765268c215d` child-verify
+repair grinds because clean-verify runs against ambient `Path.cwd()` /
+`main`, not the repair worktree/ref → the agent burns the turn on
+unrelated `main` TypeScript errors (`stale_integration_target_after
+_repair`; narrative turn-1:166,194).
+
+**D. Over-literal union guard + scope-gate trap.** b15's block is
+`integration_union_incomplete` on `ws.ts`: the guard demands the
+*exact old scaffold line fragments* after a legitimate refactor. The
+b15 agent found the real bug (Vite IPv6 vs oracle IPv4) and fixed it —
+but the **composite scope-gate rejected the fix for touching shared
+out-of-scope files** (repair_packet.events.jsonl:16). The guard +
+scope-gate together make the necessary fix impossible from a leaf.
+
+## Relevant code paths (to confirm during planning)
+
+- Decomposition / owned_paths assignment + overlap validation: the
+  architect/lead decomposition prompts (`otto/prompts/lead.md` and
+  scaffold/architect prompts) + `otto/v5_capability_inventory.py`
+  (`check_route_registration_isolation`, CHARTER IA clause) + wherever
+  owned_paths are validated for disjointness.
+- Foundation/serial phase: `otto/v5_runner.py` child dispatch ordering
+  (architect-first sequential vs parallel leaves).
+- Union guard: `otto/v5_runner.py` `_record_and_check_integration_union`
+  / `_integration_union_*` (line-level union; needs semantic option).
+- Repair scope: `otto/v5_preflight_repair.py` repair-packet allowed
+  paths + `otto/v5_clean_verify.py` clean-verify worktree/ref resolution
+  (the `Path.cwd()`/main bug) + composite scope-gate.
+- Repair/clean-deploy split: where merge-conflict repair escalates into
+  clean-deploy oracle.
+
+## Constraints
+
+- Agile: validate via fast deterministic RED→GREEN repros on the real
+  code path (minutes), NOT 90-min capstones. Capstone is final
+  acceptance only. See [[agile-minimal-e2e-repro]].
+- Time-budget only, never USD ([[budget-is-time-not-usd]]); the USD-cap
+  root-fix is separately open (not this effort).
+- Don't Codex-gate trivia ([[codex-gate-not-every-change]]); DO gate
+  this (correctness-critical, multi-subsystem, false-pass-adjacent).
+- Reuse existing seam/repair machinery; no parallel channels
+  ([[feedback_patches_to_protocols]], brittleness guardrail).
+
+## Proposed RED-first repro scenes (the "critical bug scenes")
+
+Each: real code path, deterministic, only the agent step injected,
+seconds-to-minutes, RED now → GREEN after fix, permanent regression.
+
+1. **Overlapping/nested owned_paths + shared-foundation add/add.**
+   Fixture decomposition: scaffold owns `backend/` broadly; 2 leaves
+   each author `backend/auth.py`. Assert the system *prevents* it
+   (disjoint-ownership validation / foundation-phase exclusive
+   ownership) — RED today (add/add reaches integration).
+2. **Repair-scope bloat.** Inject a merge-conflict whose conflicted
+   owned path is fixed immediately but clean-deploy fails on an
+   out-of-scope shared file. Assert merge-conflict repair stays scoped
+   to conflicted owned paths and emits a separate foundation/
+   integration repair task — RED today (it grinds whole-product to
+   timeout).
+3. **Verification isolation.** Invoke clean-verify in a repair context;
+   assert it runs against the repair worktree/ref, not ambient
+   cwd/`main` — RED today.
+4. **Semantic union guard + scope-gate.** A child legitimately
+   refactors a shared lib (same exported API/behavior, different
+   lines). Assert the union guard accepts (semantic/API equivalence)
+   and the necessary shared-file fix is routed (contract-amendment),
+   not rejected — RED today.
+
+## Candidate fix directions (NOT decided — for dual review + plan)
+
+1. **Serial foundation phase**: scaffold/foundation slice exclusively
+   owns + lands shared contracts (auth.py, routers/auth.py, ws.ts,
+   api.ts, App/Layout/routes, Vite/DB/session) FIRST; leaves import,
+   never recreate.
+2. **Disjoint owned_paths invariant**: after foundation lands, active
+   children's owned_paths must be non-overlapping concrete globs; no
+   child owns a descendant of another active broad owner. Validate at
+   decomposition time (compile-time fail-fast, like the seam guards).
+3. **Shared-contract amendment task**: if a leaf needs an auth/ws
+   change, it requests a foundation-owned amendment; leaves rebase.
+4. **Semantic union guard**: assert exported API + behavior, not exact
+   old lines/comments.
+5. **Split repair scope**: merge-conflict repair only resolves
+   conflicted owned paths; whole-product clean-deploy failure → a
+   separate correctly-owned integration/foundation repair task.
+6. **Verification isolation**: clean-verify runs against the repair
+   worktree/ref; isolated/explicit ports.
+
+Likely core = (1)+(2)+(5)+(6); (3)+(4) reinforce. Not mutually
+exclusive. Open question for review: is the right primitive an explicit
+**foundation slice type** in the spec/decomposition, or an
+ownership-validation pass + dispatch-ordering rule layered on the
+existing decomposition? Codex dual-review next.
