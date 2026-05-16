@@ -287,6 +287,75 @@ def _assert_gate_refusals_have_structured_reasons(evidence: CaseEvidence) -> Non
     )
 
 
+def test_integration_union_guard_detects_missing_shared_added_line() -> None:
+    route_a = 'register("/a", endpoint("a"))'
+    route_b = 'register("/b", endpoint("b"))'
+    state = v5_runner._integration_union_empty_state("i2p/integ/shared")
+    state = v5_runner._merge_integration_union_state(
+        state=state,
+        child_task_id="child-a",
+        source_branch="i2p/build/child-a",
+        base_ref="base-a",
+        head_ref="i2p/build/child-a",
+        additions_by_path={ROUTE_FILE: [route_a]},
+        touched_paths=[ROUTE_FILE],
+    )
+
+    assert (
+        v5_runner._integration_union_missing_contributions(
+            state,
+            {ROUTE_FILE: route_a},
+        )
+        == []
+    )
+
+    state = v5_runner._merge_integration_union_state(
+        state=state,
+        child_task_id="child-b",
+        source_branch="i2p/build/child-b",
+        base_ref="base-b",
+        head_ref="i2p/build/child-b",
+        additions_by_path={ROUTE_FILE: [route_b]},
+        touched_paths=[ROUTE_FILE],
+    )
+    assert (
+        v5_runner._integration_union_missing_contributions(
+            state,
+            {ROUTE_FILE: f"{route_a}\n{route_b}\n"},
+        )
+        == []
+    )
+
+    missing = v5_runner._integration_union_missing_contributions(
+        state,
+        {ROUTE_FILE: f"{route_b}\n"},
+    )
+    assert missing == [
+        {
+            "path": ROUTE_FILE,
+            "line": route_a,
+            "line_hash": v5_runner._line_hash(route_a),
+            "contributed_by": "child-a",
+            "source_branch": "i2p/build/child-a",
+            "base_ref": "base-a",
+            "head_ref": "i2p/build/child-a",
+        }
+    ]
+    feedback = v5_runner._integration_union_feedback(
+        parent_integration_branch="i2p/integ/shared",
+        child_task_id="child-b",
+        source_branch="i2p/build/child-b",
+        base_ref="base-b",
+        post_merge_ref="post-b",
+        missing=missing,
+        final_text_by_path={ROUTE_FILE: f"{route_b}\n"},
+    )
+    assert feedback["kind"] == "integration_union_incomplete"
+    assert feedback["missing"][0]["line"] == route_a
+    assert feedback["missing"][0]["contributed_by"] == "child-a"
+    assert route_a in feedback["message"]
+
+
 async def _run_shared_route_case(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -450,4 +519,8 @@ async def test_lossy_pairwise_route_repair_cannot_silently_land_incomplete_union
         "silent route-drop slipped through; the integration landed without the complete union:\n"
         f"{evidence.to_json()}"
     )
+    reason_text = evidence.child_reasons.get("v5-route-c") or ""
+    assert "integration union incomplete" in reason_text
+    assert 'register("/a", endpoint("a"))' in reason_text
+    assert "v5-route-a" in reason_text
     _assert_gate_refusals_have_structured_reasons(evidence)
