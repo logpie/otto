@@ -1018,3 +1018,21 @@ Verification:
 - APPROVED. No new CRITICAL/IMPORTANT. Shared matcher preserves build._matches_any semantics (no import cycle, no drift); closeout reason-gate complete; both CRITICALs remain fixed.
 
 Plan Gate: 4 rounds (11+7+3 findings) → APPROVED. Implementation Gate: 3 rounds (5+2 findings) → APPROVED.
+
+## Implementation Gate — journey-verification (Units 1-3) — 4 rounds → APPROVED
+
+### Round 1 — Codex (REVISE: 2 CRITICAL + 5 IMPORTANT + REFACTOR)
+- [CRITICAL] committed range internally broken (Unit-3 dropped legacy_results, v5_clean_verify still passed it — incomplete git-add) — fixed 5fb0fd7f5 (+ committed load-bearing spec_schemas/service.json Claude caught)
+- [CRITICAL] generated UI pass-models unexecutable (compile "avoid selectors" vs executor requires selectors) — fixed: accessible-locator lowering
+- [IMPORTANT] contract normalization failed open / non-webapp not enforced / leaf verdict regressed webapp / api informational passes / ui missed effects+untracked-dirt — all fixed
+- [REFACTOR] api if-chain → PROBE_EXECUTORS table + shared journey_executor_common.py
+### Round 2 — Codex (REVISE: 3 IMPORTANT) — fixed a42eaf0e7
+- api strength validator≠executor (header/json-path counted-not-enforced) → implemented + COUNTED==ENFORCED test
+- malformed api pass-model crashed → validate + per-journey guard → unverified
+- accessible UI lowering text false-pass → scoped pre/post DELTA + exact-default
+### Round 3 — Codex (REVISE: 1 IMPORTANT) — fixed 9240cf828
+- delta guard missed role/name/label-only observables → _dom_observable_state fingerprints all forms + require_delta all forms + locator-set agreement test
+### Round 4 — Codex
+- APPROVED. No new CRITICAL/IMPORTANT. Action-effect delta covers all validator-accepted locator forms; agreement test meaningful; final-persistence presence preserved; range clean.
+
+Plan Gate: 4 rounds (7+5+1) → APPROVED. Implementation Gate: 4 rounds (8+3+1) → APPROVED.
