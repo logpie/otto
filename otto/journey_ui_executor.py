@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -90,6 +92,45 @@ def run_ui_journey_executor(
     timeout_s: int,
 ) -> UIJourneyExecutorRun:
     """Run UI-level journeys through Playwright and return sink-ready results."""
+    if _inside_running_event_loop():
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="otto-ui-journey") as executor:
+            return executor.submit(
+                _run_ui_journey_executor_sync,
+                journeys=journeys,
+                base_url=base_url,
+                project_dir=project_dir,
+                clean_project_dir=clean_project_dir,
+                artifact_dir=artifact_dir,
+                timeout_s=timeout_s,
+            ).result()
+    return _run_ui_journey_executor_sync(
+        journeys=journeys,
+        base_url=base_url,
+        project_dir=project_dir,
+        clean_project_dir=clean_project_dir,
+        artifact_dir=artifact_dir,
+        timeout_s=timeout_s,
+    )
+
+
+def _inside_running_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _run_ui_journey_executor_sync(
+    *,
+    journeys: list[dict[str, Any]],
+    base_url: str,
+    project_dir: Path,
+    clean_project_dir: Path,
+    artifact_dir: Path,
+    timeout_s: int,
+) -> UIJourneyExecutorRun:
+    """Run the synchronous Playwright driver outside any caller event loop."""
 
     del clean_project_dir  # The browser talks to the temp deployment by URL.
     started = iso_timestamp()

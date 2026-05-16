@@ -1732,3 +1732,50 @@ Base: `e7ca4406b`
 ### Open questions / judgment calls
 - Composite-gate failures should be represented as durable repair feedback without spending another expensive clean-deploy oracle invocation. I will record a `composite_gate` packet event, update `latest_oracle_result` to a synthetic blocking oracle result, and let the existing agent-turn budget decide whether another agent turn is available.
 - The local `/codex-gate` MCP tool described in project instructions is not available in this session's tool list, so plan/implementation gate review cannot be invoked here. I will compensate with red/green repro, focused protocol tests, and the requested no-regress batch.
+
+## 2026-05-16T04:24:30Z - Critical Seam Repros f87c5bf7d
+
+### RED proofs
+- Seam 2:
+  `uv run pytest -q tests/test_critical_seam_repros.py::test_root_ui_executor_runtime_failure_enters_preflight_repair_and_working_control_passes`
+  fails because `journey_ui_executor.run_ui_journey_executor()` imports
+  `playwright.sync_api.sync_playwright()` while already inside the pipeline's
+  asyncio loop. The result is an infra issue `clean_deploy_smoke_error`, so the
+  real UI journey never runs.
+- Seam 1:
+  `uv run pytest -q tests/test_critical_seam_repros.py::test_child_verify_repair_pass_reenters_when_upward_merge_gate_refuses_dirty_parent`
+  fails because `_merge_child_branch()` records a dirty parent integration
+  worktree as `merge_blocked` directly after `_ensure_child_merge_ready()` has
+  produced a green child repair packet. The refusal is not added to the same
+  durable child verify repair loop and `merge_blocked_reason` is not recorded.
+- Seam 3:
+  `uv run pytest -q tests/test_critical_seam_repros.py::test_subtree_integration_pass_reenters_when_root_propagation_conflicts`
+  fails because `_process_children()` calls `_propagate_subtree_integration()`;
+  when the source subtree conflicts with root, it emits a blocked event and
+  marks the task `merge_blocked` without creating a repair packet.
+
+### Existing machinery to reuse
+- `otto/v5_preflight_repair.py:run_oracle_repair_agent()` is already the
+  durable bounded loop. Its composite-gate path records a synthetic blocking
+  oracle result into the packet and lets the existing agent-turn budget decide
+  whether to re-enter or exhaust.
+- `otto/v5_runner.py:_build_repair_packet()` is the shared packet builder for
+  preflight, child verify, scaffold, and merge repairs.
+- `_run_child_verify_repair_packet()` already builds the correct child verify
+  durable packet. Seam 1 should reuse that packet identity and slug so the late
+  upward merge refusal re-enters the same repair unit rather than creating a
+  separate protocol.
+- Seam 3 needs a propagation-specific packet because there is no existing
+  subtree propagation packet. It should use `_build_repair_packet()` and the
+  same `run_oracle_repair_agent()` loop with a synthetic blocking oracle issue.
+
+### Constraints / plan checks
+- Do not weaken merge or propagation checks; convert late refusal into durable
+  agent feedback only.
+- UI executor can be safely ported to `async_playwright` if sync and async
+  helper logic stay equivalent. Because `_run_integration_smoke_preflight()` is
+  synchronous today, an off-loop thread bridge is a low-risk compatibility step
+  only if the executor still runs the real journey and emits `source=ui_executor`.
+- `/codex-gate` is not available in this tool environment, so the mandatory
+  gate cannot be invoked. Verification must include RED/GREEN repros, requested
+  no-regress batch, ruff, and basedpyright on touched files.

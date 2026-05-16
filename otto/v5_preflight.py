@@ -288,6 +288,8 @@ def preflight_issues_from_clean_oracle(
             legacy_kind = "clean_deploy_start_failed"
         elif kind == "ports_not_listening":
             legacy_kind = "clean_deploy_ports_not_listening"
+        elif kind == "ui_journey_failed":
+            legacy_kind = "ui_journey_failed"
         else:
             legacy_kind = "clean_deploy_smoke_error"
             message = f"{kind}: {message}" if message else kind
