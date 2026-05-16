@@ -1224,3 +1224,45 @@ Commits: e551565a3 → 1415419f7. Triage trail: brownfield fixtures
 (stale Group.title, 0fa0a81bc) + this (146f2a889 regression). The 4
 tests/test_v5_*.py route-isolation dirty files remain pre-existing /
 out-of-scope (untouched, uncommitted).
+
+---
+
+## Ownership-first redesign S0 (runtime primitive) — Implementation Gate (2026-05-16)
+
+Plan: plan-ownership-decomposition.md (Plan Gate APPROVED, 4 rounds).
+S0 = task_role + foundation_contracts data-model/parse/persist/idempotency.
+
+### Round 1 — Codex (REVISE)
+- [CRITICAL] foundation→feature duplicate silently kept stale role —
+  fixed (sentinel) f9cd4cf96.
+- [CRITICAL] duplicate update changed task_graph not pending → stale
+  dispatch — fixed (_reconcile_pending_entry_with_graph, graph-wins at
+  take_ready).
+- [IMPORTANT] idempotency not atomic (double-create) — fixed
+  (_locked_append spans check+append+record).
+- [IMPORTANT] persist couldn't clear stale parent contracts on emptied
+  CHARTER — fixed (write [] on valid-empty).
+- [NOTE] scope confirmed clean (no S1 leak).
+
+### Round 2 — Codex (REVISE)
+- [CRITICAL] sentinel lost at MCP boundary (_coerce_task_role(None)→
+  "feature") → omitted-role duplicate still demoted foundation — fixed
+  b4b3202b5 (None survives end-to-end; clobber only on explicit role).
+- [IMPORTANT] unreadable/missing CHARTER wiped parent contracts (read
+  failure indistinguishable from valid-empty) — fixed
+  (foundation_contracts_charter_unreadable finding → persist no-op).
+- C2/I1 confirmed correct.
+
+### Round 3 — Codex — APPROVED
+- Omitted sentinel survives end-to-end; explicit clobbers; new child =
+  feature; duplicate-correction keyed on `role is not None` (real
+  signal, not value-sniff); unreadable-CHARTER no-clear while
+  genuine-removal clears; malformed-readable still re-enters. No new
+  issues.
+
+S0 Implementation Gate: 2 review rounds + 1 confirmation → APPROVED.
+Commits: b4cfa3afe (S0) → f9cd4cf96 (R1) → b4b3202b5 (R2). 16 S0 units
+GREEN; 5 scene repros still RED (S0 flips none — correct); ruff clean.
+4 test_v5_phase2 failures confirmed PRE-EXISTING (git-worktree
+test-harness rot, identical at 8dece7c93 before S0; one of the 4
+uncommitted route-isolation files; out of scope). Proceed to S1.
