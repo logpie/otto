@@ -2295,3 +2295,20 @@ primitive first (unblocks 1/4/5), then B, C independently.
 - S1 consumes the S0 task graph primitive: parent `foundation_contracts` via `_parent_task_id_for_child`, with a compatibility fallback for architect/foundation children that already carry contract metadata.
 - Runner-managed write admissions found by `rg "commit_worktree\(|commit_integration_worktree\(" otto/v5_runner.py`: preflight repair, integration-agent commit, root inline commit, subtree propagation repair, child verify repair, scaffold repair, child dirty/untracked commit, merge conflict repair. S1 applies one shared foundation-contract write gate to each site, plus pre-merge committed child branch delta checks before merge advancement.
 - S1 stays scoped: no amendment lifecycle, semantic union, smoke split, or clean-verify env behavior.
+
+## 2026-05-16 S3/S5 Ownership Decomposition Research
+
+Task: implement remaining Plan-Gate-approved S3 and S5 only, on top of landed S0/S1/S2/S4.
+
+Findings:
+- S0 contract shape is `path`, `owner_task_id`, `check` in `literal|semantic`, optional `required_exports`, optional `behavior_probes`; parser already rejects `check="semantic"` for route registries.
+- Integration union state currently stores `contributions[]` and `touches[]` with `child_task_id` per item; this is enough to choose semantic vs literal per contribution item.
+- `_integration_union_missing_contributions` currently performs exact line containment for every shared path and has no semantic contract awareness.
+- `_record_and_check_integration_union` can load parent `foundation_contracts` via `_foundation_contracts_for_parent`; persisting a normalized snapshot into the union state lets tests and delayed checks use the same contract data.
+- Contract amendments are recorded as `task_role="contract_amendment"` with `contract_amendment.contract_path` / `contract_amendment_path` and `owner_task_id`; semantic adequacy should only apply when the contribution is from the contract owner or a bound amendment for that same contract.
+- `clean_verify_command` currently always passes `Path.cwd()` to `verify_from_clean_oracle`; `build_clean_verify_oracle_command` sets `OTTO_CLEAN_VERIFY_WORKTREE` and only sets/args `OTTO_REPAIR_PACKET_PATH` when repair-packet context exists.
+
+Implementation constraints:
+- S3 must keep exact additive line-union for registries/literal paths and for non-owner touches to semantic contract paths.
+- S3 semantic adequacy must require all declared exports and all declared behavior probes/invariants to be present in final text, so export-only compatibility cannot false-green.
+- S5 must honor `OTTO_CLEAN_VERIFY_WORKTREE` only when repair/oracle context is present (`--repair-packet` or `OTTO_REPAIR_PACKET_PATH`), leaving manual `otto clean-verify` cwd-based.

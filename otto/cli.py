@@ -330,8 +330,14 @@ def clean_verify_command(
     env_spec = os.environ.get("OTTO_CLEAN_VERIFY_SPEC_PATH", "").strip()
     env_journey_scope = os.environ.get("OTTO_CLEAN_VERIFY_JOURNEY_SCOPE", "").strip()
     env_artifact_dir = os.environ.get("OTTO_CLEAN_VERIFY_JOURNEY_ARTIFACT_DIR", "").strip()
+    packet_path = repair_packet
+    if packet_path is None:
+        env_packet = os.environ.get("OTTO_REPAIR_PACKET_PATH", "").strip()
+        packet_path = Path(env_packet) if env_packet else None
+    env_worktree = os.environ.get("OTTO_CLEAN_VERIFY_WORKTREE", "").strip()
+    project_dir = Path(env_worktree) if packet_path is not None and env_worktree else Path.cwd()
     result = verify_from_clean_oracle(
-        Path.cwd(),
+        project_dir,
         scope=cast(Scope, verify_scope),
         spec_path=spec_path or (Path(env_spec) if env_spec else None),
         journey_scope=cast(
@@ -343,10 +349,6 @@ def clean_verify_command(
             or (Path(env_artifact_dir) if env_artifact_dir else None)
         ),
     )
-    packet_path = repair_packet
-    if packet_path is None:
-        env_packet = os.environ.get("OTTO_REPAIR_PACKET_PATH", "").strip()
-        packet_path = Path(env_packet) if env_packet else None
     if packet_path is not None:
         from otto.v5_preflight_repair import append_repair_packet_oracle_event
 

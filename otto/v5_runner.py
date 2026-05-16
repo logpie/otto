@@ -1775,11 +1775,127 @@ def _integration_union_shared_paths(state: dict[str, Any]) -> set[str]:
     }
 
 
+def _foundation_contracts_by_path_from_union_state(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw = state.get("foundation_contracts")
+    contracts: list[dict[str, Any]] = []
+    if isinstance(raw, dict):
+        for path, item in raw.items():
+            if isinstance(item, dict):
+                contract = dict(item)
+                contract.setdefault("path", path)
+                contracts.append(contract)
+    elif isinstance(raw, list):
+        contracts = [dict(item) for item in raw if isinstance(item, dict)]
+    return {
+        _normalize_contract_path(str(contract.get("path") or "")): contract
+        for contract in contracts
+        if _normalize_contract_path(str(contract.get("path") or ""))
+    }
+
+
+def _semantic_union_contributor_allowed(
+    *,
+    child_task_id: str,
+    contract: dict[str, Any],
+    state: dict[str, Any],
+) -> bool:
+    owner_id = str(contract.get("owner_task_id") or "").strip()
+    if child_task_id == owner_id:
+        return True
+    contributors = state.get("contributors")
+    task = contributors.get(child_task_id) if isinstance(contributors, dict) else None
+    if not isinstance(task, dict) or str(task.get("task_role") or "") != "contract_amendment":
+        return False
+    bound = task.get("contract_amendment")
+    if not isinstance(bound, dict):
+        bound = {}
+    contract_path = _normalize_contract_path(str(contract.get("path") or ""))
+    bound_path = _normalize_contract_path(
+        str(bound.get("contract_path") or task.get("contract_amendment_path") or "")
+    )
+    bound_paths = [
+        _normalize_contract_path(str(path))
+        for path in (
+            bound.get("contract_paths")
+            or task.get("contract_amendment_paths")
+            or ([bound_path] if bound_path else [])
+        )
+        if _normalize_contract_path(str(path))
+    ]
+    bound_owner = str(
+        bound.get("owner_task_id") or task.get("contract_amendment_owner_task_id") or ""
+    ).strip()
+    return bool(
+        bound_owner == owner_id
+        and contract_path
+        and any(_path_overlaps(contract_path, path) for path in bound_paths)
+    )
+
+
+def _semantic_union_required_export_present(final_text: str, export_name: str) -> bool:
+    name = re.escape(export_name)
+    patterns = [
+        rf"\bexport\s+(?:async\s+)?function\s+{name}\b",
+        rf"\bexport\s+(?:const|let|var|class|interface|type|enum)\s+{name}\b",
+        rf"\bexport\s*\{{[^}}]*\b{name}\b[^}}]*\}}",
+        rf"\bexports\.{name}\b",
+        rf"\bmodule\.exports(?:\.{name}|\s*=\s*\{{[^}}]*\b{name}\b)",
+    ]
+    return any(re.search(pattern, final_text, flags=re.MULTILINE) for pattern in patterns)
+
+
+def _semantic_union_text_contains_probe(final_text: str, probe: str) -> bool:
+    normalized_probe = " ".join(str(probe).split())
+    if not normalized_probe:
+        return True
+    normalized_text = " ".join(final_text.split())
+    return normalized_probe in normalized_text
+
+
+def _semantic_foundation_contract_satisfied(contract: dict[str, Any], final_text: str) -> bool:
+    required_exports = [
+        str(value).strip()
+        for value in (contract.get("required_exports") or [])
+        if str(value).strip()
+    ]
+    behavior_probes = [
+        str(value).strip()
+        for value in (contract.get("behavior_probes") or contract.get("invariants") or [])
+        if str(value).strip()
+    ]
+    if not required_exports and not behavior_probes:
+        return False
+    return all(
+        _semantic_union_required_export_present(final_text, export_name)
+        for export_name in required_exports
+    ) and all(
+        _semantic_union_text_contains_probe(final_text, probe)
+        for probe in behavior_probes
+    )
+
+
+def _integration_union_contributor_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "task_role": str(task.get("task_role") or "feature"),
+    }
+    for key in (
+        "contract_amendment",
+        "contract_amendment_path",
+        "contract_amendment_paths",
+        "contract_amendment_owner_task_id",
+        "repair_route",
+    ):
+        if key in task:
+            snapshot[key] = task.get(key)
+    return snapshot
+
+
 def _integration_union_missing_contributions(
     state: dict[str, Any],
     final_text_by_path: dict[str, str],
 ) -> list[dict[str, Any]]:
     shared_paths = _integration_union_shared_paths(state)
+    foundation_contracts = _foundation_contracts_by_path_from_union_state(state)
     missing: list[dict[str, Any]] = []
     final_lines_by_path = {
         path: {line.rstrip() for line in text.splitlines()}
@@ -1794,11 +1910,28 @@ def _integration_union_missing_contributions(
             continue
         if line in final_lines_by_path.get(path, set()):
             continue
+        normalized_path = _normalize_contract_path(path)
+        contract = foundation_contracts.get(normalized_path)
+        child_task_id = str(item.get("child_task_id") or "")
+        if (
+            contract
+            and str(contract.get("check") or "") == "semantic"
+            and _semantic_union_contributor_allowed(
+                child_task_id=child_task_id,
+                contract=contract,
+                state=state,
+            )
+            and _semantic_foundation_contract_satisfied(
+                contract,
+                final_text_by_path.get(path, ""),
+            )
+        ):
+            continue
         missing.append({
             "path": path,
             "line": line,
             "line_hash": str(item.get("line_hash") or _line_hash(line)),
-            "contributed_by": str(item.get("child_task_id") or ""),
+            "contributed_by": child_task_id,
             "source_branch": str(item.get("source_branch") or ""),
             "base_ref": str(item.get("base_ref") or ""),
             "head_ref": str(item.get("head_ref") or ""),
@@ -1928,7 +2061,19 @@ def _record_and_check_integration_union(
             parent_integration_branch,
         )
         parent_task = get_task(project_dir, parent_task_id) or {}
+        tasks = (read_graph(project_dir).get("tasks") or {})
         state = _integration_union_state_from_task(parent_task, parent_integration_branch)
+        state["foundation_contracts"] = _foundation_contracts_for_parent(
+            project_dir,
+            parent_task_id,
+            tasks,
+        )
+        contributors = dict(state.get("contributors") or {})
+        child_task = tasks.get(child_task_id) if isinstance(tasks, dict) else None
+        contributors[child_task_id] = _integration_union_contributor_snapshot(
+            child_task if isinstance(child_task, dict) else {}
+        )
+        state["contributors"] = contributors
         additions_by_path = _git_added_lines_by_path_between(
             project_dir,
             pre_merge_ref,

@@ -327,7 +327,12 @@ def test_clean_verify_cli_uses_explicit_repair_worktree_env_instead_of_ambient_c
 
     monkeypatch.chdir(main_dir)
     monkeypatch.setenv("OTTO_CLEAN_VERIFY_WORKTREE", str(repair_worktree))
+    monkeypatch.setenv("OTTO_REPAIR_PACKET_PATH", str(tmp_path / "repair_packet.json"))
     monkeypatch.setattr(v5_clean_verify, "verify_from_clean_oracle", fake_verify)
+    monkeypatch.setattr(
+        "otto.v5_preflight_repair.append_repair_packet_oracle_event",
+        lambda *_args, **_kwargs: None,
+    )
 
     callback = getattr(cli.clean_verify_command, "callback", cli.clean_verify_command)
     callback(
@@ -351,6 +356,7 @@ def test_semantic_foundation_contracts_do_not_require_literal_line_union_but_reg
                 "owner_task_id": "foundation",
                 "check": "semantic",
                 "required_exports": ["connect"],
+                "behavior_probes": ["openSocket(workspaceId, token)"],
             }
         },
         "touches": [
