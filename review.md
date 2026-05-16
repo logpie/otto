@@ -1301,3 +1301,36 @@ Commits: db5b8196c (S1) → cfabf1fbf (R1) → 78535d150 (R2). Scene #1
 GREEN (nested capstone shape); #2-#5 RED; 22 S0+S1 units GREEN; broad
 suite only the 4 known pre-existing test_v5_phase2 git-worktree-rot
 failures; ruff clean. Proceed to S2.
+
+---
+
+## Ownership-first redesign S2 (shared-contract repair routing + amendment lifecycle) — Impl Gate (2026-05-16)
+
+Hardest step — a net-new graph state machine with crash/restart/multi-runner concerns.
+
+### Round 1 — Codex (REVISE)
+- [CRITICAL] merge-only retry never persisted restored verdict → restart double-merge (scene masked via fake set_verdict) — fixed.
+- [CRITICAL] amendment crash stranded blocked leaves (settlement only on normal path) — fixed (any terminalization → settle).
+- [IMPORTANT] bound write-allow still permitted arbitrary non-contract writes — fixed (amendment writes only its bound contract).
+- [NOTE] futile-amendment churn unbounded — fixed (per-(leaf,contract) cap=2 → honest terminal).
+
+### Round 2 — Codex (REVISE)
+- [IMPORTANT] retry flag cleared before merge → crash/restart/2nd-runner re-dispatch window — fixed (durable contract_amendment_retry_in_progress, fails-closed).
+
+### Round 3 — Codex (REVISE)
+- [CRITICAL] R2 left second-runner race (mark not compare-and-set) — fixed (atomic CAS under _locked_graph).
+- [CRITICAL] R2 introduced crash/restart DEADLOCK (stale in-progress, no recovery) — fixed (bounded stale-recovery: pid/heartbeat → reclaim-resume or terminalize).
+
+### Round 4 — Codex (final; 1 minimal must-fix, rest accepted)
+- [CRITICAL] heartbeat never refreshed → live owner running a legit ~1800s merge falsely reclaimed after 15min → two concurrent merges — fixed (owner-token-checked 60s heartbeat refresh; dead owners still timeout-recover).
+- Accepted NOTE-level residual: conservative remote/unknown-host stale timeout (dead remote owner waits the bounded timeout before recovery).
+
+S2 Implementation Gate: 4 review rounds → APPROVED with one tracked
+NOTE. Commits: ea2dfccad (S2) → e661e80da (R1) → 6a2caac6e (R2) →
+ae224e766 (R3) → eae1f3a2e (R4). Scenes #1/#5 GREEN; #2/#3/#4 RED;
+34 S0+S1+S2 units GREEN; broad suite only the 4 known pre-existing
+test_v5_phase2 git-worktree-rot failures; ruff clean. Net invariant:
+exactly one runner executes a leaf's merge-only retry at a time;
+crash/restart always resolves to pass or honest merge_blocked within
+bounded attempts; no double-merge, no deadlock, no silent strand.
+Proceed to S3.
