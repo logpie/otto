@@ -402,4 +402,29 @@ oracle fix), then the production fix flips it GREEN.
 Findings narrowed each round (8 → 3 → 3 bounded); direction approved by
 Codex. Safe order unchanged: S0→S1→S2→S3→S4→S5.
 
-(Round 4 trail appended after re-review.)
+### Round 4 — Codex — APPROVED
+
+Plan concrete/correct/complete enough to implement S0→S1→S2→S3→S4→S5 as
+separate gated commits. Findings narrowed 8→3→3→APPROVED across 4 rounds.
+
+**Final implementation must-haves (fold into the relevant steps):**
+1. **S1.3:** the 5 listed sites are NOT exhaustive — implementer runs
+   `rg "commit_worktree\(|commit_integration_worktree\(" otto/v5_runner.py`
+   and gates or proof-exempts EVERY hit (repo also has root-inline
+   `~1555` and scaffold repair `~2758`).
+2. **S2:** blocked graph state must be authoritative over stale
+   in-memory `LeadResult`. `_process_children` marks a child complete via
+   `_child_result_allows_upward_merge` (`v5_runner.py:~3190`) which
+   returns true immediately for an in-memory `pass`
+   (`v5_runner.py:~1874`). S2 must either mutate the returned
+   `LeadResult` or make `_child_result_allows_upward_merge` consult
+   `blocked_on_task_id` — so a contract-amendment-blocked leaf is not
+   marked complete off a stale pass.
+3. **S2:** on amendment terminal-pass, clear **all** tasks blocked on
+   that amendment id (not just the first found).
+
+These are binding on implementation; Implementation Gate will verify
+them.
+
+## Plan Gate verdict: APPROVED (Codex, 4 rounds). Proceed to
+implementation, S0 first, under the Implementation Gate.
