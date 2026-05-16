@@ -3630,21 +3630,59 @@ def _record_structured_merge_failed(
     structured_reason: dict[str, Any],
     on_event: Any = None,
 ) -> None:
-    _record_task_merge_blocked_reason(
-        project_dir=project_dir,
-        task_id=task_id,
-        result=result,
-        reason=reason,
-        origin=origin,
-        structured_reason=structured_reason,
-    )
-    _emit(on_event, {
-        "event": "merge_failed",
-        "task_id": task_id,
-        "phase": phase,
-        "detail": reason,
-        "structured_reason": structured_reason,
-    })
+    try:
+        result.verdict = "merge_blocked"
+        result.failure_reason = reason
+        if not isinstance(result.verify_result, dict):
+            result.verify_result = {}
+        result.verify_result["verdict"] = "merge_blocked"
+        result.verify_result["summary"] = reason
+        result.verify_result["structured_reason"] = structured_reason
+    except Exception as exc:  # noqa: BLE001 - terminal fallback must not raise
+        logger.warning(
+            "failed to stage in-memory merge_blocked reason for %s: %s",
+            task_id,
+            exc,
+        )
+
+    try:
+        _record_task_merge_blocked_reason(
+            project_dir=project_dir,
+            task_id=task_id,
+            result=result,
+            reason=reason,
+            origin=origin,
+            structured_reason=structured_reason,
+        )
+    except Exception as exc:  # noqa: BLE001 - durable terminal recording is best-effort
+        recording_error = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        try:
+            structured_reason["recording_error"] = recording_error
+            if isinstance(result.verify_result, dict):
+                result.verify_result["structured_reason"] = structured_reason
+                result.verify_result["recording_error"] = recording_error
+        except Exception:  # noqa: BLE001 - keep terminal recorder no-throw
+            pass
+        logger.warning(
+            "failed to durably record merge_blocked for %s: %s",
+            task_id,
+            exc,
+        )
+
+    try:
+        _emit(on_event, {
+            "event": "merge_failed",
+            "task_id": task_id,
+            "phase": phase,
+            "detail": reason,
+            "structured_reason": structured_reason,
+        })
+    except Exception as exc:  # noqa: BLE001 - event sink must not reopen terminal path
+        logger.warning("failed to emit structured merge_failed for %s: %s", task_id, exc)
 
 
 def _integration_union_guard_error_feedback(
@@ -3709,6 +3747,36 @@ def _pre_merge_ref_unresolved_feedback(
     return feedback
 
 
+def _child_merge_conflict_smoke_failed_feedback(
+    *,
+    child_task_id: str,
+    parent_integration_branch: str,
+    source_branch: str,
+    pre_merge_ref: str,
+    detail: str,
+    oracle: dict[str, Any] | None = None,
+    exc: Exception | None = None,
+) -> dict[str, Any]:
+    feedback: dict[str, Any] = {
+        "kind": "child_merge_conflict_smoke_failed",
+        "step_id": "child_merge_conflict_repair_smoke",
+        "message": detail,
+        "task_id": child_task_id,
+        "parent_integration_branch": parent_integration_branch,
+        "source_branch": source_branch,
+        "pre_merge_ref": pre_merge_ref,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if oracle is not None:
+        feedback["oracle"] = oracle
+    if exc is not None:
+        feedback["exception"] = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
+    return feedback
+
+
 async def _repair_child_upward_merge_gate_once(
     *,
     project_dir: Path,
@@ -3767,13 +3835,15 @@ async def _repair_child_upward_merge_gate_once(
             f"{origin} repair did not pass: "
             f"{repair.summary}; original refusal: {original_detail}"
         )
-        _record_task_merge_blocked_reason(
+        _record_structured_merge_failed(
             project_dir=project_dir,
             task_id=child_task_id,
             result=result,
             reason=reason,
             origin=origin,
+            phase=origin,
             structured_reason=feedback,
+            on_event=on_event,
         )
         return False, reason
     return True, repair.summary
@@ -4092,26 +4162,32 @@ async def _merge_child_branch(
         merge_child_into_integration,
     )
 
+    source_branch = child_branch_name(child_task_id)
     commit_msg = f"v5 task {child_task_id}: {result.verdict}"
     ok, detail = commit_worktree(worktree_path=child_worktree, message=commit_msg)
     if not ok:
         logger.warning("commit_worktree(%s) failed: %s", child_task_id, detail)
-        _emit(on_event, {
-            "event": "merge_failed",
+        feedback = {
+            "kind": "child_commit_failed",
+            "step_id": "child_commit",
+            "message": detail,
             "task_id": child_task_id,
-            "phase": "commit",
-            "detail": detail,
-        })
-        _record_task_merge_blocked_reason(
+            "source_branch": source_branch,
+            "parent_integration_branch": parent_integration_branch,
+            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        _record_structured_merge_failed(
             project_dir=project_dir,
             task_id=child_task_id,
             result=result,
             reason=detail,
             origin="commit",
+            phase="commit",
+            structured_reason=feedback,
+            on_event=on_event,
         )
         return
 
-    source_branch = child_branch_name(child_task_id)
     pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
     try:
         ok, detail = merge_child_into_integration(
@@ -4145,22 +4221,65 @@ async def _merge_child_branch(
                 ok = False
                 detail = str(exc)
             if ok:
-                oracle = await _run_integration_smoke_preflight_with_repair(
-                    project_dir=project_dir,
-                    worktree_path=project_dir,
-                    task_id=child_task_id,
-                    phase="child_merge_conflict_repair",
-                    session_dir=child_session_dir,
-                    config=config,
-                    integration_branch=parent_integration_branch,
-                    on_event=on_event,
-                )
+                try:
+                    oracle = await _run_integration_smoke_preflight_with_repair(
+                        project_dir=project_dir,
+                        worktree_path=project_dir,
+                        task_id=child_task_id,
+                        phase="child_merge_conflict_repair",
+                        session_dir=child_session_dir,
+                        config=config,
+                        integration_branch=parent_integration_branch,
+                        on_event=on_event,
+                    )
+                except Exception as exc:  # noqa: BLE001 - terminal block must stay structured
+                    detail = (
+                        "Child merge conflict repair smoke oracle crashed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    feedback = _child_merge_conflict_smoke_failed_feedback(
+                        child_task_id=child_task_id,
+                        parent_integration_branch=parent_integration_branch,
+                        source_branch=source_branch,
+                        pre_merge_ref=pre_merge_ref,
+                        detail=detail,
+                        exc=exc,
+                    )
+                    _record_structured_merge_failed(
+                        project_dir=project_dir,
+                        task_id=child_task_id,
+                        result=result,
+                        reason=detail,
+                        origin="child_merge_conflict_smoke",
+                        phase="child_merge_conflict_repair",
+                        structured_reason=feedback,
+                        on_event=on_event,
+                    )
+                    return
                 if _preflight_repair_escalated(oracle) or _integration_smoke_blocks(oracle):
-                    ok = False
                     detail = _preflight_blocking_summary(
                         "Child merge conflict repair smoke oracle failed",
                         oracle,
                     )
+                    feedback = _child_merge_conflict_smoke_failed_feedback(
+                        child_task_id=child_task_id,
+                        parent_integration_branch=parent_integration_branch,
+                        source_branch=source_branch,
+                        pre_merge_ref=pre_merge_ref,
+                        detail=detail,
+                        oracle=oracle,
+                    )
+                    _record_structured_merge_failed(
+                        project_dir=project_dir,
+                        task_id=child_task_id,
+                        result=result,
+                        reason=detail,
+                        origin="child_merge_conflict_smoke",
+                        phase="child_merge_conflict_repair",
+                        structured_reason=feedback,
+                        on_event=on_event,
+                    )
+                    return
             else:
                 retry = await _repair_stale_target_and_retry_merge(
                     project_dir=project_dir,
@@ -4212,18 +4331,25 @@ async def _merge_child_branch(
             detail = f"{detail}; upward merge gate repair attempt: {repair_detail}"
     if not ok:
         logger.warning("merge_child_into_integration(%s) failed: %s", child_task_id, detail)
-        _emit(on_event, {
-            "event": "merge_failed",
+        feedback = {
+            "kind": "upward_merge_gate_blocked",
+            "step_id": "upward_merge_gate",
+            "message": detail,
             "task_id": child_task_id,
-            "phase": "merge",
-            "detail": detail,
-        })
-        _record_task_merge_blocked_reason(
+            "source_branch": source_branch,
+            "parent_integration_branch": parent_integration_branch,
+            "pre_merge_ref": pre_merge_ref,
+            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        _record_structured_merge_failed(
             project_dir=project_dir,
             task_id=child_task_id,
             result=result,
             reason=detail,
             origin="upward_merge_gate",
+            phase="merge",
+            structured_reason=feedback,
+            on_event=on_event,
         )
         return
 
@@ -4305,22 +4431,18 @@ async def _merge_child_branch(
             repaired = False
             repair_detail = f"integration union repair crashed: {type(exc).__name__}: {exc}"
         if not repaired:
+            reason = f"{detail}; union repair attempt: {repair_detail}"
             if not repair_recorded_block:
-                _record_task_merge_blocked_reason(
+                _record_structured_merge_failed(
                     project_dir=project_dir,
                     task_id=child_task_id,
                     result=result,
-                    reason=f"{detail}; union repair attempt: {repair_detail}",
+                    reason=reason,
                     origin="integration_union_guard",
+                    phase="integration_union_guard",
                     structured_reason=union_feedback,
+                    on_event=on_event,
                 )
-            _emit(on_event, {
-                "event": "merge_failed",
-                "task_id": child_task_id,
-                "phase": "integration_union_guard",
-                "detail": f"{detail}; union repair attempt: {repair_detail}",
-                "structured_reason": union_feedback,
-            })
             return
 
         pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
