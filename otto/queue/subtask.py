@@ -253,6 +253,27 @@ def _globally_non_runnable_task_ids(project_dir: Path) -> set[str]:
     return done
 
 
+def _globally_dependency_blocked_task_ids(
+    project_dir: Path,
+    completed_all: set[str],
+) -> set[str]:
+    """Tasks blocked on an unsatisfied amendment task."""
+    from otto.queue.task_graph import read_graph
+
+    try:
+        graph = read_graph(project_dir)
+    except Exception:  # noqa: BLE001 — best-effort
+        return set()
+    blocked: set[str] = set()
+    for tid, t in (graph.get("tasks") or {}).items():
+        if not isinstance(t, dict):
+            continue
+        blocker = t.get("blocked_on_task_id")
+        if isinstance(blocker, str) and blocker and blocker not in completed_all:
+            blocked.add(str(tid))
+    return blocked
+
+
 def take_ready(
     project_dir: Path,
     *,
@@ -273,6 +294,7 @@ def take_ready(
         set(completed_task_ids)
         | globally_done
         | _globally_non_runnable_task_ids(project_dir)
+        | _globally_dependency_blocked_task_ids(project_dir, completed_all)
     )
 
     pending = read_pending(project_dir)

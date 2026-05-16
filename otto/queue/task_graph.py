@@ -280,6 +280,88 @@ def update_task_metadata(
         graph["tasks"][task_id].update(clean)
 
 
+def set_contract_amendment_blocked(
+    project_dir: Path,
+    task_id: str,
+    amendment_id: str,
+    *,
+    reason: str = "",
+    merge_context: dict[str, Any] | None = None,
+) -> None:
+    """Put a passing leaf into non-terminal amendment-blocked state.
+
+    The leaf already has a persisted terminal verdict before upward merge runs.
+    Preserve that verdict as history, then clear terminal fields so the pending
+    queue can later retry only the merge after the amendment lands.
+    """
+    with _locked_graph(project_dir) as (_path, graph):
+        if task_id not in graph["tasks"]:
+            graph["tasks"][task_id] = {
+                "parent_task_id": None,
+                "intent": "",
+                "decomposition": "unknown",
+                "verdict": None,
+                "integration_branch": None,
+                "started_at": _now_iso(),
+                "completed_at": None,
+                "cost_usd": 0.0,
+                "child_task_ids": [],
+                "depends_on": [],
+                "owned_paths": [],
+                "action_ids": [],
+                "task_role": "feature",
+                "foundation_contracts": [],
+            }
+        task = graph["tasks"][task_id]
+        task["last_agent_verdict"] = task.get("verdict")
+        task["verdict"] = None
+        task["completed_at"] = None
+        task["blocked_pending_contract_amendment"] = True
+        task["blocked_on_task_id"] = amendment_id
+        task["contract_amendment_blocked_at"] = _now_iso()
+        if reason:
+            task["contract_amendment_blocked_reason"] = reason
+        if merge_context is not None:
+            task["contract_amendment_merge_context"] = dict(merge_context)
+
+
+def clear_contract_amendment_blocked_tasks(
+    project_dir: Path,
+    amendment_id: str,
+) -> list[str]:
+    """Clear every task blocked on ``amendment_id`` and mark merge retry intent."""
+    cleared: list[str] = []
+    with _locked_graph(project_dir) as (_path, graph):
+        for task_id, task in graph["tasks"].items():
+            if not isinstance(task, dict):
+                continue
+            if task.get("blocked_on_task_id") != amendment_id:
+                continue
+            task["blocked_pending_contract_amendment"] = False
+            task["blocked_on_task_id"] = None
+            task["contract_amendment_retry_merge"] = True
+            task["contract_amendment_unblocked_at"] = _now_iso()
+            cleared.append(str(task_id))
+    return cleared
+
+
+def clear_contract_amendment_blocked_state(
+    project_dir: Path,
+    task_ids: list[str],
+) -> None:
+    """Clear amendment blocker fields for the supplied tasks."""
+    wanted = set(task_ids)
+    if not wanted:
+        return
+    with _locked_graph(project_dir) as (_path, graph):
+        for task_id in wanted:
+            task = graph["tasks"].get(task_id)
+            if not isinstance(task, dict):
+                continue
+            task["blocked_pending_contract_amendment"] = False
+            task["blocked_on_task_id"] = None
+
+
 def mark_reviewed_partial(
     project_dir: Path,
     task_id: str,

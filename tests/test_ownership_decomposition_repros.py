@@ -11,7 +11,7 @@ import pytest
 
 from otto import cli, v5_branching, v5_clean_verify, v5_runner
 from otto.lead import LeadResult
-from otto.queue.subtask import v5_pending_path
+from otto.queue.subtask import take_ready, v5_pending_path
 from otto.queue.task_graph import get_task, read_graph, record_task, set_verdict, update_task_metadata
 from otto.v5_runner import ROOT_TASK_ID
 
@@ -446,6 +446,7 @@ async def test_shared_contract_union_feedback_routes_to_foundation_owner_not_lea
     monkeypatch.setattr(v5_branching, "merge_child_into_integration", lambda **_kwargs: (True, "merged"))
     monkeypatch.setattr(v5_runner, "_record_and_check_integration_union", fake_union_feedback)
     monkeypatch.setattr(v5_runner, "_repair_child_upward_merge_gate_once", fake_leaf_repair)
+    monkeypatch.setattr(v5_runner, "_verify_child_branches_reached_parent", lambda **_kwargs: None)
 
     result = LeadResult(task_id="leaf", verdict="pass", decomposition="inline", verify_called=True)
     await v5_runner._merge_child_branch(
@@ -459,7 +460,6 @@ async def test_shared_contract_union_feedback_routes_to_foundation_owner_not_lea
         on_event=events.append,
     )
 
-    root_task = get_task(repo, ROOT_TASK_ID) or {}
     graph = read_graph(repo)
     routed_events = [
         event
@@ -467,10 +467,54 @@ async def test_shared_contract_union_feedback_routes_to_foundation_owner_not_lea
         if event.get("event") in {"foundation_contract_amendment_repair", "foundation_repair_needed"}
     ]
     amendment_tasks = [
-        task
-        for task in (graph.get("tasks") or {}).values()
+        (task_id, task)
+        for task_id, task in (graph.get("tasks") or {}).items()
         if task.get("task_role") == "contract_amendment"
         or task.get("repair_route") == "foundation_contract_amendment"
     ]
     assert child_repair_calls == []
-    assert routed_events or amendment_tasks or root_task.get("foundation_contract_repairs")
+    assert routed_events, events
+    assert len(amendment_tasks) == 1
+    amendment_id, amendment_task = amendment_tasks[0]
+    assert amendment_task["owned_paths"] == ["frontend/src/lib/ws.ts"]
+    assert amendment_task["contract_amendment"]["owner_task_id"] == "foundation"
+    assert amendment_task["contract_amendment"]["contract_path"] == "frontend/src/lib/ws.ts"
+    assert {entry["task_id"] for entry in take_ready(repo, completed_task_ids=set(), in_flight_task_ids=set())} == {
+        amendment_id
+    }
+    blocked_leaf = get_task(repo, "leaf") or {}
+    assert blocked_leaf["verdict"] is None
+    assert blocked_leaf["last_agent_verdict"] == "pass"
+    assert blocked_leaf["blocked_pending_contract_amendment"] is True
+    assert blocked_leaf["blocked_on_task_id"] == amendment_id
+
+    retried_merges: list[str] = []
+
+    async def fake_run_child(**kwargs: Any) -> LeadResult:
+        task_id = str(kwargs["entry"]["task_id"])
+        if task_id == amendment_id:
+            set_verdict(repo, amendment_id, "pass")
+            return LeadResult(task_id=amendment_id, verdict="pass", decomposition="inline", verify_called=True)
+        assert task_id == "leaf"
+        assert (get_task(repo, "leaf") or {}).get("contract_amendment_retry_merge") is True
+        retried_merges.append(task_id)
+        set_verdict(repo, "leaf", "pass")
+        update_task_metadata(repo, "leaf", contract_amendment_retry_merge=False)
+        return LeadResult(task_id="leaf", verdict="pass", decomposition="inline", verify_called=True)
+
+    monkeypatch.setattr(v5_runner, "_run_child", fake_run_child)
+    await v5_runner._process_children(
+        project_dir=repo,
+        parent_task_id=ROOT_TASK_ID,
+        config={},
+        max_parallel=1,
+        tree_budget_usd=100.0,
+        child_results={},
+        integration_results={},
+        on_event=events.append,
+    )
+
+    assert retried_merges == ["leaf"]
+    assert (get_task(repo, "leaf") or {}).get("verdict") == "pass"
+    assert (get_task(repo, "leaf") or {}).get("blocked_on_task_id") is None
+    assert any(event.get("event") == "foundation_contract_amendment_unblocked" for event in events)

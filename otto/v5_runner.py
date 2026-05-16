@@ -67,13 +67,18 @@ from otto.v5_clean_verify import (
     verify_from_clean_oracle,
 )
 from otto.queue.subtask import (
+    append_pending_entry,
+    enqueue_subtask,
     read_pending,
     take_ready,
+    v5_pending_path,
     _verdict_satisfies_dependency,
 )
 from otto.queue.task_graph import (
     aggregate_verdict,
     children_of,
+    clear_contract_amendment_blocked_state,
+    clear_contract_amendment_blocked_tasks,
     clear_verdict_for_retry,
     get_retry_count,
     get_retry_reason,
@@ -81,6 +86,7 @@ from otto.queue.task_graph import (
     mark_reviewed_partial,
     read_graph,
     record_task,
+    set_contract_amendment_blocked,
     set_verdict,
     tree_total_cost,
     update_task_metadata,
@@ -519,6 +525,15 @@ def _foundation_contract_write_feedback(
         return None
     task = get_task(project_dir, acting_task_id) or {}
     role = str(task.get("task_role") or "feature")
+    bound_amendment = task.get("contract_amendment")
+    if not isinstance(bound_amendment, dict):
+        bound_amendment = {}
+    bound_contract_path = _normalize_contract_path(
+        str(bound_amendment.get("contract_path") or task.get("contract_amendment_path") or "")
+    )
+    bound_owner_id = str(
+        bound_amendment.get("owner_task_id") or task.get("contract_amendment_owner_task_id") or ""
+    ).strip()
     violations: list[dict[str, Any]] = []
     for contract in contracts:
         contract_path = _normalize_contract_path(str(contract.get("path") or ""))
@@ -528,6 +543,13 @@ def _foundation_contract_write_feedback(
         if acting_task_id == owner_id:
             continue
         overlapping = [path for path in normalized_changes if _path_overlaps(path, contract_path)]
+        if (
+            overlapping
+            and role == "contract_amendment"
+            and bound_contract_path == contract_path
+            and bound_owner_id == owner_id
+        ):
+            continue
         if overlapping:
             violations.append({
                 "contract_path": contract_path,
@@ -555,6 +577,265 @@ def _foundation_contract_write_block_detail(feedback: dict[str, Any]) -> str:
         return json.dumps(feedback, sort_keys=True)
     except TypeError:
         return str(feedback)
+
+
+def _foundation_contract_for_feedback_path(
+    *,
+    project_dir: Path,
+    parent_task_id: str,
+    child_task_id: str,
+    feedback: dict[str, Any],
+) -> dict[str, Any] | None:
+    graph = read_graph(project_dir)
+    tasks = graph.get("tasks") or {}
+    child = tasks.get(child_task_id) if isinstance(tasks, dict) else None
+    child_owned_paths = _task_owned_paths(child) if isinstance(child, dict) else []
+    candidate_paths: list[str] = []
+    for path in feedback.get("paths") or []:
+        normalized = _normalize_contract_path(str(path))
+        if normalized:
+            candidate_paths.append(normalized)
+    for item in feedback.get("missing") or []:
+        if isinstance(item, dict):
+            normalized = _normalize_contract_path(str(item.get("path") or ""))
+            if normalized:
+                candidate_paths.append(normalized)
+    integration_context = feedback.get("integration_context")
+    if isinstance(integration_context, dict):
+        guard = integration_context.get("integration_union_guard")
+        if isinstance(guard, dict):
+            for path in guard.get("paths") or []:
+                normalized = _normalize_contract_path(str(path))
+                if normalized:
+                    candidate_paths.append(normalized)
+            for item in guard.get("missing") or []:
+                if isinstance(item, dict):
+                    normalized = _normalize_contract_path(str(item.get("path") or ""))
+                    if normalized:
+                        candidate_paths.append(normalized)
+
+    contracts = _foundation_contracts_for_parent(project_dir, parent_task_id, tasks)
+    for candidate_path in dict.fromkeys(candidate_paths):
+        for contract in contracts:
+            contract_path = _normalize_contract_path(str(contract.get("path") or ""))
+            owner_id = str(contract.get("owner_task_id") or "").strip()
+            if not contract_path or child_task_id == owner_id:
+                continue
+            if not _path_overlaps(candidate_path, contract_path):
+                continue
+            if any(_path_overlaps(owned, contract_path) for owned in child_owned_paths):
+                continue
+            return {
+                "path": contract_path,
+                "owner_task_id": owner_id,
+                "check": contract.get("check"),
+            }
+    return None
+
+
+def _enqueue_existing_task_for_merge_retry(
+    *,
+    project_dir: Path,
+    task_id: str,
+    parent_task_id: str,
+    parent_session_dir: Path,
+    intent: str,
+    owned_paths: list[str],
+    task_role: str,
+    parent_integration_branch: str,
+) -> None:
+    entry = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "parent_task_id": parent_task_id,
+        "parent_session_dir": str(parent_session_dir),
+        "intent": intent,
+        "depends_on": [],
+        "owned_paths": list(owned_paths),
+        "action_ids": [],
+        "task_role": task_role,
+        "integration_branch": parent_integration_branch,
+        "review_state": "approved",
+        "enqueued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    append_pending_entry(v5_pending_path(project_dir), entry)
+
+
+def _schedule_foundation_contract_amendment(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    child_worktree: Path,
+    child_session_dir: Path,
+    parent_task_id: str,
+    parent_integration_branch: str,
+    source_branch: str,
+    pre_merge_ref: str,
+    union_feedback: dict[str, Any],
+    contract: dict[str, Any],
+    on_event: Any = None,
+) -> str:
+    contract_path = _normalize_contract_path(str(contract.get("path") or ""))
+    owner_id = str(contract.get("owner_task_id") or "").strip()
+    intent = (
+        "Repair foundation contract amendment for "
+        f"`{contract_path}` after child `{child_task_id}` exposed an integration "
+        "union conflict. Preserve the contract owner's behavior and make the "
+        "contract compatible with the blocked leaf's contribution."
+    )
+    amendment_id = enqueue_subtask(
+        project_dir=project_dir,
+        parent_task_id=parent_task_id,
+        parent_session_dir=child_session_dir,
+        intent=intent,
+        owned_paths=[contract_path],
+        task_role="contract_amendment",
+        parent_integration_branch=parent_integration_branch,
+    )
+    record_task(
+        project_dir,
+        task_id=amendment_id,
+        parent_task_id=parent_task_id,
+        intent=intent,
+        integration_branch=parent_integration_branch,
+        owned_paths=[contract_path],
+        task_role="contract_amendment",
+    )
+    update_task_metadata(
+        project_dir,
+        amendment_id,
+        contract_amendment={
+            "contract_path": contract_path,
+            "owner_task_id": owner_id,
+            "blocked_task_id": child_task_id,
+            "source_branch": source_branch,
+            "pre_merge_ref": pre_merge_ref,
+        },
+        contract_amendment_path=contract_path,
+        contract_amendment_owner_task_id=owner_id,
+        repair_route="foundation_contract_amendment",
+    )
+    set_contract_amendment_blocked(
+        project_dir,
+        child_task_id,
+        amendment_id,
+        reason=str(union_feedback.get("message") or _integration_union_reason_text(union_feedback)),
+        merge_context={
+            "child_session_dir": str(child_session_dir),
+            "child_worktree": str(child_worktree),
+            "parent_integration_branch": parent_integration_branch,
+            "source_branch": source_branch,
+            "pre_merge_ref": pre_merge_ref,
+            "union_feedback": union_feedback,
+        },
+    )
+    _emit(on_event, {
+        "event": "foundation_contract_amendment_repair",
+        "task_id": child_task_id,
+        "amendment_task_id": amendment_id,
+        "contract_path": contract_path,
+        "owner_task_id": owner_id,
+        "parent_task_id": parent_task_id,
+        "structured_reason": union_feedback,
+    })
+    return amendment_id
+
+
+def _tasks_blocked_on_amendment(project_dir: Path, amendment_id: str) -> list[str]:
+    graph = read_graph(project_dir)
+    blocked: list[str] = []
+    for task_id, task in (graph.get("tasks") or {}).items():
+        if isinstance(task, dict) and task.get("blocked_on_task_id") == amendment_id:
+            blocked.append(str(task_id))
+    return blocked
+
+
+def _settle_contract_amendment_dependents(
+    *,
+    project_dir: Path,
+    amendment_id: str,
+    amendment_result: LeadResult,
+    completed: set[str],
+    child_results: dict[str, LeadResult],
+    on_event: Any = None,
+) -> None:
+    amendment = get_task(project_dir, amendment_id) or {}
+    if str(amendment.get("task_role") or "") != "contract_amendment":
+        return
+    graph_verdict = str(amendment.get("verdict") or amendment_result.verdict or "")
+    if graph_verdict == "pass":
+        unblocked = clear_contract_amendment_blocked_tasks(project_dir, amendment_id)
+        for leaf_id in unblocked:
+            leaf = get_task(project_dir, leaf_id) or {}
+            merge_context = leaf.get("contract_amendment_merge_context")
+            if not isinstance(merge_context, dict):
+                merge_context = {}
+            completed.discard(leaf_id)
+            child_results.pop(leaf_id, None)
+            _enqueue_existing_task_for_merge_retry(
+                project_dir=project_dir,
+                task_id=leaf_id,
+                parent_task_id=str(leaf.get("parent_task_id") or ROOT_TASK_ID),
+                parent_session_dir=Path(
+                    str(merge_context.get("child_session_dir") or _paths.cross_sessions_dir(project_dir))
+                ),
+                intent=str(leaf.get("intent") or leaf_id),
+                owned_paths=_task_owned_paths(leaf),
+                task_role=str(leaf.get("task_role") or "feature"),
+                parent_integration_branch=str(
+                    merge_context.get("parent_integration_branch")
+                    or leaf.get("integration_branch")
+                    or "main"
+                ),
+            )
+        _emit(on_event, {
+            "event": "foundation_contract_amendment_unblocked",
+            "amendment_task_id": amendment_id,
+            "unblocked_task_ids": unblocked,
+        })
+        return
+
+    if graph_verdict not in {"merge_blocked", "catastrophic", "partial", "unverified"}:
+        return
+    blocked = _tasks_blocked_on_amendment(project_dir, amendment_id)
+    if not blocked:
+        return
+    reason = (
+        "contract amendment failed before blocked leaf could retry merge: "
+        f"{amendment_result.failure_reason or graph_verdict}"
+    )
+    structured_reason = {
+        "kind": "contract_amendment_failed",
+        "step_id": "foundation_contract_amendment",
+        "message": reason,
+        "amendment_task_id": amendment_id,
+        "amendment_verdict": graph_verdict,
+        "blocked_task_ids": blocked,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    for leaf_id in blocked:
+        leaf_result = child_results.get(leaf_id) or LeadResult(
+            task_id=leaf_id,
+            verdict="merge_blocked",
+            decomposition="inline",
+        )
+        _record_task_merge_blocked_reason(
+            project_dir=project_dir,
+            task_id=leaf_id,
+            result=leaf_result,
+            reason=reason,
+            origin="contract_amendment",
+            structured_reason=structured_reason,
+        )
+        child_results[leaf_id] = leaf_result
+        completed.add(leaf_id)
+    clear_contract_amendment_blocked_state(project_dir, blocked)
+    _emit(on_event, {
+        "event": "foundation_contract_amendment_failed",
+        "amendment_task_id": amendment_id,
+        "blocked_task_ids": blocked,
+        "structured_reason": structured_reason,
+    })
 
 
 def _git_diff_full(worktree: Path, *, max_chars: int = 60000) -> str:
@@ -2083,6 +2364,8 @@ def _branch_is_ancestor(project_dir: Path, branch: str, target: str) -> tuple[bo
 
 
 def _task_entry_allows_upward_merge(entry: dict[str, Any]) -> bool:
+    if entry.get("blocked_pending_contract_amendment") or entry.get("blocked_on_task_id"):
+        return False
     if str(entry.get("verdict") or "") == "merge_blocked":
         return False
     if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
@@ -2099,6 +2382,8 @@ def _child_result_allows_upward_merge(
     result: LeadResult,
 ) -> bool:
     entry = get_task(project_dir, task_id) or {}
+    if entry.get("blocked_pending_contract_amendment") or entry.get("blocked_on_task_id"):
+        return False
     if str(entry.get("verdict") or "") == "merge_blocked":
         return False
     if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
@@ -3842,6 +4127,14 @@ async def _process_children(
                     released = True
                     child_results[tid] = result
                     _record_reviewed_partial_if_present(project_dir, tid, result)
+                    _settle_contract_amendment_dependents(
+                        project_dir=project_dir,
+                        amendment_id=tid,
+                        amendment_result=result,
+                        completed=completed,
+                        child_results=child_results,
+                        on_event=on_event,
+                    )
                     if _child_result_allows_upward_merge(project_dir, tid, result):
                         completed.add(tid)
                     _emit(on_event, {
@@ -4112,6 +4405,47 @@ async def _run_child(
                 "phase": "worktree_setup",
             },
         )
+
+    task_entry = get_task(project_dir, tid) or {}
+    if task_entry.get("contract_amendment_retry_merge"):
+        merge_context = task_entry.get("contract_amendment_merge_context")
+        if not isinstance(merge_context, dict):
+            merge_context = {}
+        retry_session_dir = Path(
+            str(merge_context.get("child_session_dir") or child_session_dir)
+        )
+        retry_result = LeadResult(
+            task_id=tid,
+            verdict=str(task_entry.get("last_agent_verdict") or "pass"),
+            decomposition=str(task_entry.get("decomposition") or "inline"),
+            verify_called=True,
+        )
+        update_task_metadata(
+            project_dir,
+            tid,
+            contract_amendment_retry_merge=False,
+            contract_amendment_retry_merge_started_at=time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(),
+            ),
+        )
+        _emit(on_event, {
+            "event": "contract_amendment_leaf_merge_retry",
+            "task_id": tid,
+            "blocked_on_task_id": task_entry.get("blocked_on_task_id"),
+        })
+        if _child_result_allows_upward_merge(project_dir, tid, retry_result):
+            await _merge_child_branch(
+                project_dir=project_dir,
+                child_task_id=tid,
+                child_worktree=child_worktree,
+                child_session_dir=retry_session_dir,
+                parent_integration_branch=parent_integration_branch,
+                result=retry_result,
+                config=config,
+                on_event=on_event,
+            )
+        return retry_result
 
     context_slice_note = ""
     if _context_slicing_enabled(config):
@@ -5286,6 +5620,32 @@ async def _merge_child_branch(
             "detail": detail,
             "structured_reason": union_feedback,
         })
+        parent_task_id = _parent_task_id_for_child(
+            project_dir,
+            child_task_id,
+            parent_integration_branch,
+        )
+        amendment_contract = _foundation_contract_for_feedback_path(
+            project_dir=project_dir,
+            parent_task_id=parent_task_id,
+            child_task_id=child_task_id,
+            feedback=union_feedback,
+        )
+        if amendment_contract is not None:
+            _schedule_foundation_contract_amendment(
+                project_dir=project_dir,
+                child_task_id=child_task_id,
+                child_worktree=child_worktree,
+                child_session_dir=child_session_dir,
+                parent_task_id=parent_task_id,
+                parent_integration_branch=parent_integration_branch,
+                source_branch=source_branch,
+                pre_merge_ref=pre_merge_ref,
+                union_feedback=union_feedback,
+                contract=amendment_contract,
+                on_event=on_event,
+            )
+            return
         try:
             repaired, repair_detail = await _repair_child_upward_merge_gate_once(
                 project_dir=project_dir,
