@@ -1975,3 +1975,66 @@ Non-convergence, not slow generation.
 
 Likely core = staged compile + prompt hardening; others reinforce. Not
 mutually exclusive.
+
+---
+
+## CORRECTION (2026-05-16, later) — misattributed layer; root cause is ENTRYPOINT, not the compile agent
+
+The hypotheses above (H1–H4, staged-compile fix directions) investigate
+the **legacy `otto run` compile path** — which the v5 i2p capstone does
+**not** use. The user's question ("why 47 features? did it occur before?
+what changed?") exposed the real cause. Evidence:
+
+- There are two compile entrypoints:
+  - **`otto run`** (`cli_run.py register_run_command` → `orchestrate_run`
+    → `_run_compile_phase` → `spec_compile.compile_spec`): the **legacy
+    heavy** path. Prompt `compile-spec.md` (1010 lines), schema v2,
+    groups/features → decomposes this intent into ~47 features → the
+    non-convergence documented above. The i2p-vs-legacy `--i2p`/
+    `default_pipeline` choice only affects the **downstream** pipeline;
+    BOTH branches call the same heavy `_run_compile_phase`. So even
+    `otto run --i2p` uses the non-converging compile.
+  - **`otto v5 run`** (`cli_v5.py register_v5_command` →
+    `compile_flat_spec`): the **flat i2p** path. Schema **v4**
+    (product_overview + intent_claims + core_entities + ~5
+    behavior_journeys). Converges.
+- Prior SUCCESSFUL iTracker runs (jv2 @ ~02:00, v6*, overnight) are all
+  schema-v4 / "COMPILE-FLAT" → they used **`otto v5 run`**. jv2 compiled
+  this exact intent in ~7 min (425s agent + a contract-repair round),
+  0 Write, emitted via structured/text — i.e. the flat path converges
+  fine on the 47-"feature" intent.
+- The two crashed capstone runs were launched by me with
+  `python -m otto.cli run` = **`otto run`** = legacy heavy compile.
+  jv2's `otto.yaml` is byte-identical to mine (no `default_pipeline`),
+  confirming the difference is the **command**, not config.
+
+**Root cause: operator/entrypoint error (mine), not an Otto regression
+and not a compile-agent capability bug.** "47 features" is the legacy
+path's decomposition; it "didn't happen before" because prior runs used
+`otto v5 run` (flat); "what changed" = I used `otto run` instead of
+`otto v5 run`. H1–H4 are real *for the legacy path* but that path is not
+the v5 capstone path; treat the staged-compile investigation as **shelved
+/ legacy-only**, not the capstone fix.
+
+The timeout-robustness fix (`798b0a0d4 → a75677088`, gate APPROVED)
+remains valid as defensive hardening for the legacy `otto run` path, but
+it is **not** what unblocks the capstone.
+
+### Separate real discrepancy (Finding 2 — needs a decision)
+
+Project `CLAUDE.md:9` documents `otto run "<intent>"` as the **"Unified
+i2p entrypoint: compile → build → merge → audit → render"**, and the
+`otto-as-user` skill's pressure-test examples use
+`python -m otto.cli run "..."`. But `otto run`'s compile is hardwired to
+the **legacy heavy** `compile_spec`; the converging i2p/flat compile is
+only under `otto v5 run`. So either the docs/skill are stale (real i2p
+entrypoint = `otto v5 run`) or `otto run` is mis-wired (should use the
+flat compile to be the documented "unified i2p entrypoint"). This is a
+genuine footgun — I fell into it by trusting the doc. Distinct from the
+capstone; needs a doc-fix-vs-dispatch-fix decision.
+
+### Corrected next step
+
+Relaunch the capstone via **`otto v5 run`** (the exact path jv2 used and
+proved converges on this intent), with the cc-i2p-2 venv (fixed seam +
+timeout code). No staged-compile work needed to unblock.
