@@ -84,20 +84,29 @@ existing `tests/test_v5_*`/`task_graph`/`subtask` test regresses.
    structured `kind=shared_foundation_not_isolated`; honest exhaustion →
    structured terminal (no crash, no silent dispatch). Bound = existing
    attempt bounds (no infinite re-enter on unsatisfiable architecture).
-3. **Close the real v5 create-anywhere hole — at the v5 merge path, not
-   only legacy build.py.** The capstone mechanism: `_merge_child_branch`
-   calls `commit_worktree` which does `git add -A`
-   (`v5_branching.py:~909`) BEFORE merge (`v5_runner.py:~4190`), so a
-   feature child that *creates* `backend/auth.py` gets committed even
-   though `detect_scope_violations` (legacy `build.py:~568`) never runs
-   on the v5 path. Add a **v5 child pre-commit/pre-merge scope gate in
-   `_merge_child_branch`**: compute the child's changed paths vs its
-   `owned_paths` + the parent `foundation_contracts`; a created/modified
-   file on a foundation-contract path the child doesn't own (or outside
-   owned_paths when contracts are in effect) → structured block BEFORE
-   `commit_worktree`/branch advance, routed per S2. Also tighten
-   `detect_scope_violations` as a secondary defense (newly-created
-   foundation path = violation), but the v5 gate is primary.
+3. **Close the real v5 create-anywhere hole — uniform contract-write
+   invariant at every v5 admission point.** Capstone mechanism:
+   `_merge_child_branch` calls `commit_worktree` (`git add -A`,
+   `v5_branching.py:~909`) before merge (`v5_runner.py:~4192`); legacy
+   `detect_scope_violations` never runs on the v5 path. The single
+   enforced invariant: **a task may write a `foundation_contract` path
+   only if it is that contract's `owner_task_id` or a
+   `contract_amendment` for it.** Enforce it as a shared helper applied
+   at ALL v5 commit/merge admission points, not just the one site:
+   - pre-`commit_worktree` dirty/untracked worktree paths in
+     `_merge_child_branch`;
+   - **and** the already-committed child-branch delta vs the parent
+     integration branch before `merge_child_into_integration` (child
+     verify-repair and conflict-repair commit through separate hooks —
+     `v5_runner.py:~2077`, `~4924` — that bypass a dirty-only check);
+   - the integration-agent commit path
+     `_commit_integration_agent_changes` (`v5_runner.py:~5552`): an
+     integration agent editing a foundation contract it does not own
+     must be gated the same way (allowed only if integration/owner/
+     amendment, else routed per S2).
+   Violation → structured block BEFORE branch advance, routed per S2.
+   Tighten `detect_scope_violations` (newly-created foundation path =
+   violation) as a secondary defense only.
 
 **Verify:** repro #1 GREEN; **a no-`depends_on` feature is held until
 the sibling foundation passes and parent contracts are parsed**; **a v5
@@ -118,14 +127,29 @@ always reject → deadlock). Instead create/record a
 `owner_task_id` (reuse the existing structured repair-need + re-entry
 machinery; emit `foundation_contract_amendment_repair`).
 
-**Lifecycle (must be complete — not just "emit an event"):** the leaf
-records `blocked_on_task_id=<amendment>` and must NOT become a terminal
-non-runnable `merge_blocked` that nothing retries (terminal verdicts are
-non-runnable via `_NON_RUNNABLE_VERDICTS`, `subtask.py:~140`). Define:
-amendment task is scheduled & dispatched (a runnable task in the
-graph), runs, lands; on amendment landing the original leaf is
-re-enqueued / its block cleared and its merge retried. No graph
-deadlock (leaf never waits on an amendment that is never scheduled).
+**Lifecycle — concrete net-new state machine (must be specified, it
+does not exist today):**
+- The blocked leaf does NOT take a terminal verdict. Add a non-terminal
+  **state field** `blocked_pending_contract_amendment` +
+  `blocked_on_task_id=<amendment>` on the task record — do NOT add a new
+  member to the `Verdict` type (`task_graph.py:~54`) or to
+  `_NON_RUNNABLE_VERDICTS` (`subtask.py:~140`); keep the leaf's verdict
+  non-terminal so it stays a graph citizen.
+- Ready-selection (`take_ready`, `subtask.py:~223`) gains a
+  `blocked_on_task_id` gate analogous to the existing `depends_on`
+  check: a task with an unsatisfied `blocked_on_task_id` is skipped
+  (not dispatched, not terminal).
+- The `contract_amendment` task is a normal runnable task
+  (owner=foundation `owner_task_id`, role=`contract_amendment`,
+  `owned_paths`=the contract path) scheduled into the graph.
+- On amendment terminal-pass: clear the leaf's
+  `blocked_pending_contract_amendment` state + `blocked_on_task_id`, and
+  re-enqueue the leaf's merge (reuse the existing re-enqueue/retry
+  path). On amendment terminal-fail (bounded exhaustion): the leaf
+  becomes an honest structured `merge_blocked` with the amendment
+  failure as the reason (no silent hang).
+- Invariant: leaf never waits on an amendment that is never scheduled;
+  amendment never orphaned.
 
 **Repro adjustment (RED-first oracle fix):** repro #5's current
 assertion is too weak (OR over event/task/marker). Strengthen it to
@@ -170,18 +194,23 @@ semantic contract path still gets exact line-union**; no regression in
 ## S4 — Split merge-conflict repair from whole-product clean-deploy
 
 **Split "smoke" (detection) from "smoke repair" (the leaf repair
-loop).** You cannot route a clean-deploy failure without detecting it,
-so the contradiction is resolved by: after a scoped conflict repair,
-`_merge_child_branch` may run a **non-repairing** integration smoke
-(detection only) — but it must NOT enter
-`_run_integration_smoke_preflight_with_repair`'s leaf repair loop
-(`v5_runner.py:~4277`) for an out-of-scope/foundation failure. On such a
-failure emit a correctly-owned `foundation_repair_needed` /
-`integration_repair_needed` (routed per S2 lifecycle) instead of
-widening the leaf into whole-product debugging / a 1799s session.
-Repair-packet allowed paths stay scoped to the conflict; the
-`v5_preflight_repair.py:~988` prompt must not demand the full
-acceptance oracle from a leaf conflict repair.
+loop) — at BOTH leaf smoke-repair entry points.** After a scoped
+conflict repair, `_merge_child_branch` may run a **non-repairing**
+integration smoke (detection only) but must NOT enter
+`_run_integration_smoke_preflight_with_repair`'s leaf repair loop.
+There are TWO call sites that currently do, both must be replaced with
+detection-only + S2-routed repair-need:
+- the direct post-conflict path (`v5_runner.py:~4277`);
+- the stale-target retry path:
+  `_repair_stale_target_and_retry_merge(..., run_smoke_preflight=True)`
+  (`v5_runner.py:~4381`) → `_run_integration_smoke_preflight_with_repair`
+  (`~4091`) — equally a 1799s-style leaf loop.
+On an out-of-scope/foundation clean-deploy failure from either, emit a
+correctly-owned `foundation_repair_needed`/`integration_repair_needed`
+(routed per S2) instead of widening the leaf. Repair-packet allowed
+paths stay scoped to the conflict; the `v5_preflight_repair.py:~988`
+prompt must not demand the full acceptance oracle from a leaf conflict
+repair.
 
 **Repro adjustment (RED-first oracle fix):** repro #2 currently asserts
 `smoke_calls == []` — wrong per the split (a non-repairing smoke is
@@ -191,10 +220,11 @@ correctly-owned repair-need is emitted; a detection-only smoke call is
 allowed. Adjust the repro as part of this step (before the fix),
 keeping it RED now.
 
-**Verify:** adjusted repro #2 GREEN (no leaf smoke-repair loop,
-correctly-owned repair-need emitted, not merge_blocked); **no
-1799s-style repair session can be launched from a leaf conflict
-repair**; existing conflict-repair tests stay GREEN.
+**Verify:** adjusted repro #2 GREEN (no leaf smoke-repair loop via
+EITHER call site, correctly-owned repair-need emitted, not
+merge_blocked); **no `_run_integration_smoke_preflight_with_repair`
+leaf-repair invocation from the direct OR stale-target path**; existing
+conflict-repair tests stay GREEN.
 
 ## S5 — Clean-verify worktree isolation
 
@@ -303,4 +333,34 @@ Round-1 also corrected 2 banked RED repros (#2, #5) as RED-first oracle
 fixes (refine correct-behavior assertion before the code) — folded into
 S4/S2.
 
-(Round 2 trail appended after re-review.)
+### Round 2 — Codex (REVISE) — 3 refinements incorporated; direction approved
+
+- [ISSUE] S1.3 needed dual-check + all admission points — **fixed**: S1.3
+  is now a uniform contract-write invariant applied pre-commit
+  (dirty/untracked), pre-merge (committed branch-delta vs parent, covers
+  the separate verify/conflict commit hooks ~2077/~4924), AND the
+  integration-agent commit path (`_commit_integration_agent_changes`
+  ~5552).
+- [ISSUE] S2 state machine under-specified (net-new vs `take_ready`) —
+  **fixed**: S2 now specifies non-terminal `blocked_pending_contract
+  _amendment` state + `blocked_on_task_id`, a `take_ready` blocked-on
+  gate analogous to `depends_on`, runnable amendment task, clear+
+  re-enqueue on amendment pass, honest merge_blocked on amendment
+  fail — explicitly NOT touching `Verdict`/`_NON_RUNNABLE_VERDICTS`.
+- [ISSUE] S4 missed the stale-target smoke-repair path — **fixed**: S4
+  now replaces BOTH leaf smoke-repair entry points (direct ~4277 AND
+  `_repair_stale_target_and_retry_merge`/~4381→~4091).
+- [CONFIRMED OK by Codex] S3 implementable from current data (union
+  state records `child_task_id`/`contributed_by` per line) — make the
+  semantic/literal decision **per contribution item**, not per path
+  (already the S3 intent; noted explicit).
+
+**Safe implementation/commit order (Codex-confirmed):** S0 → S1
+(scheduler+isolation+uniform merge-admission gate) → S2
+(blocked-leaf/amendment lifecycle) → S3 (semantic guard, per-contribution)
+→ S4 (smoke/smoke-repair split, both sites) → S5 (independent after S0,
+before final capstone). **Per step: the repro assertion adjustment
+(#2/#3/#5) lands in that step BEFORE its production change** (RED-first
+oracle fix), then the production fix flips it GREEN.
+
+(Round 3 trail appended after re-review.)
