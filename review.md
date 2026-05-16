@@ -1098,6 +1098,36 @@ Independent verification (Claude): tests/test_concurrency_recursion_seam_repros
 + test_critical_seam_repros + test_shared_route_registration_repro 9/9;
 spec_state+v5_runner+merge_child 20/20; ruff clean.
 
+## 2026-05-16T08:22:38Z - Spec Compile Timeout Re-entry Review
+
+Implementation gate status: `/codex-gate` / Codex MCP is unavailable in this
+session's tool list, so no external gate was invoked.
+
+### Review findings
+- No issue found in timeout classification: `_is_compile_agent_timeout()` only
+  matches `AgentCallError` reasons with Otto's exact `Timed out after Ns`
+  wording, so max-turn/budget/provider errors keep propagating.
+- No issue found in retry bounds: timeout retries use three total compile-agent
+  attempts and the existing transient-provider retry remains one retry within
+  the same bounded attempt counter.
+- Budget wiring review found one issue before final verification: CLI and
+  runner compile call sites were not passing `RunBudget` into `compile_spec()`.
+  Fixed by threading `RunBudget.start_from(config)` through `_run_compile_phase`,
+  `_brownfield_compile_locked`, and `runner.run_pipeline()` compile fallback.
+- No issue found in terminal recording: compile `SpecValidationError`s now emit
+  `run.finished` with `verdict=blocked`; structured timeout exhaustion carries
+  `structured_reason.kind=spec_compile_timeout_exhausted`.
+
+### Verification
+- RED run before production fix: `tests/test_spec_compile_timeout_reentry.py`
+  failed 3/4, proving raw timeout propagation and missing terminal recording.
+- GREEN: `uv run --extra dev pytest tests/test_spec_compile_timeout_reentry.py -q -p no:cacheprovider`
+  passed 4/4.
+- GREEN: `uv run --extra dev pytest tests/ -q -k "spec_compile or compile_spec" -p no:cacheprovider`
+  passed 98/98 selected.
+- GREEN: `uv run ruff check otto/`.
+- Additional focused config check passed: `uv run --extra dev pytest tests/test_config.py -q -k spec_timeout -p no:cacheprovider`.
+
 Plan Gate: n/a (fix dispatched from RED repro evidence, not a written plan).
 Implementation Gate: 4 review rounds + 1 confirmation (8 findings) → APPROVED.
 Commits: 401e78f6c (repros) · 6796a9058 → f92b55ff9 → 3779aca79 → 9d82e48f8

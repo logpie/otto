@@ -1821,3 +1821,52 @@ Base: `e7ca4406b`
 - `/codex-gate` is not available in this tool environment, so the mandatory
   gate cannot be invoked. Verification must include RED/GREEN repros, requested
   no-regress batch, ruff, and basedpyright on touched files.
+
+## 2026-05-16T08:22:38Z - Spec Compile Timeout Re-entry
+
+### What exists today
+- `otto/spec_compile.py:compile_spec()` computes one `timeout` as
+  `min(budget.for_call(), spec_cap)` when a `RunBudget` is passed, otherwise
+  `spec_cap`. `_run_compile_agent(attempt)` closes over that single value and
+  passes it to `otto.agent.run_agent_with_timeout()`.
+- The compile retry block retries exactly once only when
+  `is_transient_provider_error(exc)` returns true. `AgentCallError("Timed out
+  after Ns")` is not transient, so it propagates raw.
+- `otto.agent.run_agent_with_timeout()` creates timeout errors with the exact
+  reason string `Timed out after {timeout}s`. It also uses `AgentCallError`
+  for other provider errors, including max-turn or budget-like failures.
+- `otto/cli_run.py` treats `SpecValidationError` as a clean compile failure in
+  both `--no-build` and full-run compile paths. Raw exceptions outside this
+  class escape to the catastrophic/pipeline-crash style handling.
+- Existing v5 merge repair structured terminal handling lives in
+  `otto/v5_runner.py`; this fix must not modify that path.
+
+### Constraints
+- Timeout detection must be narrower than all `AgentCallError`s; budget or
+  max-turn errors must keep propagating as before.
+- Timeout retry should compose with the existing transient provider retry, not
+  replace it.
+- Retrying with the same cap is ineffective for slow healthy compile agents.
+  The per-attempt timeout must increase while still respecting
+  `budget.for_call()`.
+- Honest timeout exhaustion should raise a structured `SpecValidationError`
+  subclass so CLI compile catches remain clean and machine-readable metadata is
+  available to callers/tests.
+- Config defaults are centralized in `otto/config.py::DEFAULTS` with
+  `DEFAULT_CONFIG` as an alias and the YAML template rendering from the same
+  dict.
+
+### Open questions / decisions
+- Attempt bound: use three timeout attempts total. One retry handles ordinary
+  scheduler/provider jitter; the second retry handles large multi-subsystem
+  intents without creating an unbounded loop.
+- Escalation schedule: base cap, then 2x, then 3x, each clamped to
+  `budget.for_call()` when a run budget exists. This preserves the global
+  budget while avoiding repeated identical 600s failures.
+- New default: 1200s. It doubles the empirically too-low 600s default for
+  capstone-scale product specs while leaving the one-hour run budget as the
+  primary guard and preserving `spec_timeout` override behavior.
+- CLI recording: add a small helper to emit `run.finished` with
+  `verdict="blocked"` and a structured reason payload when the compile failure
+  exposes one. This keeps compile terminal state structured without changing
+  merge/v5 runner code.

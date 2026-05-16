@@ -82,10 +82,12 @@ SCHEMA_LEGACY_GROUP_FIELDS_V1: tuple[str, ...] = (
 SPEC_FILENAME = "spec.json"
 COMPILE_PROMPT = "compile-spec.md"
 COMPILE_PROMPT_BROWNFIELD = "compile-spec-brownfield.md"
+SPEC_COMPILE_AGENT_MAX_ATTEMPTS = 3
 PROJECT_KINDS: tuple[str, ...] = ("webapp", "cli", "library", "api", "service")
 BROWNFIELD_MODES: tuple[str, ...] = ("baseline", "target")
 AUDIT_FIXTURE_KINDS: tuple[str, ...] = ("user", "channel", "follow", "data")
 SCHEMAS_DIR = Path(__file__).parent / "spec_schemas"
+_AGENT_TIMEOUT_RE = re.compile(r"\btimed out after\s+\d+(?:\.\d+)?s\b", re.IGNORECASE)
 
 
 # Per-kind default evidence kinds for new Features (research §2.7).
@@ -3851,6 +3853,83 @@ class SpecValidationError(ValueError):
     """Raised when a Spec is malformed (parse-time)."""
 
 
+class SpecCompileTimeoutExhaustedError(SpecValidationError):
+    """Raised when bounded spec compile timeout retries are exhausted."""
+
+    def __init__(
+        self,
+        *,
+        attempts: int,
+        per_attempt_timeouts: list[int],
+        elapsed_s: float,
+        attempt_errors: list[dict[str, Any]],
+    ) -> None:
+        self.structured_reason = {
+            "kind": "spec_compile_timeout_exhausted",
+            "attempts": attempts,
+            "per_attempt_timeouts": per_attempt_timeouts,
+            "elapsed_s": round(max(0.0, elapsed_s), 3),
+            "attempt_errors": attempt_errors,
+            "_written_at": _iso_now(),
+        }
+        total_cost = sum(
+            float(item["total_cost_usd"])
+            for item in attempt_errors
+            if isinstance(item.get("total_cost_usd"), int | float)
+        )
+        if total_cost > 0:
+            self.structured_reason["known_cost_usd"] = round(total_cost, 6)
+        super().__init__(
+            "spec compile timed out after "
+            f"{attempts} attempts; per-attempt timeouts were "
+            f"{', '.join(str(timeout) + 's' for timeout in per_attempt_timeouts)}"
+        )
+
+
+def _is_compile_agent_timeout(exc: BaseException) -> bool:
+    """Return true only for Otto's bounded agent-call timeout error."""
+    try:
+        from otto.agent import AgentCallError
+    except Exception:  # pragma: no cover - import should always be available.
+        return False
+    if not isinstance(exc, AgentCallError):
+        return False
+    haystack = " ".join(str(part or "") for part in (getattr(exc, "reason", ""), str(exc)))
+    return bool(_AGENT_TIMEOUT_RE.search(haystack))
+
+
+def _spec_compile_timeout_for_attempt(
+    *,
+    spec_cap: int,
+    attempt: int,
+    budget: "RunBudget | None",
+) -> int:
+    requested = max(1, int(spec_cap)) * max(1, int(attempt))
+    if budget is None:
+        return requested
+    return min(int(budget.for_call()), requested)
+
+
+def _compile_timeout_attempt_error(
+    *,
+    attempt: int,
+    timeout_s: int,
+    exc: BaseException,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "attempt": attempt,
+        "timeout_s": timeout_s,
+        "message": str(exc),
+    }
+    session_id = str(getattr(exc, "session_id", "") or "")
+    if session_id:
+        payload["session_id"] = session_id
+    total_cost = getattr(exc, "total_cost_usd", None)
+    if isinstance(total_cost, int | float):
+        payload["total_cost_usd"] = float(total_cost)
+    return payload
+
+
 _GROUP_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
@@ -5062,9 +5141,10 @@ async def compile_spec(
         base_spec: Reserved for A6.4 additive mode (delta vs base spec).
             Currently surfaces a warning if non-None and ignored.
 
-    `AgentCallError` from budget-exhaustion or timeout propagates
-    UNWRAPPED so callers can write a paused checkpoint, matching the
-    contract in `otto/spec.py:259`.
+    Non-timeout `AgentCallError` from budget exhaustion or provider failure
+    propagates unwrapped. Bounded agent-call timeouts re-enter compile with
+    progressively larger caps and exhaust as a structured `SpecValidationError`
+    terminal.
     """
     from otto.agent import (
         is_transient_provider_error,
@@ -5158,9 +5238,11 @@ async def compile_spec(
     if getattr(options, "provider", "") != "codex-app-server":
         _assign_output_format(options, _spec_output_format())
     spec_cap = get_spec_timeout(config)
-    timeout: int = min(budget.for_call(), spec_cap) if budget is not None else spec_cap
 
-    async def _run_compile_agent(attempt: int) -> tuple[str, float, str, dict[str, Any]]:
+    async def _run_compile_agent(
+        attempt: int,
+        timeout: int,
+    ) -> tuple[str, float, str, dict[str, Any]]:
         log_subdir = run_dir / (
             "compile-agent" if attempt == 1 else f"compile-agent-retry-{attempt:02d}"
         )
@@ -5175,16 +5257,59 @@ async def compile_spec(
             project_dir=project_dir,
         )
 
-    try:
-        text, _cost, _session_id, _breakdown = await _run_compile_agent(1)
-    except Exception as exc:
-        if not is_transient_provider_error(exc):
-            raise
-        logger.warning(
-            "compile agent hit transient provider error; retrying once: %s",
-            exc,
+    compile_started = time.monotonic()
+    transient_retry_used = False
+    timeout_attempts: list[int] = []
+    timeout_errors: list[dict[str, Any]] = []
+    attempt = 1
+    while True:
+        timeout = _spec_compile_timeout_for_attempt(
+            spec_cap=spec_cap,
+            attempt=attempt,
+            budget=budget,
         )
-        text, _cost, _session_id, _breakdown = await _run_compile_agent(2)
+        try:
+            text, _cost, _session_id, _breakdown = await _run_compile_agent(attempt, timeout)
+            break
+        except Exception as exc:
+            if _is_compile_agent_timeout(exc):
+                timeout_attempts.append(timeout)
+                timeout_errors.append(
+                    _compile_timeout_attempt_error(
+                        attempt=attempt,
+                        timeout_s=timeout,
+                        exc=exc,
+                    )
+                )
+                if attempt >= SPEC_COMPILE_AGENT_MAX_ATTEMPTS:
+                    raise SpecCompileTimeoutExhaustedError(
+                        attempts=attempt,
+                        per_attempt_timeouts=timeout_attempts,
+                        elapsed_s=time.monotonic() - compile_started,
+                        attempt_errors=timeout_errors,
+                    ) from exc
+                logger.warning(
+                    "compile agent timed out after %ss; retrying with extended cap "
+                    "(attempt %d/%d)",
+                    timeout,
+                    attempt + 1,
+                    SPEC_COMPILE_AGENT_MAX_ATTEMPTS,
+                )
+                attempt += 1
+                continue
+            if (
+                is_transient_provider_error(exc)
+                and not transient_retry_used
+                and attempt < SPEC_COMPILE_AGENT_MAX_ATTEMPTS
+            ):
+                transient_retry_used = True
+                logger.warning(
+                    "compile agent hit transient provider error; retrying once: %s",
+                    exc,
+                )
+                attempt += 1
+                continue
+            raise
 
     payload = _structured_spec_payload_from_breakdown(_breakdown)
     if payload is not None:

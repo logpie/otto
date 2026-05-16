@@ -273,16 +273,20 @@ async def run_pipeline(
 
     # ---- 1. Compile ----
     if spec is None:
+        from otto.budget import RunBudget
+
         _phase("compile")
         assert config is not None  # narrowed above
         run_dir = session_dir / "spec"
         run_dir.mkdir(parents=True, exist_ok=True)
+        run_budget = RunBudget.start_from(config)
         spec = await compile_spec(
             intent,
             project_dir,
             run_dir,
             config,
             project_kind=project_kind,
+            budget=run_budget,
             brownfield=brownfield,
         )
 

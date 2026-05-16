@@ -400,7 +400,7 @@ class TestProviderHelpers:
         ) == "target"
 
     def test_get_spec_timeout_uses_default(self):
-        assert get_spec_timeout({}) == 600
+        assert get_spec_timeout({}) == 1200
 
     def test_get_max_turns_per_call_uses_default(self):
         assert get_max_turns_per_call({}) == 200
@@ -762,7 +762,7 @@ class TestCreateConfig:
 
     def test_create_config_mentions_spec_timeout(self, tmp_bare_git_repo):
         config_path = create_config(tmp_bare_git_repo)
-        assert "# spec_timeout: 600" in config_path.read_text()
+        assert "# spec_timeout: 1200" in config_path.read_text()
 
     def test_updates_git_info_exclude(self, tmp_bare_git_repo):
         create_config(tmp_bare_git_repo)

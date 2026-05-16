@@ -1057,3 +1057,31 @@ checklist applied:
   `set_verdict`, audit `verdict_cap_reasons`, and `_compact_evidence`.
 - System checks: new focused hardening tests, guardrail test, requested
   P0/P1/P2/leaf/smoke suites, smoke tier, ruff, basedpyright, and diff review.
+
+## 2026-05-16T08:22:38Z - Spec Compile Timeout Re-entry Plan
+
+1. Add RED-first deterministic tests for compile timeout re-entry.
+   - Why: the failure must be reproduced without a long live LLM run.
+   - Verify: `uv run --extra dev pytest tests/test_spec_compile_timeout_reentry.py -q -p no:cacheprovider` fails on current code with raw timeout propagation or missing structured payload behavior.
+
+2. Add narrow timeout classification and structured timeout exhaustion.
+   - Why: timeout is retryable, but budget/max-turn/provider crashes must not be hidden.
+   - Verify: attempt-1 timeout re-enters and attempt-2 success returns a valid spec; non-timeout `AgentCallError` still propagates.
+
+3. Make compile timeout attempts progressive and budget-clamped.
+   - Why: retrying the same cap can deterministically fail again; the global run budget remains the outer guard.
+   - Verify: tests assert attempt 2 receives an increased timeout and budget-clamped calls never exceed remaining budget.
+
+4. Route timeout exhaustion through clean compile-terminal handling.
+   - Why: CLI/orchestrator code already treats `SpecValidationError` as a clean compile failure; timeout exhaustion needs the same terminal lane with machine-readable details.
+   - Verify: focused CLI test confirms `otto run --no-build` exits nonzero, emits `run.finished`, and records structured kind `spec_compile_timeout_exhausted`, not a raw catastrophic exception.
+
+5. Raise the spec timeout default and sync docs/template mirrors.
+   - Why: 600s is empirically too low for large product specs; the default should fit real capstone compile work while remaining overrideable.
+   - Verify: config unit expectations and grep confirm no stale "Default 600" or template inconsistency remains.
+
+6. Run acceptance gates and review the diff.
+   - Verify: requested focused test, spec/compile regression suite, and `uv run ruff check otto/` all pass.
+
+### Plan Gate Note
+- `/codex-gate` / Codex MCP review tools are not available in this session's tool list. I cannot invoke the mandatory external gate here; I will record implementation review in `review.md` and rely on the RED/GREEN repro plus requested regression commands.

@@ -47,7 +47,7 @@ DEFAULTS: dict[str, Any] = {
 
     # Budgets & caps
     "run_budget_seconds":     3600,
-    "spec_timeout":           600,
+    "spec_timeout":           1200,
     "max_certify_rounds":     8,
     "max_turns_per_call":     200,
 
@@ -428,7 +428,7 @@ def get_run_budget(config: dict[str, Any]) -> int:
 
 
 def get_spec_timeout(config: dict[str, Any]) -> int:
-    """Read `spec_timeout` from config. Default 600."""
+    """Read `spec_timeout` from config. Default 1200."""
     import logging
     _logger = logging.getLogger("otto.config")
     default = int(DEFAULT_CONFIG["spec_timeout"])
