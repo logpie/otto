@@ -250,6 +250,42 @@ def set_verdict(
             graph["tasks"][task_id]["cost_usd"] = float(cost_usd)
 
 
+def set_verdict_and_metadata(
+    project_dir: Path,
+    task_id: str,
+    verdict: Verdict,
+    *,
+    cost_usd: float | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Atomically set a verdict and associated metadata in one graph write."""
+    clean = {key: value for key, value in (metadata or {}).items() if value is not None}
+    with _locked_graph(project_dir) as (_path, graph):
+        if task_id not in graph["tasks"]:
+            graph["tasks"][task_id] = {
+                "parent_task_id": None,
+                "intent": "",
+                "decomposition": "unknown",
+                "verdict": verdict,
+                "integration_branch": None,
+                "started_at": _now_iso(),
+                "completed_at": _now_iso(),
+                "cost_usd": cost_usd or 0.0,
+                "child_task_ids": [],
+                "depends_on": [],
+                "owned_paths": [],
+                "action_ids": [],
+                "task_role": "feature",
+                "foundation_contracts": [],
+            }
+        else:
+            graph["tasks"][task_id]["verdict"] = verdict
+            graph["tasks"][task_id]["completed_at"] = _now_iso()
+            if cost_usd is not None:
+                graph["tasks"][task_id]["cost_usd"] = float(cost_usd)
+        graph["tasks"][task_id].update(clean)
+
+
 def update_task_metadata(
     project_dir: Path,
     task_id: str,
@@ -313,11 +349,14 @@ def set_contract_amendment_blocked(
                 "foundation_contracts": [],
             }
         task = graph["tasks"][task_id]
-        task["last_agent_verdict"] = task.get("verdict")
+        if task.get("verdict") is not None:
+            task["last_agent_verdict"] = task.get("verdict")
         task["verdict"] = None
         task["completed_at"] = None
         task["blocked_pending_contract_amendment"] = True
         task["blocked_on_task_id"] = amendment_id
+        task["contract_amendment_retry_merge"] = False
+        task["contract_amendment_retry_in_progress"] = False
         task["contract_amendment_blocked_at"] = _now_iso()
         if reason:
             task["contract_amendment_blocked_reason"] = reason
@@ -340,9 +379,58 @@ def clear_contract_amendment_blocked_tasks(
             task["blocked_pending_contract_amendment"] = False
             task["blocked_on_task_id"] = None
             task["contract_amendment_retry_merge"] = True
+            task["contract_amendment_retry_in_progress"] = False
             task["contract_amendment_unblocked_at"] = _now_iso()
             cleared.append(str(task_id))
     return cleared
+
+
+def mark_contract_amendment_retry_in_progress(
+    project_dir: Path,
+    task_id: str,
+) -> bool:
+    """Durably mark a merge-only amendment retry as non-dispatchable."""
+    with _locked_graph(project_dir) as (_path, graph):
+        task = graph["tasks"].get(task_id)
+        if not isinstance(task, dict):
+            return False
+        if task.get("blocked_pending_contract_amendment") or task.get("blocked_on_task_id"):
+            return False
+        if task.get("verdict") in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}:
+            return False
+        if not task.get("contract_amendment_retry_merge"):
+            return False
+        task["contract_amendment_retry_in_progress"] = True
+        task["contract_amendment_retry_merge_started_at"] = _now_iso()
+        return True
+
+
+def persist_contract_amendment_retry_success(
+    project_dir: Path,
+    task_id: str,
+    verdict: Verdict,
+    *,
+    cost_usd: float | None = None,
+) -> bool:
+    """Atomically restore a terminal verdict and clear retry-only state."""
+    with _locked_graph(project_dir) as (_path, graph):
+        task = graph["tasks"].get(task_id)
+        if not isinstance(task, dict):
+            return False
+        if task.get("blocked_pending_contract_amendment") or task.get("blocked_on_task_id"):
+            return False
+        if str(task.get("verdict") or "") in {"merge_blocked", "catastrophic"}:
+            return False
+        if task.get("merge_blocked_structured_reason") or task.get("merge_blocked_reason"):
+            return False
+        task["verdict"] = verdict
+        task["completed_at"] = _now_iso()
+        if cost_usd is not None:
+            task["cost_usd"] = float(cost_usd)
+        task["contract_amendment_retry_merge"] = False
+        task["contract_amendment_retry_in_progress"] = False
+        task["contract_amendment_retry_restored_at"] = _now_iso()
+        return True
 
 
 def clear_contract_amendment_blocked_state(
@@ -360,6 +448,8 @@ def clear_contract_amendment_blocked_state(
                 continue
             task["blocked_pending_contract_amendment"] = False
             task["blocked_on_task_id"] = None
+            task["contract_amendment_retry_merge"] = False
+            task["contract_amendment_retry_in_progress"] = False
 
 
 def mark_reviewed_partial(

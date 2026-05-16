@@ -83,11 +83,14 @@ from otto.queue.task_graph import (
     get_retry_count,
     get_retry_reason,
     get_task,
+    mark_contract_amendment_retry_in_progress,
     mark_reviewed_partial,
+    persist_contract_amendment_retry_success,
     read_graph,
     record_task,
     set_contract_amendment_blocked,
     set_verdict,
+    set_verdict_and_metadata,
     tree_total_cost,
     update_task_metadata,
 )
@@ -959,22 +962,20 @@ def _persist_successful_contract_amendment_retry(
     latest = get_task(project_dir, task_id) or {}
     if latest.get("blocked_pending_contract_amendment") or latest.get("blocked_on_task_id"):
         return False
-    if latest.get("contract_amendment_retry_merge"):
+    if not latest.get("contract_amendment_retry_in_progress"):
         return False
     if str(latest.get("verdict") or "") in {"merge_blocked", "catastrophic"}:
         return False
     if latest.get("merge_blocked_structured_reason") or latest.get("merge_blocked_reason"):
         return False
     terminal_verdict = verdict if verdict in {"pass", "partial", "unverified"} else "pass"
-    set_verdict(project_dir, task_id, terminal_verdict, cost_usd=cost_usd)
-    update_task_metadata(
+    if not persist_contract_amendment_retry_success(
         project_dir,
         task_id,
-        contract_amendment_retry_restored_at=time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ",
-            time.gmtime(),
-        ),
-    )
+        cast(Any, terminal_verdict),
+        cost_usd=cost_usd,
+    ):
+        return False
     _emit(on_event, {
         "event": "contract_amendment_leaf_retry_verdict_restored",
         "task_id": task_id,
@@ -4580,15 +4581,7 @@ async def _run_child(
             decomposition=str(task_entry.get("decomposition") or "inline"),
             verify_called=True,
         )
-        update_task_metadata(
-            project_dir,
-            tid,
-            contract_amendment_retry_merge=False,
-            contract_amendment_retry_merge_started_at=time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ",
-                time.gmtime(),
-            ),
-        )
+        mark_contract_amendment_retry_in_progress(project_dir, tid)
         _emit(on_event, {
             "event": "contract_amendment_leaf_merge_retry",
             "task_id": tid,
@@ -4755,15 +4748,22 @@ def _record_task_merge_blocked_reason(
     origin: str,
     structured_reason: dict[str, Any] | None = None,
 ) -> None:
-    set_verdict(project_dir, task_id, "merge_blocked", cost_usd=result.cost_usd)
     metadata: dict[str, Any] = {
         "failure_reason": reason,
         "merge_blocked_origin": origin,
         "merge_blocked_reason": reason,
+        "contract_amendment_retry_merge": False,
+        "contract_amendment_retry_in_progress": False,
     }
     if structured_reason is not None:
         metadata["merge_blocked_structured_reason"] = structured_reason
-    update_task_metadata(project_dir, task_id, **metadata)
+    set_verdict_and_metadata(
+        project_dir,
+        task_id,
+        "merge_blocked",
+        cost_usd=result.cost_usd,
+        metadata=metadata,
+    )
     result.verdict = "merge_blocked"
     result.failure_reason = reason
     if result.verify_result is None:

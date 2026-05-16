@@ -247,6 +247,9 @@ def _globally_non_runnable_task_ids(project_dir: Path) -> set[str]:
         return set()
     done: set[str] = set()
     for tid, t in (graph.get("tasks") or {}).items():
+        if isinstance(t, dict) and t.get("contract_amendment_retry_in_progress"):
+            done.add(tid)
+            continue
         verdict = t.get("verdict")
         if isinstance(verdict, str) and verdict in _NON_RUNNABLE_VERDICTS:
             done.add(tid)

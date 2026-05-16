@@ -345,6 +345,77 @@ async def test_merge_retry_persists_durable_pass_only_after_real_merge_success(
 
 
 @pytest.mark.asyncio
+async def test_merge_retry_window_is_durably_non_ready_before_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_root_with_contract(tmp_path)
+    _enqueue_known(tmp_path, task_id="leaf", owned_paths=["frontend/src/features/comments/"])
+    record_task(
+        tmp_path,
+        task_id="amendment",
+        parent_task_id=ROOT_TASK_ID,
+        intent="amendment",
+        integration_branch="i2p/root/integration",
+        owned_paths=["frontend/src/lib/ws.ts"],
+        task_role="contract_amendment",
+    )
+    set_verdict(tmp_path, "leaf", "pass")
+    set_contract_amendment_blocked(
+        tmp_path,
+        "leaf",
+        "amendment",
+        merge_context={
+            "child_session_dir": str(tmp_path / "otto_logs" / "sessions" / "leaf"),
+            "parent_integration_branch": "i2p/root/integration",
+        },
+    )
+    set_verdict(tmp_path, "amendment", "pass")
+    v5_runner._settle_contract_amendment_dependents(
+        project_dir=tmp_path,
+        amendment_id="amendment",
+        amendment_result=LeadResult(task_id="amendment", verdict="pass", decomposition="inline"),
+        completed={"leaf"},
+        child_results={"leaf": LeadResult(task_id="leaf", verdict="pass", decomposition="inline")},
+    )
+    leaf_entry = next(
+        entry
+        for entry in take_ready(tmp_path, completed_task_ids=set(), in_flight_task_ids=set())
+        if entry["task_id"] == "leaf"
+    )
+
+    monkeypatch.setattr(v5_branching, "setup_child_worktree", lambda **_kwargs: tmp_path)
+
+    async def observe_window(**_kwargs: object) -> None:
+        leaf = get_task(tmp_path, "leaf") or {}
+        assert leaf["verdict"] is None
+        assert leaf["blocked_on_task_id"] is None
+        assert leaf["contract_amendment_retry_merge"] is True
+        assert leaf["contract_amendment_retry_in_progress"] is True
+        ready_ids = {
+            entry["task_id"]
+            for entry in take_ready(tmp_path, completed_task_ids=set(), in_flight_task_ids=set())
+        }
+        assert "leaf" not in ready_ids
+
+    monkeypatch.setattr(v5_runner, "_merge_child_branch", observe_window)
+
+    result = await v5_runner._run_child(
+        project_dir=tmp_path,
+        entry=leaf_entry,
+        config={},
+        max_parallel=1,
+        on_event=None,
+    )
+
+    leaf = get_task(tmp_path, "leaf") or {}
+    assert result.verdict == "pass"
+    assert leaf["verdict"] == "pass"
+    assert leaf["contract_amendment_retry_merge"] is False
+    assert leaf["contract_amendment_retry_in_progress"] is False
+
+
+@pytest.mark.asyncio
 async def test_amendment_crash_settles_blocked_leaves_merge_blocked(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
