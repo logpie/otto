@@ -51,6 +51,14 @@ class _NetworkEvent:
         }
 
 
+@dataclass(frozen=True)
+class _DOMObservableState:
+    count: int
+    signatures: tuple[str, ...]
+    scope_found: bool
+    scope_label: str
+
+
 def run_ui_journey_executor(
     *,
     journeys: list[dict[str, Any]],
@@ -328,6 +336,14 @@ def _run_action(
             return f"required input absent: {field_label}"
         field.fill(value, timeout=timeout_ms)
 
+    post_observables = _list_of_dicts(action.get("success_observables"))
+    if not post_observables:
+        return f"action {action.get('id') or '<unnamed>'} lacks executable post-action observables"
+    before_observable_states = [
+        _dom_observable_state(page, observable)
+        for observable in post_observables
+    ]
+
     before_dom = _dom_fingerprint(page)
     before_network_count = len(network_events)
     expectations = _network_expectations_for_action(action, pass_model)
@@ -349,13 +365,15 @@ def _run_action(
         if not _wait_for_network_event(page, network_events, expected, timeout_ms=timeout_ms):
             missing_network.append(_network_expectation_label(expected))
 
-    post_observables = _list_of_dicts(action.get("success_observables"))
-    if not post_observables:
-        return f"action {action.get('id') or '<unnamed>'} lacks executable post-action observables"
-
     dom_failure = ""
-    for observable in post_observables:
-        dom_failure = _assert_dom_observable(page, observable, timeout_ms=timeout_ms)
+    for index, observable in enumerate(post_observables):
+        dom_failure = _assert_dom_observable(
+            page,
+            observable,
+            timeout_ms=timeout_ms,
+            before_state=before_observable_states[index],
+            require_delta=True,
+        )
         if dom_failure:
             break
     after_dom = _dom_fingerprint(page)
@@ -588,7 +606,14 @@ def _page_blank_or_stuck(page: Any) -> bool:
     return skeletonish and controls == 0
 
 
-def _assert_dom_observable(page: Any, observable: dict[str, Any], *, timeout_ms: int) -> str:
+def _assert_dom_observable(
+    page: Any,
+    observable: dict[str, Any],
+    *,
+    timeout_ms: int,
+    before_state: _DOMObservableState | None = None,
+    require_delta: bool = False,
+) -> str:
     selector = _explicit_selector(observable)
     text = str(
         observable.get("text")
@@ -599,8 +624,32 @@ def _assert_dom_observable(page: Any, observable: dict[str, Any], *, timeout_ms:
     if not text:
         ui_effect = str(observable.get("ui_effect") or "").strip()
         text = _extract_assertable_text(ui_effect)
+    exact = _exact_match(observable)
+    if selector or text:
+        deadline = time.monotonic() + (timeout_ms / 1000)
+        last_state = _dom_observable_state(page, observable, text=text)
+        while time.monotonic() < deadline:
+            if _observable_state_satisfies(last_state, before_state, require_delta=require_delta):
+                return ""
+            try:
+                page.wait_for_timeout(50)
+            except Exception:
+                time.sleep(0.05)
+            last_state = _dom_observable_state(page, observable, text=text)
+        if not last_state.scope_found:
+            return f"scope not found: {last_state.scope_label}"
+        if text and last_state.count == 0:
+            return f"text {text!r} not visible inside {last_state.scope_label}"
+        if selector and last_state.count == 0:
+            return f"selector not visible inside {last_state.scope_label}: {selector}"
+        if require_delta:
+            return f"no new scoped observable appeared inside {last_state.scope_label}"
+
     if selector:
-        locator = page.locator(selector).first
+        root, scope_label = _scope_root(page, observable)
+        if root is None:
+            return f"scope not found: {scope_label}"
+        locator = root.locator(selector).first
         if locator.count() == 0:
             return f"selector not found: {selector}"
         try:
@@ -609,11 +658,14 @@ def _assert_dom_observable(page: Any, observable: dict[str, Any], *, timeout_ms:
             return f"selector not visible: {selector}: {type(exc).__name__}: {exc}"
         if text:
             content = str(locator.text_content(timeout=timeout_ms) or "")
-            if text not in content:
+            if not _text_matches(content, text, exact=exact):
                 return f"text {text!r} not visible inside {selector}"
         return ""
+    root, scope_label = _scope_root(page, observable)
+    if root is None:
+        return f"scope not found: {scope_label}"
     locator, label = _generic_locator(
-        page,
+        root,
         observable,
         text_keys=("text", "expected_text", "visible_text", "name", "accessible_name"),
     )
@@ -625,7 +677,7 @@ def _assert_dom_observable(page: Any, observable: dict[str, Any], *, timeout_ms:
             return f"locator not visible: {label}: {type(exc).__name__}: {exc}"
     if text:
         try:
-            page.get_by_text(text, exact=False).first.wait_for(state="visible", timeout=timeout_ms)
+            root.get_by_text(text, exact=exact).first.wait_for(state="visible", timeout=timeout_ms)
             return ""
         except Exception as exc:  # noqa: BLE001
             return f"text not visible: {text!r}: {type(exc).__name__}: {exc}"
@@ -788,7 +840,7 @@ def _generic_locator(
         return page.locator(selector).first, selector
     role = _first_text(spec, role_keys)
     name = _first_text(spec, name_keys)
-    exact = bool(spec.get("exact") is True)
+    exact = _exact_match(spec)
     if role:
         kwargs: dict[str, Any] = {"exact": exact}
         if name:
@@ -819,6 +871,38 @@ def _explicit_selector(
     return ""
 
 
+def _scope_selector(spec: dict[str, Any]) -> str:
+    selector = _first_text(
+        spec,
+        (
+            "container_selector",
+            "scope_selector",
+            "within_selector",
+            "region_selector",
+        ),
+    )
+    if selector:
+        return selector
+    testid = _first_text(spec, ("container_testid", "scope_testid", "region_testid"))
+    if testid:
+        return f"[data-testid='{_css_attr_value(testid)}']"
+    return ""
+
+
+def _scope_root(page: Any, spec: dict[str, Any]) -> tuple[Any | None, str]:
+    selector = _scope_selector(spec)
+    if not selector:
+        return page, "page"
+    locator = page.locator(selector).first
+    if locator.count() == 0:
+        return None, selector
+    return locator, selector
+
+
+def _exact_match(spec: dict[str, Any]) -> bool:
+    return spec.get("exact") is not False
+
+
 def _first_text(spec: dict[str, Any], keys: tuple[str, ...]) -> str:
     for key in keys:
         value = str(spec.get(key) or "").strip()
@@ -843,6 +927,110 @@ def _ready_route(journey: dict[str, Any], pass_model: dict[str, Any]) -> str:
 def _dom_fingerprint(page: Any) -> str:
     text = str(page.evaluate("() => document.body ? document.body.innerText : ''") or "")
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _dom_observable_state(
+    page: Any,
+    observable: dict[str, Any],
+    *,
+    text: str | None = None,
+) -> _DOMObservableState:
+    selector = _explicit_selector(observable)
+    scope_selector = _scope_selector(observable)
+    expected_text = str(
+        text
+        if text is not None
+        else observable.get("text")
+        or observable.get("expected_text")
+        or observable.get("visible_text")
+        or ""
+    ).strip()
+    if not expected_text:
+        expected_text = _extract_assertable_text(str(observable.get("ui_effect") or ""))
+    exact = _exact_match(observable)
+    scope_label = scope_selector or selector or "page"
+    raw = page.evaluate(
+        """({selector, scopeSelector, text, exact}) => {
+          const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+          const matchesText = (value) => {
+            if (!text) return true;
+            const normalized = normalize(value);
+            return exact ? normalized === text : normalized.includes(text);
+          };
+          const visible = (el) => {
+            if (!el || !(el instanceof Element)) return false;
+            const style = window.getComputedStyle(el);
+            if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          };
+          const root = scopeSelector ? document.querySelector(scopeSelector) : document.body;
+          if (!root) return { count: 0, signatures: [], scopeFound: false };
+          let nodes = [];
+          if (selector) {
+            nodes = Array.from(root.querySelectorAll(selector));
+            if (root.matches && root.matches(selector)) nodes.unshift(root);
+          } else if (text) {
+            nodes = Array.from(root.querySelectorAll('*')).filter((el) => {
+              if (!visible(el) || !matchesText(el.innerText || el.textContent || '')) return false;
+              return !Array.from(el.children).some((child) => (
+                visible(child) && matchesText(child.innerText || child.textContent || '')
+              ));
+            });
+          } else {
+            nodes = [root];
+          }
+          const signatures = nodes
+            .filter((el) => visible(el) && matchesText(el.innerText || el.textContent || ''))
+            .map((el) => {
+              const attrs = ['id', 'class', 'role', 'aria-label', 'data-testid']
+                .map((name) => `${name}=${el.getAttribute(name) || ''}`)
+                .join('|');
+              return `${el.tagName}|${attrs}|${normalize(el.innerText || el.textContent || '')}|${String(el.outerHTML || '').slice(0, 500)}`;
+            });
+          return { count: signatures.length, signatures, scopeFound: true };
+        }""",
+        {
+            "selector": selector,
+            "scopeSelector": scope_selector,
+            "text": expected_text,
+            "exact": exact,
+        },
+    )
+    if not isinstance(raw, dict):
+        return _DOMObservableState(count=0, signatures=(), scope_found=False, scope_label=scope_label)
+    raw_signatures = raw.get("signatures")
+    signatures = raw_signatures if isinstance(raw_signatures, list) else []
+    return _DOMObservableState(
+        count=int(raw.get("count") or 0),
+        signatures=tuple(str(item) for item in signatures),
+        scope_found=bool(raw.get("scopeFound")),
+        scope_label=scope_label,
+    )
+
+
+def _observable_state_satisfies(
+    state: _DOMObservableState,
+    before_state: _DOMObservableState | None,
+    *,
+    require_delta: bool,
+) -> bool:
+    if state.count <= 0:
+        return False
+    if not require_delta or before_state is None:
+        return True
+    if state.count > before_state.count:
+        return True
+    before_signatures = set(before_state.signatures)
+    return any(signature not in before_signatures for signature in state.signatures)
+
+
+def _text_matches(content: str, expected: str, *, exact: bool) -> bool:
+    normalized_content = " ".join(content.split())
+    normalized_expected = " ".join(expected.split())
+    if exact:
+        return normalized_content == normalized_expected
+    return normalized_expected in normalized_content
 
 
 def _extract_assertable_text(value: str) -> str:

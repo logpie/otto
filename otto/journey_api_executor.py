@@ -14,7 +14,10 @@ from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any, Callable
 
-from otto.journey_contracts import VerificationContractError, validate_api_pass_model
+from otto.journey_contracts import (
+    VerificationContractError,
+    validate_api_pass_model,
+)
 from otto.journey_executor_common import (
     artifact_run_name,
     executor_non_pass_result,
@@ -25,6 +28,18 @@ from otto.observability import iso_timestamp, write_json_atomic, write_text_atom
 from otto.safe_slug import safe_slug
 
 API_EXECUTOR_SOURCE = "api_executor"
+ENFORCED_HTTP_STRONG_ASSERTIONS = frozenset({
+    "expect_json",
+    "expect_body_contains",
+    "extract",
+    "expect_json_path",
+    "expect_header",
+})
+ENFORCED_SERVICE_STRONG_ASSERTIONS = frozenset({
+    "expect_json",
+    "expect_body_contains",
+    "expect_json_path",
+})
 APIProbeExecutor = Callable[..., dict[str, Any]]
 
 
@@ -102,9 +117,23 @@ def _run_one_journey(
             proof_usable=False,
             artifact_paths=[],
         )
-    pass_model = journey.get("pass_model")
     try:
         validate_api_pass_model(journey, path=f"behavior_journeys[{jid}]")
+        pass_model = journey.get("pass_model")
+        if not isinstance(pass_model, dict):
+            raise VerificationContractError(
+                "verification_contract_missing",
+                f"behavior_journeys[{jid}].pass_model",
+                "api journey is missing declarative pass_model",
+            )
+        return executor(
+            journey=journey,
+            pass_model=pass_model,
+            project_dir=project_dir,
+            journey_dir=journey_dir,
+            base_url=base_url,
+            timeout_s=timeout_s,
+        )
     except VerificationContractError as exc:
         return _non_pass_result(
             journey,
@@ -113,15 +142,14 @@ def _run_one_journey(
             proof_usable=False,
             artifact_paths=[],
         )
-    assert isinstance(pass_model, dict)
-    return executor(
-        journey=journey,
-        pass_model=pass_model,
-        project_dir=project_dir,
-        journey_dir=journey_dir,
-        base_url=base_url,
-        timeout_s=timeout_s,
-    )
+    except Exception as exc:  # noqa: BLE001
+        return _non_pass_result(
+            journey,
+            status="unverified",
+            detail=f"api executor error: {type(exc).__name__}: {exc}",
+            proof_usable=False,
+            artifact_paths=[],
+        )
 
 
 def _run_http_api_journey(
@@ -187,9 +215,11 @@ def _run_http_api_journey(
             request = urllib.request.Request(url, data=data, headers=headers, method=method)
             with opener.open(request, timeout=max(1, timeout_s)) as response:
                 status_code = int(response.status)
+                response_headers = _headers_to_dict(response.headers)
                 response_text = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             status_code = int(exc.code)
+            response_headers = _headers_to_dict(exc.headers)
             response_text = exc.read().decode("utf-8", errors="replace")
         except urllib.error.URLError as exc:
             events.append(_http_event(rendered, url, 0, "", time.monotonic() - started, error=str(exc.reason)))
@@ -224,7 +254,13 @@ def _run_http_api_journey(
                 proof_usable=True,
             )
         json_payload, json_error = _parse_json(response_text)
-        failure = _assert_http_body(rendered, response_text, json_payload, json_error)
+        failure = _assert_http_body(
+            rendered,
+            response_text,
+            response_headers,
+            json_payload,
+            json_error,
+        )
         if failure:
             return _write_http_result(
                 journey,
@@ -492,6 +528,7 @@ def _run_service_health_journey(
         expected_status = int(pass_model.get("expect_status") or 200)
         expect_body = str(pass_model.get("expect_body_contains") or "")
         expect_json = pass_model.get("expect_json")
+        expect_json_path = pass_model.get("expect_json_path")
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 break
@@ -504,7 +541,8 @@ def _run_service_health_journey(
                 json_matches = True
                 if expect_json is not None:
                     json_matches = not json_error and not _json_subset_mismatch(json_payload, expect_json)
-                if status_code == expected_status and body_matches and json_matches:
+                json_path_failure = _assert_json_path(json_payload, json_error, expect_json_path)
+                if status_code == expected_status and body_matches and json_matches and not json_path_failure:
                     log_path = _collect_service_output(proc, journey_dir)
                     return _pass_result(
                         journey,
@@ -512,6 +550,8 @@ def _run_service_health_journey(
                         artifact_paths=[log_path],
                     )
                 last_error = f"status={status_code}, payload did not match"
+                if json_path_failure:
+                    last_error = json_path_failure
             except (urllib.error.URLError, TimeoutError) as exc:
                 last_error = str(exc)
             time.sleep(0.1)
@@ -639,6 +679,13 @@ def _string_map(value: Any) -> dict[str, str]:
     return {str(key): str(item) for key, item in value.items()}
 
 
+def _headers_to_dict(headers: Any) -> dict[str, str]:
+    if headers is None:
+        return {}
+    items = headers.items() if hasattr(headers, "items") else []
+    return {str(key).lower(): str(value) for key, value in items}
+
+
 def _request_body(step: dict[str, Any], headers: dict[str, str]) -> bytes | None:
     if "json" in step:
         headers.setdefault("Content-Type", "application/json")
@@ -688,6 +735,7 @@ def _parse_json(text: str) -> tuple[Any, str]:
 def _assert_http_body(
     step: dict[str, Any],
     response_text: str,
+    response_headers: dict[str, str],
     json_payload: Any,
     json_error: str,
 ) -> str:
@@ -701,7 +749,103 @@ def _assert_http_body(
         mismatch = _json_subset_mismatch(json_payload, expected_json)
         if mismatch:
             return mismatch
+    header_failure = _assert_headers(response_headers, step.get("expect_header"))
+    if header_failure:
+        return header_failure
+    json_path_failure = _assert_json_path(json_payload, json_error, step.get("expect_json_path"))
+    if json_path_failure:
+        return json_path_failure
     return ""
+
+
+def _assert_headers(response_headers: dict[str, str], expected: Any) -> str:
+    for assertion in _header_assertions(expected):
+        name = assertion["name"]
+        actual = response_headers.get(name.lower())
+        if actual is None:
+            return f"header {name} missing"
+        if "equals" in assertion and actual != assertion["equals"]:
+            return f"header {name} expected {assertion['equals']!r}, got {actual!r}"
+        if "contains" in assertion and assertion["contains"] not in actual:
+            return f"header {name} did not contain {assertion['contains']!r}"
+    return ""
+
+
+def _header_assertions(expected: Any) -> list[dict[str, str]]:
+    if expected in (None, "", [], {}):
+        return []
+    if isinstance(expected, str):
+        raw = expected.strip()
+        if ":" in raw:
+            name, value = raw.split(":", 1)
+            return [{"name": name.strip(), "equals": value.strip()}]
+        return [{"name": raw}]
+    if isinstance(expected, list):
+        assertions: list[dict[str, str]] = []
+        for item in expected:
+            assertions.extend(_header_assertions(item))
+        return assertions
+    if isinstance(expected, dict):
+        explicit_name = str(expected.get("name") or expected.get("header") or expected.get("key") or "").strip()
+        if explicit_name:
+            assertion = {"name": explicit_name}
+            if "equals" in expected:
+                assertion["equals"] = str(expected.get("equals"))
+            elif "value" in expected:
+                assertion["equals"] = str(expected.get("value"))
+            if "contains" in expected:
+                assertion["contains"] = str(expected.get("contains"))
+            return [assertion]
+        return [
+            {"name": str(name).strip(), "equals": str(value)}
+            for name, value in expected.items()
+            if str(name).strip()
+        ]
+    return []
+
+
+def _assert_json_path(json_payload: Any, json_error: str, expected: Any) -> str:
+    for assertion in _json_path_assertions(expected):
+        expr = assertion["path"]
+        if json_error:
+            return f"expected JSON path {expr} but parse failed: {json_error}"
+        value, missing = _json_path(json_payload, expr)
+        if missing:
+            return f"JSON path {expr} missing"
+        if "equals" in assertion and value != assertion["equals"]:
+            return f"JSON path {expr} expected {assertion['equals']!r}, got {value!r}"
+        if "contains" in assertion and assertion["contains"] not in str(value):
+            return f"JSON path {expr} did not contain {assertion['contains']!r}"
+    return ""
+
+
+def _json_path_assertions(expected: Any) -> list[dict[str, Any]]:
+    if expected in (None, "", [], {}):
+        return []
+    if isinstance(expected, str):
+        return [{"path": expected.strip()}]
+    if isinstance(expected, list):
+        assertions: list[dict[str, Any]] = []
+        for item in expected:
+            assertions.extend(_json_path_assertions(item))
+        return assertions
+    if isinstance(expected, dict):
+        explicit_path = str(expected.get("path") or expected.get("json_path") or "").strip()
+        if explicit_path:
+            assertion: dict[str, Any] = {"path": explicit_path}
+            if "equals" in expected:
+                assertion["equals"] = expected.get("equals")
+            elif "value" in expected:
+                assertion["equals"] = expected.get("value")
+            if "contains" in expected:
+                assertion["contains"] = str(expected.get("contains"))
+            return [assertion]
+        return [
+            {"path": str(path).strip(), "equals": value}
+            for path, value in expected.items()
+            if str(path).strip()
+        ]
+    return []
 
 
 def _json_subset_mismatch(observed: Any, expected: Any, path: str = "$") -> str:

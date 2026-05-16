@@ -16,6 +16,18 @@ PROBE_KINDS: tuple[ProbeKind, ...] = (
     "library_call",
     "service_health",
 )
+COUNTED_HTTP_STRONG_ASSERTIONS = frozenset({
+    "expect_json",
+    "expect_body_contains",
+    "extract",
+    "expect_json_path",
+    "expect_header",
+})
+COUNTED_SERVICE_STRONG_ASSERTIONS = frozenset({
+    "expect_json",
+    "expect_body_contains",
+    "expect_json_path",
+})
 PROJECT_KINDS_WITH_API_JOURNEYS: dict[str, ProbeKind] = {
     "cli": "cli_command",
     "library": "library_call",
@@ -433,6 +445,18 @@ def validate_api_pass_model(journey: dict[str, Any], *, path: str) -> None:
                     f"{path}.pass_model.steps[{index}].path",
                     "http_api step missing path",
                 )
+            _validate_int_field(step, "expect_status", path=f"{path}.pass_model.steps[{index}].expect_status")
+            _validate_int_field(step, "status", path=f"{path}.pass_model.steps[{index}].status")
+            if "expect_header" in step:
+                _validate_header_assertion(
+                    step.get("expect_header"),
+                    path=f"{path}.pass_model.steps[{index}].expect_header",
+                )
+            if "expect_json_path" in step:
+                _validate_json_path_assertion(
+                    step.get("expect_json_path"),
+                    path=f"{path}.pass_model.steps[{index}].expect_json_path",
+                )
             strong = strong or _http_step_has_strong_assertion(step)
         if not strong:
             raise VerificationContractError(
@@ -454,6 +478,8 @@ def validate_api_pass_model(journey: dict[str, Any], *, path: str) -> None:
                 f"{path}.pass_model",
                 "cli_command pass_model requires stdout/stderr assertion or filesystem effect",
             )
+        _validate_int_field(model, "expect_exit_code", path=f"{path}.pass_model.expect_exit_code")
+        _validate_int_field(model, "exit_code", path=f"{path}.pass_model.exit_code")
         return
     if probe_kind == "library_call":
         if not str(model.get("module") or "").strip() or not str(model.get("function") or "").strip():
@@ -481,6 +507,12 @@ def validate_api_pass_model(journey: dict[str, Any], *, path: str) -> None:
                 "verification_contract_invalid",
                 f"{path}.pass_model.health_url",
                 "service_health pass_model requires health_url",
+            )
+        _validate_int_field(model, "expect_status", path=f"{path}.pass_model.expect_status")
+        if "expect_json_path" in model:
+            _validate_json_path_assertion(
+                model.get("expect_json_path"),
+                path=f"{path}.pass_model.expect_json_path",
             )
         if not _has_service_payload_assertion(model):
             raise VerificationContractError(
@@ -540,8 +572,8 @@ def _http_step_has_strong_assertion(step: dict[str, Any]) -> bool:
         "expect_json" in step
         or bool(str(step.get("expect_body_contains") or "").strip())
         or isinstance(step.get("extract"), dict) and bool(step.get("extract"))
-        or bool(str(step.get("expect_json_path") or "").strip())
-        or bool(str(step.get("expect_header") or "").strip())
+        or _has_assertion_payload(step.get("expect_json_path"))
+        or _has_assertion_payload(step.get("expect_header"))
     )
 
 
@@ -557,12 +589,76 @@ def _has_service_payload_assertion(model: dict[str, Any]) -> bool:
     return (
         bool(str(model.get("expect_body_contains") or "").strip())
         or "expect_json" in model
-        or bool(str(model.get("expect_json_path") or "").strip())
+        or _has_assertion_payload(model.get("expect_json_path"))
     )
 
 
 def _command_list_like(value: Any) -> bool:
     return isinstance(value, list) and bool(value) and all(isinstance(item, str) and item for item in value)
+
+
+def _validate_int_field(payload: dict[str, Any], key: str, *, path: str) -> None:
+    if key not in payload:
+        return
+    value = payload.get(key)
+    if value in (None, ""):
+        return
+    try:
+        int(value)
+    except (TypeError, ValueError):
+        raise VerificationContractError(
+            "verification_contract_invalid",
+            path,
+            f"{key} must be int-coercible",
+        ) from None
+
+
+def _has_assertion_payload(value: Any) -> bool:
+    if value in (None, "", [], {}):
+        return False
+    return True
+
+
+def _validate_header_assertion(value: Any, *, path: str) -> None:
+    if isinstance(value, str):
+        if value.strip():
+            return
+    if isinstance(value, dict):
+        if str(value.get("name") or value.get("header") or value.get("key") or "").strip():
+            return
+        if any(str(key).strip() for key in value):
+            return
+    if isinstance(value, list) and value:
+        for index, item in enumerate(value):
+            _validate_header_assertion(item, path=f"{path}[{index}]")
+        return
+    raise VerificationContractError(
+        "verification_contract_invalid",
+        path,
+        "expect_header must name a response header to assert",
+    )
+
+
+def _validate_json_path_assertion(value: Any, *, path: str) -> None:
+    if isinstance(value, str):
+        expr = value.strip()
+        if expr == "$" or expr.startswith("$."):
+            return
+    if isinstance(value, dict):
+        expr = str(value.get("path") or value.get("json_path") or "").strip()
+        if expr == "$" or expr.startswith("$."):
+            return
+        if any(str(key).strip() == "$" or str(key).strip().startswith("$.") for key in value):
+            return
+    if isinstance(value, list) and value:
+        for index, item in enumerate(value):
+            _validate_json_path_assertion(item, path=f"{path}[{index}]")
+        return
+    raise VerificationContractError(
+        "verification_contract_invalid",
+        path,
+        "expect_json_path must declare a JSON path such as $.id",
+    )
 
 
 def _well_formed_entry_route(entry_route: str) -> bool:

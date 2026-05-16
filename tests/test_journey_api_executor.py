@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from otto import journey_api_executor, journey_contracts
 from otto.journey_api_executor import run_api_journey_executor
 from otto.journey_verdict_sink import resolve_journey_verdicts
 from otto.lead_verify import run_verify_for_lead
@@ -62,6 +63,25 @@ class _StatefulApiHandler(BaseHTTPRequestHandler):
             self._json(200, self.items.get("item-1", {"error": "missing"}))
             return
         self._json(404, {"error": "not found"})
+
+
+class _HeaderAndJsonPathHandler(BaseHTTPRequestHandler):
+    def log_message(self, format: str, *_args: object) -> None:
+        del format
+        return
+
+    def do_GET(self) -> None:
+        if self.path != "/ready":
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = json.dumps({"status": "ready", "nested": {"state": "actual"}}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Contract-State", "actual")
+        self.end_headers()
+        self.wfile.write(body)
 
 
 def _start_http_server(handler: type[BaseHTTPRequestHandler]) -> tuple[str, ThreadingHTTPServer]:
@@ -134,6 +154,210 @@ def test_stateful_http_api_journey_carries_auth_and_state(tmp_path: Path) -> Non
     assert verdicts[0]["passed"] is True
     assert verdicts[0]["source"] == "api_executor"
     assert run.artifact_paths
+
+
+def test_api_validator_and_executor_strong_assertion_sets_agree() -> None:
+    counted_http = getattr(journey_contracts, "COUNTED_HTTP_STRONG_ASSERTIONS", None)
+    enforced_http = getattr(journey_api_executor, "ENFORCED_HTTP_STRONG_ASSERTIONS", None)
+    counted_service = getattr(journey_contracts, "COUNTED_SERVICE_STRONG_ASSERTIONS", None)
+    enforced_service = getattr(journey_api_executor, "ENFORCED_SERVICE_STRONG_ASSERTIONS", None)
+
+    assert counted_http is not None
+    assert counted_service is not None
+    assert counted_http == enforced_http
+    assert counted_service == enforced_service
+
+
+def test_http_api_header_and_json_path_assertions_are_enforced(tmp_path: Path) -> None:
+    base_url, server = _start_http_server(_HeaderAndJsonPathHandler)
+    journeys = [
+        {
+            "id": "header_mismatch",
+            "verification_level": "api",
+            "probe_kind": "http_api",
+            "pass_model": {
+                "steps": [
+                    {
+                        "method": "GET",
+                        "path": "/ready",
+                        "expect_status": 200,
+                        "expect_header": {
+                            "name": "X-Contract-State",
+                            "equals": "expected",
+                        },
+                    }
+                ]
+            },
+        },
+        {
+            "id": "json_path_mismatch",
+            "verification_level": "api",
+            "probe_kind": "http_api",
+            "pass_model": {
+                "steps": [
+                    {
+                        "method": "GET",
+                        "path": "/ready",
+                        "expect_status": 200,
+                        "expect_json_path": {
+                            "path": "$.nested.state",
+                            "equals": "expected",
+                        },
+                    }
+                ]
+            },
+        },
+        {
+            "id": "header_and_json_path_match",
+            "verification_level": "api",
+            "probe_kind": "http_api",
+            "pass_model": {
+                "steps": [
+                    {
+                        "method": "GET",
+                        "path": "/ready",
+                        "expect_status": 200,
+                        "expect_header": {
+                            "name": "X-Contract-State",
+                            "equals": "actual",
+                        },
+                        "expect_json_path": {
+                            "path": "$.nested.state",
+                            "equals": "actual",
+                        },
+                    }
+                ]
+            },
+        },
+    ]
+    try:
+        run = run_api_journey_executor(
+            journeys=journeys,
+            project_dir=tmp_path,
+            artifact_dir=tmp_path / "artifacts",
+            base_url=base_url,
+            timeout_s=5,
+        )
+    finally:
+        server.shutdown()
+
+    statuses = {result["id"]: result["status"] for result in run.executor_results}
+    details = {result["id"]: result["detail"] for result in run.executor_results}
+    assert statuses == {
+        "header_mismatch": "fail",
+        "json_path_mismatch": "fail",
+        "header_and_json_path_match": "pass",
+    }
+    assert "header X-Contract-State" in details["header_mismatch"]
+    assert "$.nested.state" in details["json_path_mismatch"]
+
+
+def test_service_health_json_path_assertion_is_enforced(tmp_path: Path) -> None:
+    port = _free_port()
+    (tmp_path / "service.py").write_text(
+        "import os, json\n"
+        "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "    def log_message(self, *_args): return\n"
+        "    def do_GET(self):\n"
+        "        body = json.dumps({'status': 'ready', 'nested': {'state': 'actual'}}).encode('utf-8')\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Type', 'application/json')\n"
+        "        self.send_header('Content-Length', str(len(body)))\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(body)\n"
+        f"ThreadingHTTPServer(('127.0.0.1', {port}), H).serve_forever()\n",
+        encoding="utf-8",
+    )
+    journeys = [
+        {
+            "id": "service_path_mismatch",
+            "verification_level": "api",
+            "probe_kind": "service_health",
+            "pass_model": {
+                "start_command": ["python3", "service.py"],
+                "health_url": f"http://127.0.0.1:{port}/health",
+                "expect_status": 200,
+                "expect_json_path": {
+                    "path": "$.nested.state",
+                    "equals": "expected",
+                },
+            },
+        },
+        {
+            "id": "service_path_match",
+            "verification_level": "api",
+            "probe_kind": "service_health",
+            "pass_model": {
+                "start_command": ["python3", "service.py"],
+                "health_url": f"http://127.0.0.1:{port}/health",
+                "expect_status": 200,
+                "expect_json_path": {
+                    "path": "$.nested.state",
+                    "equals": "actual",
+                },
+            },
+        },
+    ]
+
+    mismatch = run_api_journey_executor(
+        journeys=[journeys[0]],
+        project_dir=tmp_path,
+        artifact_dir=tmp_path / "artifacts-mismatch",
+        timeout_s=5,
+    )
+    match = run_api_journey_executor(
+        journeys=[journeys[1]],
+        project_dir=tmp_path,
+        artifact_dir=tmp_path / "artifacts-match",
+        timeout_s=5,
+    )
+
+    assert mismatch.executor_results[0]["status"] == "fail"
+    assert "$.nested.state" in mismatch.executor_results[0]["detail"]
+    assert match.executor_results[0]["status"] == "pass"
+
+
+def test_malformed_numeric_api_expectation_returns_sink_visible_non_pass(tmp_path: Path) -> None:
+    base_url, server = _start_http_server(_HeaderAndJsonPathHandler)
+    journey = {
+        "id": "malformed_status",
+        "verification_level": "api",
+        "probe_kind": "http_api",
+        "pass_model": {
+            "steps": [
+                {
+                    "method": "GET",
+                    "path": "/ready",
+                    "expect_status": "ok",
+                    "expect_body_contains": "ready",
+                }
+            ]
+        },
+    }
+    try:
+        run = run_api_journey_executor(
+            journeys=[journey],
+            project_dir=tmp_path,
+            artifact_dir=tmp_path / "artifacts",
+            base_url=base_url,
+            timeout_s=5,
+        )
+    finally:
+        server.shutdown()
+
+    assert len(run.executor_results) == 1
+    result = run.executor_results[0]
+    assert result["status"] == "unverified"
+    assert result["proof_usable"] is False
+    assert "verification_contract_invalid" in result["detail"]
+    verdicts = resolve_journey_verdicts(
+        journeys=[journey],
+        execution_scope="leaf",
+        executor_results=run.executor_results,
+        registered_executor_levels={"api"},
+    )
+    assert verdicts[0]["passed"] is False
 
 
 def test_api_journey_fails_closed_on_malformed_or_unsupported_lowering(tmp_path: Path) -> None:

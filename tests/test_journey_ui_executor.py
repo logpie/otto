@@ -29,7 +29,12 @@ def _free_port() -> int:
         sock.close()
 
 
-def _journey(*, accessible_only: bool = False, expect_second_network: bool = False) -> dict[str, Any]:
+def _journey(
+    *,
+    accessible_only: bool = False,
+    expect_second_network: bool = False,
+    scoped_observable: bool = False,
+) -> dict[str, Any]:
     observable = {
         "kind": "network_and_ui_effect",
         "primary_action_id": "workspaces.create",
@@ -45,6 +50,8 @@ def _journey(*, accessible_only: bool = False, expect_second_network: bool = Fal
     }
     if not accessible_only:
         observable["selector"] = "[data-testid='workspace-card']"
+    if scoped_observable:
+        observable["container_selector"] = "#workspace-list"
     action: dict[str, Any] = {
         "id": "workspaces.create",
         "state_changing": True,
@@ -87,6 +94,8 @@ def _journey(*, accessible_only: bool = False, expect_second_network: bool = Fal
             ],
         })
         final_assertion["selector"] = "[data-testid='workspace-card']"
+    if scoped_observable:
+        final_assertion["container_selector"] = "#workspace-list"
     if expect_second_network:
         action["network_expectations"].append(
             {"method": "POST", "path": "/api/audit-log", "status": 201}
@@ -184,6 +193,54 @@ WORKING_HTML = '''<!doctype html>
   </body>
 </html>'''
 
+PREEXISTING_NETWORK_ONLY_HTML = '''<!doctype html>
+<html>
+  <body>
+    <main>
+      <h1>Your workspaces</h1>
+      <p>Try the Acme Workspace starter template.</p>
+      <label>Workspace name <input aria-label="Workspace name" value=""></label>
+      <label>Workspace slug <input aria-label="Workspace slug" value=""></label>
+      <button>Create workspace</button>
+      <section id="workspace-list"><div>Acme Workspace</div></section>
+    </main>
+    <script>
+      document.querySelector("button").addEventListener("click", async () => {{
+        await fetch("/api/workspaces", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{name: "Acme Workspace", slug: "acme-workspace"}})
+        }});
+      }});
+    </script>
+  </body>
+</html>'''
+
+FUZZY_INCIDENTAL_COPY_HTML = '''<!doctype html>
+<html>
+  <body>
+    <main>
+      <h1>Your workspaces</h1>
+      <label>Workspace name <input aria-label="Workspace name" value=""></label>
+      <label>Workspace slug <input aria-label="Workspace slug" value=""></label>
+      <button>Create workspace</button>
+      <section id="workspace-list"></section>
+    </main>
+    <script>
+      document.querySelector("button").addEventListener("click", async () => {{
+        await fetch("/api/workspaces", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{name: "Acme Workspace", slug: "acme-workspace"}})
+        }});
+        const card = document.createElement("div");
+        card.textContent = "Acme Workspace template";
+        document.getElementById("workspace-list").appendChild(card);
+      }});
+    </script>
+  </body>
+</html>'''
+
 DEAD_BUTTON_HTML = '''<!doctype html>
 <html>
   <body>
@@ -215,6 +272,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/workspaces":
             html = {{
                 "working": WORKING_HTML,
+                "preexisting_network_only": PREEXISTING_NETWORK_ONLY_HTML,
+                "fuzzy_incidental_copy": FUZZY_INCIDENTAL_COPY_HTML,
                 "dead_button": DEAD_BUTTON_HTML,
                 "skeleton": SKELETON_HTML,
             }}[MODE]
@@ -331,6 +390,52 @@ def test_accessible_only_ui_pass_model_passes_working_ui_and_fails_dead_button(t
     assert dead_passed is False
     assert dead_payload["journey_verdicts"][0]["passed"] is False
     assert "no observed network/DOM effect" in dead_payload["journey_verdicts"][0]["detail"]
+
+
+def test_accessible_ui_probe_requires_new_scoped_observable_after_action(tmp_path: Path) -> None:
+    project = tmp_path / "preexisting-network-only"
+    _write_fixture_project(project, mode="preexisting_network_only", port=_free_port())
+
+    passed, verdict_payload = _run_ui_probe(
+        project,
+        tmp_path / "journey-artifacts",
+        journey=_journey(accessible_only=True, scoped_observable=True),
+    )
+
+    assert passed is False
+    verdict = verdict_payload["journey_verdicts"][0]
+    assert verdict["passed"] is False
+    assert "no new scoped observable" in verdict["detail"]
+
+
+def test_accessible_ui_probe_uses_exact_text_not_fuzzy_incidental_copy(tmp_path: Path) -> None:
+    project = tmp_path / "fuzzy-incidental-copy"
+    _write_fixture_project(project, mode="fuzzy_incidental_copy", port=_free_port())
+
+    passed, verdict_payload = _run_ui_probe(
+        project,
+        tmp_path / "journey-artifacts",
+        journey=_journey(accessible_only=True, scoped_observable=True),
+    )
+
+    assert passed is False
+    verdict = verdict_payload["journey_verdicts"][0]
+    assert verdict["passed"] is False
+    assert "not visible inside #workspace-list" in verdict["detail"]
+
+
+def test_accessible_ui_probe_passes_genuine_new_scoped_element(tmp_path: Path) -> None:
+    project = tmp_path / "scoped-working"
+    _write_fixture_project(project, mode="working", port=_free_port())
+
+    passed, verdict_payload = _run_ui_probe(
+        project,
+        tmp_path / "journey-artifacts",
+        journey=_journey(accessible_only=True, scoped_observable=True),
+    )
+
+    assert passed is True
+    assert verdict_payload["journey_verdicts"][0]["passed"] is True
 
 
 def test_ui_probe_fails_dead_button_with_no_network_or_dom_effect(tmp_path: Path) -> None:
