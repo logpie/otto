@@ -3761,7 +3761,75 @@ async def _repair_child_stale_target_gate_once(
         origin=origin,
         previous_feedback=previous_feedback,
     )
-    repaired, repair_detail = await _repair_child_upward_merge_gate_once(
+    try:
+        repaired, repair_detail = await _repair_child_upward_merge_gate_once(
+            project_dir=project_dir,
+            child_task_id=child_task_id,
+            child_worktree=child_worktree,
+            child_session_dir=child_session_dir,
+            parent_integration_branch=parent_integration_branch,
+            result=result,
+            config=config,
+            original_detail=detail,
+            on_event=on_event,
+            gate_feedback=feedback,
+            origin=origin,
+        )
+    except Exception as exc:  # noqa: BLE001 - terminal block must stay structured
+        repaired = False
+        repair_detail = (
+            "stale target repair crashed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    return repaired, repair_detail, feedback
+
+
+@dataclass(frozen=True)
+class _StaleTargetRetryResult:
+    ok: bool
+    detail: str
+    pre_merge_ref: str
+    terminal_recorded: bool = False
+
+
+async def _repair_stale_target_and_retry_merge(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    child_worktree: Path,
+    child_session_dir: Path,
+    parent_integration_branch: str,
+    result: LeadResult,
+    config: dict[str, Any],
+    detail: str,
+    prior_repair_detail: str,
+    origin: str,
+    terminal_phase: str,
+    source_branch: str,
+    previous_feedback: dict[str, Any] | None = None,
+    run_smoke_preflight: bool = False,
+    check_union_after_merge: bool = False,
+    emit_union_feedback: bool = False,
+    on_event: Any = None,
+) -> _StaleTargetRetryResult:
+    """Re-enter the existing child repair loop, retry merge, and own terminal blocks."""
+    from otto.v5_branching import merge_child_into_integration
+
+    if emit_union_feedback and previous_feedback is not None:
+        union_detail = str(
+            previous_feedback.get("message")
+            or _integration_union_reason_text(previous_feedback)
+        )
+        _emit(on_event, {
+            "event": "integration_union_incomplete",
+            "task_id": child_task_id,
+            "into": parent_integration_branch,
+            "detail": union_detail,
+            "structured_reason": previous_feedback,
+            "after_repair": True,
+        })
+
+    stale_repaired, stale_detail, stale_feedback = await _repair_child_stale_target_gate_once(
         project_dir=project_dir,
         child_task_id=child_task_id,
         child_worktree=child_worktree,
@@ -3769,12 +3837,122 @@ async def _repair_child_stale_target_gate_once(
         parent_integration_branch=parent_integration_branch,
         result=result,
         config=config,
-        original_detail=detail,
-        on_event=on_event,
-        gate_feedback=feedback,
+        detail=detail,
+        prior_repair_detail=prior_repair_detail,
         origin=origin,
+        previous_feedback=previous_feedback,
+        on_event=on_event,
     )
-    return repaired, repair_detail, feedback
+
+    def record_terminal(
+        *,
+        reason: str,
+        structured_reason: dict[str, Any],
+    ) -> _StaleTargetRetryResult:
+        _record_task_merge_blocked_reason(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=reason,
+            origin=origin,
+            structured_reason=structured_reason,
+        )
+        _emit(on_event, {
+            "event": "merge_failed",
+            "task_id": child_task_id,
+            "phase": terminal_phase,
+            "detail": reason,
+            "structured_reason": structured_reason,
+        })
+        return _StaleTargetRetryResult(
+            ok=False,
+            detail=reason,
+            pre_merge_ref="",
+            terminal_recorded=True,
+        )
+
+    if not stale_repaired:
+        reason = (
+            f"{detail}; stale target repair attempt: {stale_detail}; "
+            f"prior repair attempt: {prior_repair_detail}"
+        )
+        return record_terminal(reason=reason, structured_reason=stale_feedback)
+
+    pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+    try:
+        ok, merge_detail = merge_child_into_integration(
+            project_dir=project_dir,
+            child_task_id=child_task_id,
+            parent_integration_branch=parent_integration_branch,
+        )
+    except MergeWorktreeDirtyError as exc:
+        ok = False
+        merge_detail = str(exc)
+
+    if ok and run_smoke_preflight:
+        try:
+            oracle = await _run_integration_smoke_preflight_with_repair(
+                project_dir=project_dir,
+                worktree_path=project_dir,
+                task_id=child_task_id,
+                phase="child_merge_conflict_repair",
+                session_dir=child_session_dir,
+                config=config,
+                integration_branch=parent_integration_branch,
+                on_event=on_event,
+            )
+            if _preflight_repair_escalated(oracle) or _integration_smoke_blocks(oracle):
+                ok = False
+                merge_detail = _preflight_blocking_summary(
+                    "Child merge conflict repair smoke oracle failed",
+                    oracle,
+                )
+        except Exception as exc:  # noqa: BLE001 - keep stale-target terminal structured
+            ok = False
+            merge_detail = (
+                "Child merge conflict repair smoke oracle crashed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    if not ok:
+        reason = (
+            f"{merge_detail}; stale target repair attempt: {stale_detail}; "
+            f"prior repair attempt: {prior_repair_detail}"
+        )
+        return record_terminal(reason=reason, structured_reason=stale_feedback)
+
+    if check_union_after_merge:
+        followup_feedback = _record_and_check_integration_union(
+            project_dir=project_dir,
+            parent_integration_branch=parent_integration_branch,
+            child_task_id=child_task_id,
+            source_branch=source_branch,
+            pre_merge_ref=pre_merge_ref,
+        )
+        if followup_feedback is not None:
+            followup_detail = str(
+                followup_feedback.get("message")
+                or _integration_union_reason_text(followup_feedback)
+            )
+            terminal_feedback = dict(followup_feedback)
+            terminal_feedback["stale_target_repair"] = {
+                "kind": "stale_integration_target_after_repair",
+                "repair_detail": stale_detail,
+                "prior_repair_detail": prior_repair_detail,
+                "stale_feedback": stale_feedback,
+                "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            reason = (
+                f"{followup_detail}; stale target repair attempt: {stale_detail}; "
+                f"prior repair attempt: {prior_repair_detail}"
+            )
+            return record_terminal(reason=reason, structured_reason=terminal_feedback)
+
+    return _StaleTargetRetryResult(
+        ok=True,
+        detail=merge_detail,
+        pre_merge_ref=pre_merge_ref,
+    )
 
 
 async def _merge_child_branch(
@@ -3869,39 +4047,27 @@ async def _merge_child_branch(
                         oracle,
                     )
             else:
-                stale_repaired, stale_detail, stale_feedback = (
-                    await _repair_child_stale_target_gate_once(
-                        project_dir=project_dir,
-                        child_task_id=child_task_id,
-                        child_worktree=child_worktree,
-                        child_session_dir=child_session_dir,
-                        parent_integration_branch=parent_integration_branch,
-                        result=result,
-                        config=config,
-                        detail=detail,
-                        prior_repair_detail=repair_detail,
-                        origin="stale_target_merge_gate",
-                        on_event=on_event,
-                    )
+                retry = await _repair_stale_target_and_retry_merge(
+                    project_dir=project_dir,
+                    child_task_id=child_task_id,
+                    child_worktree=child_worktree,
+                    child_session_dir=child_session_dir,
+                    parent_integration_branch=parent_integration_branch,
+                    result=result,
+                    config=config,
+                    detail=detail,
+                    prior_repair_detail=repair_detail,
+                    origin="stale_target_merge_gate",
+                    terminal_phase="merge",
+                    source_branch=source_branch,
+                    run_smoke_preflight=True,
+                    on_event=on_event,
                 )
-                if stale_repaired:
-                    pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
-                    try:
-                        ok, detail = merge_child_into_integration(
-                            project_dir=project_dir,
-                            child_task_id=child_task_id,
-                            parent_integration_branch=parent_integration_branch,
-                        )
-                    except MergeWorktreeDirtyError as exc:
-                        ok = False
-                        detail = str(exc)
-                if not ok:
-                    detail = (
-                        f"{detail}; conflict repair attempt: {repair_detail}; "
-                        f"stale target repair attempt: {stale_detail}"
-                    )
-                    if isinstance(result.verify_result, dict):
-                        result.verify_result.setdefault("structured_reason", stale_feedback)
+                if retry.terminal_recorded:
+                    return
+                ok = retry.ok
+                detail = retry.detail
+                pre_merge_ref = retry.pre_merge_ref
         else:
             detail = f"{detail}; conflict repair attempt: {repair_detail}"
     if not ok and not _looks_like_merge_conflict(detail):
@@ -4011,55 +4177,27 @@ async def _merge_child_branch(
             ok = False
             detail = str(exc)
         if not ok:
-            stale_repaired, stale_detail, stale_feedback = (
-                await _repair_child_stale_target_gate_once(
-                    project_dir=project_dir,
-                    child_task_id=child_task_id,
-                    child_worktree=child_worktree,
-                    child_session_dir=child_session_dir,
-                    parent_integration_branch=parent_integration_branch,
-                    result=result,
-                    config=config,
-                    detail=detail,
-                    prior_repair_detail=repair_detail,
-                    origin="integration_union_guard",
-                    previous_feedback=union_feedback,
-                    on_event=on_event,
-                )
+            retry = await _repair_stale_target_and_retry_merge(
+                project_dir=project_dir,
+                child_task_id=child_task_id,
+                child_worktree=child_worktree,
+                child_session_dir=child_session_dir,
+                parent_integration_branch=parent_integration_branch,
+                result=result,
+                config=config,
+                detail=detail,
+                prior_repair_detail=repair_detail,
+                origin="integration_union_guard",
+                terminal_phase="integration_union_guard",
+                source_branch=source_branch,
+                previous_feedback=union_feedback,
+                on_event=on_event,
             )
-            if stale_repaired:
-                pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
-                try:
-                    ok, detail = merge_child_into_integration(
-                        project_dir=project_dir,
-                        child_task_id=child_task_id,
-                        parent_integration_branch=parent_integration_branch,
-                    )
-                except MergeWorktreeDirtyError as exc:
-                    ok = False
-                    detail = str(exc)
-            if not ok:
-                reason = (
-                    f"{detail}; integration union repair merge retry attempt: {repair_detail}; "
-                    f"stale target repair attempt: {stale_detail}; "
-                    f"original refusal: {union_feedback.get('message')}"
-                )
-                _record_task_merge_blocked_reason(
-                    project_dir=project_dir,
-                    task_id=child_task_id,
-                    result=result,
-                    reason=reason,
-                    origin="integration_union_guard",
-                    structured_reason=stale_feedback,
-                )
-                _emit(on_event, {
-                    "event": "merge_failed",
-                    "task_id": child_task_id,
-                    "phase": "integration_union_guard",
-                    "detail": reason,
-                    "structured_reason": stale_feedback,
-                })
+            if retry.terminal_recorded:
                 return
+            ok = retry.ok
+            detail = retry.detail
+            pre_merge_ref = retry.pre_merge_ref
 
         followup_feedback = _record_and_check_integration_union(
             project_dir=project_dir,
@@ -4073,70 +4211,29 @@ async def _merge_child_branch(
                 followup_feedback.get("message")
                 or _integration_union_reason_text(followup_feedback)
             )
-            _emit(on_event, {
-                "event": "integration_union_incomplete",
-                "task_id": child_task_id,
-                "into": parent_integration_branch,
-                "detail": followup_detail,
-                "structured_reason": followup_feedback,
-                "after_repair": True,
-            })
-            stale_repaired, stale_detail, stale_feedback = (
-                await _repair_child_stale_target_gate_once(
-                    project_dir=project_dir,
-                    child_task_id=child_task_id,
-                    child_worktree=child_worktree,
-                    child_session_dir=child_session_dir,
-                    parent_integration_branch=parent_integration_branch,
-                    result=result,
-                    config=config,
-                    detail=followup_detail,
-                    prior_repair_detail=repair_detail,
-                    origin="integration_union_guard",
-                    previous_feedback=followup_feedback,
-                    on_event=on_event,
-                )
+            retry = await _repair_stale_target_and_retry_merge(
+                project_dir=project_dir,
+                child_task_id=child_task_id,
+                child_worktree=child_worktree,
+                child_session_dir=child_session_dir,
+                parent_integration_branch=parent_integration_branch,
+                result=result,
+                config=config,
+                detail=followup_detail,
+                prior_repair_detail=repair_detail,
+                origin="integration_union_guard",
+                terminal_phase="integration_union_guard",
+                source_branch=source_branch,
+                previous_feedback=followup_feedback,
+                check_union_after_merge=True,
+                emit_union_feedback=True,
+                on_event=on_event,
             )
-            if stale_repaired:
-                pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
-                try:
-                    ok, detail = merge_child_into_integration(
-                        project_dir=project_dir,
-                        child_task_id=child_task_id,
-                        parent_integration_branch=parent_integration_branch,
-                    )
-                except MergeWorktreeDirtyError as exc:
-                    ok = False
-                    detail = str(exc)
-                if ok:
-                    followup_feedback = _record_and_check_integration_union(
-                        project_dir=project_dir,
-                        parent_integration_branch=parent_integration_branch,
-                        child_task_id=child_task_id,
-                        source_branch=source_branch,
-                        pre_merge_ref=pre_merge_ref,
-                    )
-            if not stale_repaired or not ok or followup_feedback is not None:
-                reason = (
-                    f"{followup_detail}; integration union repair attempt: {repair_detail}; "
-                    f"stale target repair attempt: {stale_detail}"
-                )
-                _record_task_merge_blocked_reason(
-                    project_dir=project_dir,
-                    task_id=child_task_id,
-                    result=result,
-                    reason=reason,
-                    origin="integration_union_guard",
-                    structured_reason=stale_feedback,
-                )
-                _emit(on_event, {
-                    "event": "merge_failed",
-                    "task_id": child_task_id,
-                    "phase": "integration_union_guard",
-                    "detail": reason,
-                    "structured_reason": stale_feedback,
-                })
+            if retry.terminal_recorded:
                 return
+            ok = retry.ok
+            detail = retry.detail
+            pre_merge_ref = retry.pre_merge_ref
 
     _emit(on_event, {
         "event": "merged",
