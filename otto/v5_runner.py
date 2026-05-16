@@ -86,6 +86,7 @@ from otto.queue.task_graph import (
     mark_contract_amendment_retry_in_progress,
     mark_reviewed_partial,
     persist_contract_amendment_retry_success,
+    refresh_contract_amendment_retry_heartbeat,
     read_graph,
     record_task,
     set_contract_amendment_blocked,
@@ -112,6 +113,7 @@ ROOT_TASK_ID = "root"
 # is allowed 1 original attempt + ``MAX_ARCHITECT_RETRIES`` re-runs).
 MAX_ARCHITECT_RETRIES = 2
 MAX_CONTRACT_AMENDMENT_ATTEMPTS = 2
+CONTRACT_AMENDMENT_RETRY_HEARTBEAT_INTERVAL_SECONDS = 60.0
 
 
 class _DispatchLease:
@@ -1040,6 +1042,22 @@ def _terminalize_stale_contract_amendment_retry_if_exhausted(
         "structured_reason": structured_reason,
     })
     return True
+
+
+async def _refresh_contract_amendment_retry_heartbeat_until_stopped(
+    *,
+    project_dir: Path,
+    task_id: str,
+    owner_id: str,
+) -> None:
+    while True:
+        await asyncio.sleep(CONTRACT_AMENDMENT_RETRY_HEARTBEAT_INTERVAL_SECONDS)
+        if not refresh_contract_amendment_retry_heartbeat(
+            project_dir,
+            task_id,
+            owner_id=owner_id,
+        ):
+            return
 
 
 def _git_diff_full(worktree: Path, *, max_chars: int = 60000) -> str:
@@ -4672,16 +4690,28 @@ async def _run_child(
             "blocked_on_task_id": task_entry.get("blocked_on_task_id"),
         })
         if _child_result_allows_upward_merge(project_dir, tid, retry_result):
-            await _merge_child_branch(
-                project_dir=project_dir,
-                child_task_id=tid,
-                child_worktree=child_worktree,
-                child_session_dir=retry_session_dir,
-                parent_integration_branch=parent_integration_branch,
-                result=retry_result,
-                config=config,
-                on_event=on_event,
+            heartbeat_task = asyncio.create_task(
+                _refresh_contract_amendment_retry_heartbeat_until_stopped(
+                    project_dir=project_dir,
+                    task_id=tid,
+                    owner_id=child_session_id,
+                )
             )
+            try:
+                await _merge_child_branch(
+                    project_dir=project_dir,
+                    child_task_id=tid,
+                    child_worktree=child_worktree,
+                    child_session_dir=retry_session_dir,
+                    parent_integration_branch=parent_integration_branch,
+                    result=retry_result,
+                    config=config,
+                    on_event=on_event,
+                )
+            finally:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
             _persist_successful_contract_amendment_retry(
                 project_dir=project_dir,
                 task_id=tid,

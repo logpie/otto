@@ -500,6 +500,31 @@ def mark_contract_amendment_retry_in_progress(
         return True
 
 
+def refresh_contract_amendment_retry_heartbeat(
+    project_dir: Path,
+    task_id: str,
+    *,
+    owner_id: str,
+) -> bool:
+    """Refresh a live merge-only retry claim if this owner still holds it."""
+    with _locked_graph(project_dir) as (_path, graph):
+        task = graph["tasks"].get(task_id)
+        if not isinstance(task, dict):
+            return False
+        if task.get("contract_amendment_retry_owner") != owner_id:
+            return False
+        if not task.get("contract_amendment_retry_in_progress"):
+            return False
+        if not task.get("contract_amendment_retry_merge"):
+            return False
+        if task.get("blocked_pending_contract_amendment") or task.get("blocked_on_task_id"):
+            return False
+        if task.get("verdict") in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}:
+            return False
+        task["contract_amendment_retry_heartbeat_at"] = _now_iso()
+        return True
+
+
 def terminalize_stale_contract_amendment_retry_if_exhausted(
     project_dir: Path,
     task_id: str,

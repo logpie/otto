@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 from __future__ import annotations
 
+import asyncio
 import socket
 from pathlib import Path
 
@@ -8,9 +9,11 @@ import pytest
 
 from otto import v5_branching, v5_runner
 from otto.lead import LeadResult
+from otto.queue import task_graph
 from otto.queue.subtask import enqueue_subtask, take_ready
 from otto.queue.task_graph import (
     get_task,
+    mark_contract_amendment_retry_in_progress,
     read_graph,
     record_task,
     set_contract_amendment_blocked,
@@ -411,6 +414,112 @@ async def test_merge_retry_window_is_durably_non_ready_before_pass(
 
     leaf = get_task(tmp_path, "leaf") or {}
     assert result.verdict == "pass"
+    assert leaf["verdict"] == "pass"
+    assert leaf["contract_amendment_retry_merge"] is False
+    assert leaf["contract_amendment_retry_in_progress"] is False
+
+
+@pytest.mark.asyncio
+async def test_live_long_running_merge_retry_heartbeat_prevents_false_reclaim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_root_with_contract(tmp_path)
+    _enqueue_known(tmp_path, task_id="leaf", owned_paths=["frontend/src/features/comments/"])
+    record_task(
+        tmp_path,
+        task_id="amendment",
+        parent_task_id=ROOT_TASK_ID,
+        intent="amendment",
+        integration_branch="i2p/root/integration",
+        owned_paths=["frontend/src/lib/ws.ts"],
+        task_role="contract_amendment",
+    )
+    set_verdict(tmp_path, "leaf", "pass")
+    set_contract_amendment_blocked(
+        tmp_path,
+        "leaf",
+        "amendment",
+        merge_context={
+            "child_session_dir": str(tmp_path / "otto_logs" / "sessions" / "leaf"),
+            "parent_integration_branch": "i2p/root/integration",
+        },
+    )
+    set_verdict(tmp_path, "amendment", "pass")
+    v5_runner._settle_contract_amendment_dependents(
+        project_dir=tmp_path,
+        amendment_id="amendment",
+        amendment_result=LeadResult(task_id="amendment", verdict="pass", decomposition="inline"),
+        completed={"leaf"},
+        child_results={"leaf": LeadResult(task_id="leaf", verdict="pass", decomposition="inline")},
+    )
+    leaf_entry = next(
+        entry
+        for entry in take_ready(tmp_path, completed_task_ids=set(), in_flight_task_ids=set())
+        if entry["task_id"] == "leaf"
+    )
+
+    clock = {"now": 1_700_000_000.0}
+
+    def fake_now_iso() -> str:
+        return task_graph.time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            task_graph.time.gmtime(clock["now"]),
+        )
+
+    monkeypatch.setattr(v5_branching, "setup_child_worktree", lambda **_kwargs: tmp_path)
+    monkeypatch.setattr(task_graph, "_now_iso", fake_now_iso)
+    monkeypatch.setattr(task_graph.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(v5_runner, "CONTRACT_AMENDMENT_RETRY_HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    reclaim_attempts: list[bool] = []
+    ready_snapshots: list[set[str]] = []
+
+    async def long_running_merge(**_kwargs: object) -> None:
+        initial_heartbeat = (get_task(tmp_path, "leaf") or {})[
+            "contract_amendment_retry_heartbeat_at"
+        ]
+        clock["now"] += task_graph.CONTRACT_AMENDMENT_RETRY_STALE_SECONDS + 10
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            if (get_task(tmp_path, "leaf") or {}).get(
+                "contract_amendment_retry_heartbeat_at"
+            ) != initial_heartbeat:
+                break
+        assert (get_task(tmp_path, "leaf") or {})[
+            "contract_amendment_retry_heartbeat_at"
+        ] != initial_heartbeat
+        ready_snapshots.append(
+            {
+                entry["task_id"]
+                for entry in take_ready(
+                    tmp_path,
+                    completed_task_ids=set(),
+                    in_flight_task_ids=set(),
+                )
+            }
+        )
+        reclaim_attempts.append(
+            mark_contract_amendment_retry_in_progress(
+                tmp_path,
+                "leaf",
+                owner_id="second-runner",
+            )
+        )
+
+    monkeypatch.setattr(v5_runner, "_merge_child_branch", long_running_merge)
+
+    result = await v5_runner._run_child(
+        project_dir=tmp_path,
+        entry=leaf_entry,
+        config={},
+        max_parallel=1,
+        on_event=None,
+    )
+
+    leaf = get_task(tmp_path, "leaf") or {}
+    assert result.verdict == "pass"
+    assert ready_snapshots == [set()]
+    assert reclaim_attempts == [False]
     assert leaf["verdict"] == "pass"
     assert leaf["contract_amendment_retry_merge"] is False
     assert leaf["contract_amendment_retry_in_progress"] is False
