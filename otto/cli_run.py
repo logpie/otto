@@ -37,6 +37,7 @@ from otto.audit import (
     default_walkthrough_from_spec,
     run_audit,
 )
+from otto.budget import RunBudget
 from otto.build import (
     BuildBudget,
     BuildResult,
@@ -76,6 +77,8 @@ from otto.spec_compile import (
     SpecValidationError,
     compile_spec,
     load_spec,
+    raise_compile_budget_exhausted_if_needed,
+    record_compile_failure_terminal,
 )
 from otto.spec_state import emit
 from otto.theme import error_console
@@ -328,16 +331,14 @@ async def _run_compile_phase(
     project_kind: str,
     session_id: str,
     config: dict[str, Any],
+    run_budget: RunBudget,
 ) -> tuple[Path, Spec]:
     """Run the compile agent. Returns (spec_path, spec)."""
-    from otto.budget import RunBudget
-
     spec_dir = _paths.spec_dir(project_dir, session_id)
     spec_dir.mkdir(parents=True, exist_ok=True)
     config = dict(config)
     config.setdefault("_intent_source", "cli-argument")
     config.setdefault("_spec_source", "compile-agent")
-    run_budget = RunBudget.start_from(config)
     spec = await compile_spec(
         intent,
         project_dir=project_dir,
@@ -365,24 +366,6 @@ async def _run_compile_phase(
         for warning in warnings:
             console.print(f"    [yellow]·[/yellow] {warning}")
     return written, spec
-
-
-def _record_compile_failure_terminal(session_dir: Path, exc: SpecValidationError) -> None:
-    """Best-effort structured terminal journal entry for compile failures."""
-    structured_reason = getattr(exc, "structured_reason", None)
-    extra: dict[str, Any] = {
-        "verdict": "blocked",
-        "phase": "compile",
-    }
-    if isinstance(structured_reason, dict):
-        extra["structured_reason"] = structured_reason
-        kind = str(structured_reason.get("kind") or "").strip()
-        if kind:
-            extra["reason_kind"] = kind
-    try:
-        emit(session_dir, "run.finished", detail=str(exc), **extra)
-    except Exception as emit_exc:  # noqa: BLE001 - terminal recording is best-effort.
-        logger.warning("failed to record compile failure terminal: %s", emit_exc)
 
 
 async def _drive_full_pipeline(
@@ -1005,6 +988,7 @@ def orchestrate_run(
                     console.print(
                         f"  [bold]otto run[/bold] — session {session_id}\n"
                     )
+                    run_budget = RunBudget.start_from(config)
                     _mark_queue_child_ready_best_effort(
                         project_dir,
                         session_id=session_id,
@@ -1018,6 +1002,7 @@ def orchestrate_run(
                             project_kind=project_kind,
                             session_id=session_id,
                             config=config,
+                            run_budget=run_budget,
                         )
                     )
             except _paths.LockBreakError as exc:
@@ -1027,7 +1012,7 @@ def orchestrate_run(
                 error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
                 sys.exit(1)
             except SpecValidationError as exc:
-                _record_compile_failure_terminal(session_dir, exc)
+                record_compile_failure_terminal(session_dir, exc)
                 error_console.print(f"[error]Spec compile failed:[/error]\n{exc}")
                 sys.exit(1)
             _emit_compile_only_message(spec_path)
@@ -1042,6 +1027,7 @@ def orchestrate_run(
                 session_id = _new_session_id(project_dir)
                 session_dir = _paths.session_dir(project_dir, session_id)
                 console.print(f"  [bold]otto run[/bold] — session {session_id}\n")
+                run_budget = RunBudget.start_from(config)
                 _mark_queue_child_ready_best_effort(
                     project_dir,
                     session_id=session_id,
@@ -1055,7 +1041,15 @@ def orchestrate_run(
                         project_kind=project_kind,
                         session_id=session_id,
                         config=config,
+                        run_budget=run_budget,
                     )
+                )
+                raise_compile_budget_exhausted_if_needed(
+                    run_budget,
+                    detail=(
+                        "run budget exhausted after spec compile; refusing to "
+                        "continue to build"
+                    ),
                 )
         except _paths.LockBreakError as exc:
             error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
@@ -1064,7 +1058,7 @@ def orchestrate_run(
             error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
             sys.exit(1)
         except SpecValidationError as exc:
-            _record_compile_failure_terminal(session_dir, exc)
+            record_compile_failure_terminal(session_dir, exc)
             error_console.print(f"[error]Spec compile failed:[/error]\n{exc}")
             sys.exit(1)
 
@@ -1327,8 +1321,6 @@ def _brownfield_compile_locked(
             run_dir = session_dir / "spec"
             run_dir.mkdir(parents=True, exist_ok=True)
             try:
-                from otto.budget import RunBudget
-
                 run_budget = RunBudget.start_from(config)
                 spec = asyncio.run(
                     compile_spec(
@@ -1342,8 +1334,15 @@ def _brownfield_compile_locked(
                         brownfield_mode=brownfield_mode,
                     )
                 )
+                raise_compile_budget_exhausted_if_needed(
+                    run_budget,
+                    detail=(
+                        "run budget exhausted after brownfield spec compile; "
+                        "refusing to continue to audit"
+                    ),
+                )
             except SpecValidationError as exc:
-                _record_compile_failure_terminal(session_dir, exc)
+                record_compile_failure_terminal(session_dir, exc)
                 error_console.print(
                     f"[error]Brownfield compile failed:[/error]\n{exc}"
                 )

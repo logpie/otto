@@ -87,7 +87,7 @@ PROJECT_KINDS: tuple[str, ...] = ("webapp", "cli", "library", "api", "service")
 BROWNFIELD_MODES: tuple[str, ...] = ("baseline", "target")
 AUDIT_FIXTURE_KINDS: tuple[str, ...] = ("user", "channel", "follow", "data")
 SCHEMAS_DIR = Path(__file__).parent / "spec_schemas"
-_AGENT_TIMEOUT_RE = re.compile(r"\btimed out after\s+\d+(?:\.\d+)?s\b", re.IGNORECASE)
+_AGENT_TIMEOUT_RE = re.compile(r"Timed out after \d+(?:\.\d+)?s")
 
 
 # Per-kind default evidence kinds for new Features (research §2.7).
@@ -3886,6 +3886,29 @@ class SpecCompileTimeoutExhaustedError(SpecValidationError):
         )
 
 
+class SpecCompileBudgetExhaustedError(SpecValidationError):
+    """Raised when no run budget remains for spec compile dispatch."""
+
+    def __init__(
+        self,
+        *,
+        attempts: int,
+        per_attempt_timeouts: list[int],
+        elapsed_s: float,
+        remaining_s: float,
+        detail: str,
+    ) -> None:
+        self.structured_reason = {
+            "kind": "spec_compile_budget_exhausted",
+            "attempts": attempts,
+            "per_attempt_timeouts": per_attempt_timeouts,
+            "elapsed_s": round(max(0.0, elapsed_s), 3),
+            "remaining_s": round(max(0.0, remaining_s), 3),
+            "_written_at": _iso_now(),
+        }
+        super().__init__(detail)
+
+
 def _is_compile_agent_timeout(exc: BaseException) -> bool:
     """Return true only for Otto's bounded agent-call timeout error."""
     try:
@@ -3894,20 +3917,21 @@ def _is_compile_agent_timeout(exc: BaseException) -> bool:
         return False
     if not isinstance(exc, AgentCallError):
         return False
-    haystack = " ".join(str(part or "") for part in (getattr(exc, "reason", ""), str(exc)))
-    return bool(_AGENT_TIMEOUT_RE.search(haystack))
+    reason = str(getattr(exc, "reason", "") or "").strip()
+    target = reason or str(exc).strip()
+    return bool(_AGENT_TIMEOUT_RE.fullmatch(target))
 
 
 def _spec_compile_timeout_for_attempt(
     *,
     spec_cap: int,
     attempt: int,
-    budget: "RunBudget | None",
+    remaining_budget_s: int | None,
 ) -> int:
     requested = max(1, int(spec_cap)) * max(1, int(attempt))
-    if budget is None:
+    if remaining_budget_s is None:
         return requested
-    return min(int(budget.for_call()), requested)
+    return min(int(remaining_budget_s), requested)
 
 
 def _compile_timeout_attempt_error(
@@ -3928,6 +3952,47 @@ def _compile_timeout_attempt_error(
     if isinstance(total_cost, int | float):
         payload["total_cost_usd"] = float(total_cost)
     return payload
+
+
+def record_compile_failure_terminal(session_dir: Path, exc: SpecValidationError) -> None:
+    """Best-effort structured terminal journal entry for compile failures."""
+    from otto.spec_state import emit
+
+    structured_reason = getattr(exc, "structured_reason", None)
+    extra: dict[str, Any] = {
+        "verdict": "blocked",
+        "phase": "compile",
+    }
+    if isinstance(structured_reason, dict):
+        extra["structured_reason"] = structured_reason
+        kind = str(structured_reason.get("kind") or "").strip()
+        if kind:
+            extra["reason_kind"] = kind
+    try:
+        emit(session_dir, "run.finished", detail=str(exc), **extra)
+    except Exception as emit_exc:  # noqa: BLE001 - terminal recording is best-effort.
+        logger.warning("failed to record compile failure terminal: %s", emit_exc)
+
+
+def raise_compile_budget_exhausted_if_needed(
+    budget: "RunBudget | None",
+    *,
+    detail: str,
+) -> None:
+    """Raise a structured compile terminal when no run budget remains."""
+    if budget is None:
+        return
+    exhausted = budget.exhausted()
+    remaining_s = budget.remaining()
+    remaining_for_call = 0 if exhausted else int(budget.for_call())
+    if exhausted or remaining_for_call <= 0:
+        raise SpecCompileBudgetExhaustedError(
+            attempts=0,
+            per_attempt_timeouts=[],
+            elapsed_s=budget.elapsed(),
+            remaining_s=remaining_s,
+            detail=detail,
+        )
 
 
 _GROUP_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -5263,11 +5328,39 @@ async def compile_spec(
     timeout_errors: list[dict[str, Any]] = []
     attempt = 1
     while True:
+        remaining_budget_s: int | None = None
+        if budget is not None:
+            exhausted = budget.exhausted()
+            remaining_s = budget.remaining()
+            remaining_budget_s = 0 if exhausted else int(budget.for_call())
+            if exhausted or remaining_budget_s <= 0:
+                raise SpecCompileBudgetExhaustedError(
+                    attempts=len(timeout_attempts),
+                    per_attempt_timeouts=timeout_attempts,
+                    elapsed_s=time.monotonic() - compile_started,
+                    remaining_s=remaining_s,
+                    detail=(
+                        "spec compile run budget exhausted before dispatching "
+                        f"attempt {attempt}; no agent call was started"
+                    ),
+                )
         timeout = _spec_compile_timeout_for_attempt(
             spec_cap=spec_cap,
             attempt=attempt,
-            budget=budget,
+            remaining_budget_s=remaining_budget_s,
         )
+        if timeout <= 0:
+            remaining_s = budget.remaining() if budget is not None else 0.0
+            raise SpecCompileBudgetExhaustedError(
+                attempts=len(timeout_attempts),
+                per_attempt_timeouts=timeout_attempts,
+                elapsed_s=time.monotonic() - compile_started,
+                remaining_s=remaining_s,
+                detail=(
+                    "spec compile computed a non-positive timeout before "
+                    f"attempt {attempt}; no agent call was started"
+                ),
+            )
         try:
             text, _cost, _session_id, _breakdown = await _run_compile_agent(attempt, timeout)
             break

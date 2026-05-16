@@ -62,6 +62,7 @@ from otto.audit_loop import (
     features_to_repair,
     repair_failing_features,
 )
+from otto.budget import RunBudget
 from otto.build import (
     BuildAgentCallable,
     BuildAgentInput,
@@ -82,7 +83,15 @@ from otto.merge_queue import (
 from otto.render import render_run
 from otto.resume import ResumePlan
 from otto.seed import SeedResult, seed_fixtures
-from otto.spec_compile import Feature, Group, Spec, compile_spec
+from otto.spec_compile import (
+    Feature,
+    Group,
+    Spec,
+    SpecValidationError,
+    compile_spec,
+    raise_compile_budget_exhausted_if_needed,
+    record_compile_failure_terminal,
+)
 from otto.spec_state import emit, is_run_paused_by_user, iter_events
 
 logger = logging.getLogger("otto.runner")
@@ -223,6 +232,7 @@ async def run_pipeline(
         explicit=allow_in_flight_spec_edits,
         default=False,
     )
+    run_budget = RunBudget.start_from(config or {}) if config is not None else None
 
     def _phase(name: str) -> None:
         # A7: between phases, honor an operator-initiated pause. We poll
@@ -273,22 +283,43 @@ async def run_pipeline(
 
     # ---- 1. Compile ----
     if spec is None:
-        from otto.budget import RunBudget
-
         _phase("compile")
         assert config is not None  # narrowed above
         run_dir = session_dir / "spec"
         run_dir.mkdir(parents=True, exist_ok=True)
-        run_budget = RunBudget.start_from(config)
-        spec = await compile_spec(
-            intent,
-            project_dir,
-            run_dir,
-            config,
-            project_kind=project_kind,
-            budget=run_budget,
-            brownfield=brownfield,
-        )
+        try:
+            spec = await compile_spec(
+                intent,
+                project_dir,
+                run_dir,
+                config,
+                project_kind=project_kind,
+                budget=run_budget,
+                brownfield=brownfield,
+            )
+            raise_compile_budget_exhausted_if_needed(
+                run_budget,
+                detail=(
+                    "run budget exhausted after spec compile; refusing to "
+                    "continue the pipeline"
+                ),
+            )
+        except SpecValidationError as exc:
+            record_compile_failure_terminal(session_dir, exc)
+            result = RunResult(spec=Spec(intent=intent, project_kind=project_kind))
+            result.halted_reason = f"spec_compile_failed: {exc}"
+            result.audit_result = AuditResult(
+                verdict=AuditVerdict.BLOCKED,
+                narrative=f"Run halted during spec compile: {exc}",
+            )
+            result.wall_s = time.monotonic() - run_t0
+            _mark_i2p_run_complete(
+                project_dir=project_dir,
+                session_dir=session_dir,
+                total_cost=result.cost_usd,
+                total_duration=result.wall_s,
+            )
+            return result
 
     result = RunResult(spec=spec)
     _mark_i2p_run_active(

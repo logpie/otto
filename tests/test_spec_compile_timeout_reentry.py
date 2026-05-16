@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,10 @@ import pytest
 from click.testing import CliRunner
 
 from otto.agent import AgentCallError
+from otto.audit import AuditVerdict
+from otto.budget import RunBudget
 from otto.cli import main
+from otto.runner import run_pipeline
 from otto.spec_compile import (
     BrowserJourney,
     Group,
@@ -61,6 +65,15 @@ class _FixedBudget:
     def __init__(self, seconds: int) -> None:
         self.seconds = seconds
 
+    def exhausted(self) -> bool:
+        return False
+
+    def remaining(self) -> float:
+        return float(self.seconds)
+
+    def elapsed(self) -> float:
+        return 0.0
+
     def for_call(self) -> int:
         return self.seconds
 
@@ -101,6 +114,40 @@ async def test_compile_spec_retries_timeout_with_extended_budget_clamped_cap(
 
 
 @pytest.mark.asyncio
+async def test_compile_spec_timeout_caps_shrink_with_elapsed_run_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    run_dir = project_dir / "otto_logs" / "sessions" / "run-timeout-shrinks" / "spec"
+    budget = RunBudget(total=700.0, start=time.monotonic())
+    calls: list[int] = []
+
+    async def timeout_then_success(*_args: object, **kwargs: Any):
+        calls.append(int(kwargs["timeout"]))
+        if len(calls) == 1:
+            budget.start = time.monotonic() - 250.0
+            raise AgentCallError("Timed out after 600s", session_id="slow-1")
+        return _agent_text_for_spec(_valid_webapp_spec()), 0.0, "slow-2", {}
+
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", timeout_then_success)
+
+    spec = await compile_spec(
+        "build a bookmark manager",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        config={"provider": "codex-app-server", "spec_timeout": 600},
+        project_kind="webapp",
+        budget=budget,
+    )
+
+    assert spec.intent == "a bookmark manager"
+    assert calls[0] == 600
+    assert 0 < calls[1] < calls[0]
+
+
+@pytest.mark.asyncio
 async def test_compile_spec_timeout_exhaustion_is_structured_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -137,6 +184,40 @@ async def test_compile_spec_timeout_exhaustion_is_structured_terminal(
 
 
 @pytest.mark.asyncio
+async def test_compile_spec_budget_exhausted_before_call_is_structured_zero_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    run_dir = project_dir / "otto_logs" / "sessions" / "run-budget-exhausted" / "spec"
+    calls: list[int] = []
+
+    async def should_not_run(*_args: object, **kwargs: Any):
+        calls.append(int(kwargs["timeout"]))
+        return _agent_text_for_spec(_valid_webapp_spec()), 0.0, "unexpected", {}
+
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", should_not_run)
+
+    with pytest.raises(SpecValidationError) as excinfo:
+        await compile_spec(
+            "build a bookmark manager",
+            project_dir=project_dir,
+            run_dir=run_dir,
+            config={"provider": "codex-app-server", "spec_timeout": 600},
+            project_kind="webapp",
+            budget=RunBudget(total=1.0, start=time.monotonic() - 2.0),
+        )
+
+    reason = getattr(excinfo.value, "structured_reason", None)
+    assert isinstance(reason, dict)
+    assert reason["kind"] == "spec_compile_budget_exhausted"
+    assert reason["attempts"] == 0
+    assert reason["per_attempt_timeouts"] == []
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_compile_spec_non_timeout_agent_call_error_still_propagates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -158,6 +239,75 @@ async def test_compile_spec_non_timeout_agent_call_error_still_propagates(
             config={"provider": "codex-app-server", "spec_timeout": 600},
             project_kind="webapp",
         )
+
+
+@pytest.mark.asyncio
+async def test_compile_spec_embedded_tool_timeout_error_still_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    run_dir = project_dir / "otto_logs" / "sessions" / "run-tool-timeout" / "spec"
+
+    async def tool_timeout_crash(*_args: object, **_kwargs: Any):
+        raise AgentCallError("Agent crashed: tool timed out after 30s")
+
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", tool_timeout_crash)
+
+    with pytest.raises(AgentCallError, match="tool timed out after 30s"):
+        await compile_spec(
+            "build a bookmark manager",
+            project_dir=project_dir,
+            run_dir=run_dir,
+            config={"provider": "codex-app-server", "spec_timeout": 600},
+            project_kind="webapp",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "events",
+    [
+        ("transient", "timeout", "success"),
+        ("timeout", "transient", "success"),
+    ],
+)
+async def test_compile_spec_transient_timeout_interleavings_share_three_attempt_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    events: tuple[str, str, str],
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    run_dir = project_dir / "otto_logs" / "sessions" / ("run-" + "-".join(events)) / "spec"
+    calls: list[int] = []
+
+    async def interleaved_agent(*_args: object, **kwargs: Any):
+        calls.append(int(kwargs["timeout"]))
+        event = events[len(calls) - 1]
+        if event == "transient":
+            raise AgentCallError(
+                "codex app-server stream stalled after recoverable error: "
+                "Reconnecting... 2/5. No provider events arrived for 120s.",
+                last_provider_stderr="Reconnecting... 2/5",
+            )
+        if event == "timeout":
+            raise AgentCallError(f"Timed out after {kwargs['timeout']}s")
+        return _agent_text_for_spec(_valid_webapp_spec()), 0.0, "ok", {}
+
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", interleaved_agent)
+
+    spec = await compile_spec(
+        "build a bookmark manager",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        config={"provider": "codex-app-server", "spec_timeout": 600},
+        project_kind="webapp",
+    )
+
+    assert spec.intent == "a bookmark manager"
+    assert len(calls) == 3
 
 
 def _init_project(path: Path) -> None:
@@ -211,5 +361,52 @@ def test_cli_run_records_structured_compile_timeout_terminal(
     terminal = rows[-1]
     assert terminal["kind"] == "run.finished"
     assert terminal["detail"] == "spec compile timeout exhausted after 3 attempts"
+    assert terminal["extra"]["verdict"] == "blocked"
+    assert terminal["extra"]["structured_reason"]["kind"] == "spec_compile_timeout_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_compile_timeout_records_blocked_terminal_without_uncaught(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    session_dir = project_dir / "otto_logs" / "sessions" / "run-runner-timeout"
+    session_dir.mkdir(parents=True)
+
+    async def fail_compile(*_args: object, **_kwargs: Any):
+        exc = SpecValidationError("spec compile timeout exhausted after 3 attempts")
+        exc.structured_reason = {
+            "kind": "spec_compile_timeout_exhausted",
+            "attempts": 3,
+            "per_attempt_timeouts": [600, 1200, 1800],
+            "elapsed_s": 3600.0,
+            "_written_at": "2026-05-16T08:22:38Z",
+        }
+        raise exc
+
+    async def unused_agent(*_args: object, **_kwargs: Any):
+        raise AssertionError("pipeline should stop during compile")
+
+    monkeypatch.setattr("otto.runner.compile_spec", fail_compile)
+
+    result = await run_pipeline(
+        "build it",
+        project_dir,
+        session_dir,
+        project_kind="webapp",
+        config={"provider": "codex-app-server", "spec_timeout": 600},
+        build_agent=unused_agent,
+        audit_agent=unused_agent,
+        spec=None,
+    )
+
+    assert result.verdict == AuditVerdict.BLOCKED
+    assert result.halted_reason.startswith("spec_compile_failed:")
+    state_path = session_dir / "spec-state.jsonl"
+    rows = [json.loads(line) for line in state_path.read_text(encoding="utf-8").splitlines()]
+    terminal = rows[-1]
+    assert terminal["kind"] == "run.finished"
     assert terminal["extra"]["verdict"] == "blocked"
     assert terminal["extra"]["structured_reason"]["kind"] == "spec_compile_timeout_exhausted"
