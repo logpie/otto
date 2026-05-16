@@ -2954,6 +2954,33 @@ def _foundation_scheduler_feedback(
     ]
     if not foundation_ids:
         return None
+    affected_features = [
+        str(task_id)
+        for task_id, task in sibling_items
+        if str((task or {}).get("task_role") or "feature") == "feature"
+        and not _task_entry_allows_upward_merge(task or {})
+        and str((task or {}).get("verdict") or "") != "merge_blocked"
+    ]
+    terminal_blocked_foundations = [
+        task_id
+        for task_id in foundation_ids
+        if _foundation_entry_is_terminal_blocked(tasks.get(task_id) or {})
+    ]
+    if terminal_blocked_foundations and affected_features:
+        return {
+            "kind": "shared_foundation_not_ready",
+            "step_id": "foundation_scheduler_ordering",
+            "message": "feature dispatch held until foundation siblings pass and foundation contracts are valid",
+            "parent_task_id": parent_task_id,
+            "ready_feature_task_ids": [],
+            "affected_feature_task_ids": affected_features,
+            "foundation_task_ids": foundation_ids,
+            "unverified_foundation_task_ids": [],
+            "terminal_blocked_foundation_task_ids": terminal_blocked_foundations,
+            "contracts_present": bool(contracts),
+            "contract_findings": _foundation_contract_findings(contracts),
+            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
     ready_features = [
         str(entry.get("task_id") or "")
         for entry in ready
@@ -2967,20 +2994,33 @@ def _foundation_scheduler_feedback(
         if task_id in in_flight_task_ids
         or not _task_entry_allows_upward_merge(tasks.get(task_id) or {})
     ]
-    terminal_blocked_foundations = [
+    mergeable_foundations = [
         task_id
         for task_id in foundation_ids
-        if _foundation_entry_is_terminal_blocked(tasks.get(task_id) or {})
+        if task_id not in in_flight_task_ids
+        and _task_entry_allows_upward_merge(tasks.get(task_id) or {})
     ]
     contract_findings = _foundation_contract_findings(contracts)
+    if mergeable_foundations and (not contracts or contract_findings):
+        return {
+            "kind": "foundation_contracts_missing_after_pass",
+            "step_id": "foundation_scheduler_contracts_after_pass",
+            "message": (
+                "foundation sibling passed but did not produce valid foundation contracts; "
+                "re-enter the foundation before dispatching dependent features"
+            ),
+            "parent_task_id": parent_task_id,
+            "ready_feature_task_ids": ready_features,
+            "affected_feature_task_ids": affected_features,
+            "foundation_task_ids": foundation_ids,
+            "mergeable_foundation_task_ids": mergeable_foundations,
+            "unverified_foundation_task_ids": unverified_foundations,
+            "terminal_blocked_foundation_task_ids": terminal_blocked_foundations,
+            "contracts_present": bool(contracts),
+            "contract_findings": contract_findings,
+            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
     if unverified_foundations or not contracts or contract_findings:
-        affected_features = [
-            str(task_id)
-            for task_id, task in sibling_items
-            if str((task or {}).get("task_role") or "feature") == "feature"
-            and not _task_entry_allows_upward_merge(task or {})
-            and str((task or {}).get("verdict") or "") != "merge_blocked"
-        ]
         return {
             "kind": "shared_foundation_not_ready",
             "step_id": "foundation_scheduler_ordering",
@@ -3001,7 +3041,7 @@ def _foundation_scheduler_feedback(
 def _foundation_entry_is_terminal_blocked(entry: dict[str, Any]) -> bool:
     if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
         return True
-    return str(entry.get("verdict") or "") in {"merge_blocked", "catastrophic", "unverified"}
+    return str(entry.get("verdict") or "") in {"merge_blocked", "catastrophic", "failed"}
 
 
 def _foundation_isolation_feedback(
@@ -3659,17 +3699,64 @@ async def _process_children(
         )
         if scheduler_feedback is not None:
             ready_feature_ids = set(scheduler_feedback.get("ready_feature_task_ids") or [])
+            affected_feature_ids = [
+                str(task_id)
+                for task_id in (scheduler_feedback.get("affected_feature_task_ids") or ready_feature_ids)
+                if str(task_id)
+            ]
+            if scheduler_feedback.get("kind") == "foundation_contracts_missing_after_pass":
+                reenter_foundation_ids = [
+                    str(task_id)
+                    for task_id in (scheduler_feedback.get("mergeable_foundation_task_ids") or [])
+                    if str(task_id)
+                ]
+                reenter_foundation_id = reenter_foundation_ids[0] if reenter_foundation_ids else ""
+                if reenter_foundation_id:
+                    _emit(on_event, {
+                        "event": "architect_contract_invalid",
+                        "task_id": reenter_foundation_id,
+                        "reason": scheduler_feedback.get("kind"),
+                        "structured_reason": scheduler_feedback,
+                    })
+                    _reenter_or_block_architect_contract(
+                        project_dir=project_dir,
+                        architect_tid=reenter_foundation_id,
+                        child_results=child_results,
+                        completed=completed,
+                        feedback=scheduler_feedback,
+                        origin="foundation_scheduler",
+                        on_event=on_event,
+                    )
+                    foundation_after_reenter = get_task(project_dir, reenter_foundation_id) or {}
+                    if str(foundation_after_reenter.get("verdict") or "") != "merge_blocked":
+                        continue
+                block_reason = dict(scheduler_feedback)
+                for feature_id in affected_feature_ids:
+                    result = child_results.get(feature_id) or LeadResult(
+                        task_id=feature_id,
+                        verdict="merge_blocked",
+                        decomposition="inline",
+                    )
+                    _record_task_merge_blocked_reason(
+                        project_dir=project_dir,
+                        task_id=feature_id,
+                        result=result,
+                        reason=block_reason["message"],
+                        origin="foundation_scheduler",
+                        structured_reason=block_reason,
+                    )
+                    child_results[feature_id] = result
+                _emit(on_event, {
+                    "event": "foundation_feature_dispatch_blocked",
+                    "parent_task_id": parent_task_id,
+                    "structured_reason": block_reason,
+                })
             terminal_foundation_ids = [
                 str(task_id)
                 for task_id in (scheduler_feedback.get("terminal_blocked_foundation_task_ids") or [])
                 if str(task_id)
             ]
             if terminal_foundation_ids:
-                affected_feature_ids = [
-                    str(task_id)
-                    for task_id in (scheduler_feedback.get("affected_feature_task_ids") or ready_feature_ids)
-                    if str(task_id)
-                ]
                 block_reason = dict(scheduler_feedback)
                 block_reason["kind"] = "foundation_unsatisfied"
                 block_reason["step_id"] = "foundation_scheduler_terminal_block"
@@ -3698,7 +3785,9 @@ async def _process_children(
                     "structured_reason": block_reason,
                 })
             ready = [
-                entry for entry in ready if str(entry.get("task_id") or "") not in ready_feature_ids
+                entry
+                for entry in ready
+                if str(entry.get("task_id") or "") not in (ready_feature_ids | set(affected_feature_ids))
             ]
             _emit(on_event, {
                 "event": "foundation_feature_dispatch_held",

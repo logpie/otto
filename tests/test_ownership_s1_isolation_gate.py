@@ -116,8 +116,7 @@ async def test_no_dep_feature_waits_for_foundation_and_contracts(
     async def fake_run_child(**kwargs: Any) -> LeadResult:
         task_id = str(kwargs["entry"]["task_id"])
         dispatched.append(task_id)
-        if task_id == "foundation":
-            assert dispatched == ["foundation"]
+        assert task_id == "foundation"
         set_verdict(repo, task_id, "pass")
         return LeadResult(task_id=task_id, verdict="pass", decomposition="inline", verify_called=True)
 
@@ -134,33 +133,25 @@ async def test_no_dep_feature_waits_for_foundation_and_contracts(
         integration_results={},
     )
 
-    assert dispatched == ["foundation"]
-    assert (get_task(repo, "feature") or {}).get("verdict") is None
-
-    update_task_metadata(
-        repo,
-        ROOT_TASK_ID,
-        foundation_contracts=[
-            {"path": "backend/auth.py", "owner_task_id": "foundation", "check": "literal"}
-        ],
+    feature = get_task(repo, "feature") or {}
+    foundation = get_task(repo, "foundation") or {}
+    assert dispatched == ["foundation", "foundation", "foundation"]
+    assert foundation["verdict"] == "merge_blocked"
+    assert foundation["merge_blocked_structured_reason"]["kind"] == (
+        "foundation_contracts_missing_after_pass"
     )
-    await v5_runner._process_children(
-        project_dir=repo,
-        parent_task_id=ROOT_TASK_ID,
-        config={},
-        max_parallel=2,
-        tree_budget_usd=100.0,
-        child_results={},
-        integration_results={},
+    assert feature["verdict"] == "merge_blocked"
+    assert feature["merge_blocked_structured_reason"]["kind"] == (
+        "foundation_contracts_missing_after_pass"
     )
 
-    assert dispatched == ["foundation", "feature"]
 
-
+@pytest.mark.parametrize("foundation_verdict", ["merge_blocked", "catastrophic"])
 @pytest.mark.asyncio
 async def test_terminal_blocked_foundation_blocks_features_honestly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    foundation_verdict: str,
 ) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -176,19 +167,21 @@ async def test_terminal_blocked_foundation_blocks_features_honestly(
         repo,
         task_id="feature",
         task_role="feature",
+        depends_on=["foundation"],
         owned_paths=["backend/routers/auth.py"],
-        intent="Feature without depends_on",
+        intent="Feature depends on foundation",
     )
-    set_verdict(repo, "foundation", "merge_blocked")
-    update_task_metadata(
-        repo,
-        "foundation",
-        merge_blocked_reason="foundation failed",
-        merge_blocked_structured_reason={
-            "kind": "foundation_contract_write_blocked",
-            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        },
-    )
+    set_verdict(repo, "foundation", foundation_verdict)  # type: ignore[arg-type]
+    if foundation_verdict == "merge_blocked":
+        update_task_metadata(
+            repo,
+            "foundation",
+            merge_blocked_reason="foundation failed",
+            merge_blocked_structured_reason={
+                "kind": "foundation_contract_write_blocked",
+                "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+        )
 
     dispatched: list[str] = []
     events: list[dict[str, Any]] = []
