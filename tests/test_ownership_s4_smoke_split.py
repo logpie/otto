@@ -12,6 +12,8 @@ from otto import v5_branching, v5_runner
 from otto.lead import LeadResult
 from otto.queue.subtask import take_ready
 from otto.queue.task_graph import get_task, read_graph, record_task, set_verdict, update_task_metadata
+from otto.v5_clean_verify import CleanOracleIssue, CleanOracleResult, CleanOracleStepResult, Scope
+from otto.v5_preflight_repair import OracleRepairResult, RepairPacket
 from otto.v5_runner import ROOT_TASK_ID
 
 
@@ -99,6 +101,46 @@ def _blocking_smoke(path: str) -> dict[str, Any]:
             }
         ],
     }
+
+
+def _clean_oracle_result(
+    repo: Path,
+    *,
+    passed: bool,
+    scope: Scope = "subtree",
+    paths: list[str] | None = None,
+    kind: str = "start_failed",
+    message: str = "start failed",
+) -> CleanOracleResult:
+    step = CleanOracleStepResult(
+        id="start",
+        status="passed" if passed else "failed",
+        return_code=0 if passed else 1,
+        command_identity="python -m otto.cli clean-verify",
+        command=["python", "-m", "otto.cli", "clean-verify"],
+        cwd=str(repo),
+        env={},
+    )
+    issue = CleanOracleIssue(
+        kind=kind,
+        severity="block",
+        message=message,
+        step_id=step.id,
+        paths=list(paths or []),
+        command_identity=step.command_identity,
+        return_code=step.return_code,
+    )
+    return CleanOracleResult.from_parts(
+        passed=passed,
+        scope=scope,
+        issues=[] if passed else [issue],
+        steps=[step],
+        artifact_path_refs=[],
+        command=step.command,
+        env=step.env,
+        project_dir=repo,
+        temp_dir=None,
+    )
 
 
 def _repair_tasks(repo: Path) -> list[tuple[str, dict[str, Any]]]:
@@ -358,3 +400,135 @@ async def test_in_scope_smoke_failure_still_uses_existing_scoped_repair_loop(
     assert _repair_tasks(repo) == []
     assert not [event for event in events if event.get("event") == "integration_repair_needed"]
     assert (get_task(repo, "leaf") or {})["verdict"] == "pass"
+
+
+def test_integration_smoke_serialization_preserves_real_clean_oracle_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    monkeypatch.setattr(
+        v5_runner,
+        "verify_from_clean_oracle",
+        lambda *_args, **_kwargs: _clean_oracle_result(
+            repo,
+            passed=False,
+            paths=["frontend/src/lib/ws.ts"],
+            message="ws contract broke startup",
+        ),
+    )
+
+    payload = v5_runner._run_integration_smoke_preflight(
+        worktree_path=repo,
+        task_id="leaf",
+        phase="child_merge_conflict_repair",
+    )
+
+    assert payload["passed"] is False
+    assert payload["issues"][0]["paths"] == ["frontend/src/lib/ws.ts"]
+    assert v5_runner._smoke_payload_paths(payload) == ["frontend/src/lib/ws.ts"]
+
+
+def test_pathless_smoke_failure_terminalizes_without_empty_amendment(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _record_leaf(repo)
+    result = LeadResult(task_id="leaf", verdict="pass", decomposition="inline", verify_called=True)
+    payload = {
+        "passed": False,
+        "issues": [
+            {
+                "kind": "clean_deploy_smoke_error",
+                "severity": "block",
+                "message": "start failed without path",
+            }
+        ],
+    }
+
+    routed = v5_runner._route_out_of_scope_smoke_failure(
+        project_dir=repo,
+        child_task_id="leaf",
+        child_worktree=repo,
+        child_session_dir=repo / "otto_logs" / "sessions" / "session-leaf",
+        parent_integration_branch="i2p/root/integration",
+        source_branch="main",
+        pre_merge_ref="HEAD",
+        smoke_payload=payload,
+        result=result,
+    )
+
+    assert routed is True
+    assert _repair_tasks(repo) == []
+    leaf = get_task(repo, "leaf") or {}
+    assert leaf.get("blocked_on_task_id") in (None, "")
+    assert leaf["verdict"] == "merge_blocked"
+    structured = leaf["merge_blocked_structured_reason"]
+    assert structured["kind"] == "integration_smoke_unrouteable"
+    assert structured["repair_path"] == ""
+    assert result.verdict == "merge_blocked"
+
+
+@pytest.mark.asyncio
+async def test_in_scope_smoke_repair_packet_and_commit_hook_enforce_owned_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "frontend/src/features/issues").mkdir(parents=True)
+    (repo / "frontend/src/features/issues/view.tsx").write_text("old\n", encoding="utf-8")
+    (repo / "frontend/src/lib").mkdir(parents=True)
+    (repo / "frontend/src/lib/ws.ts").write_text("old\n", encoding="utf-8")
+    _git(repo, "add", "-A", check=True)
+    _git(repo, "commit", "-q", "-m", "seed app", check=True)
+    _record_leaf(repo)
+    packets: list[RepairPacket] = []
+    commit_results: list[tuple[bool, str]] = []
+    calls = 0
+
+    def fake_smoke(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _blocking_smoke("frontend/src/features/issues/view.tsx")
+        return {"passed": True, "issues": []}
+
+    async def fake_repair(packet: RepairPacket, **kwargs: Any) -> OracleRepairResult:
+        packets.append(packet)
+        (repo / "frontend/src/lib/ws.ts").write_text("outside\n", encoding="utf-8")
+        commit_hook = kwargs["commit_hook"]
+        commit_results.append(
+            await commit_hook(packet, _clean_oracle_result(repo, passed=True))
+        )
+        return OracleRepairResult(
+            verdict="merge_blocked",
+            summary=commit_results[-1][1],
+            packet_path=str(packet.packet_path),
+        )
+
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight", fake_smoke)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_repair)
+
+    payload = await v5_runner._run_integration_smoke_preflight_with_repair(
+        project_dir=repo,
+        worktree_path=repo,
+        task_id="leaf",
+        phase="child_merge_conflict_repair",
+        session_dir=repo / "otto_logs" / "sessions" / "session-leaf",
+        config={},
+        integration_branch="i2p/root/integration",
+        allowed_paths=["frontend/src/features/issues/"],
+        scope_policy="allowed_paths",
+    )
+
+    assert packets
+    assert packets[0].repair_unit["allowed_paths"] == ["frontend/src/features/issues/"]
+    assert packets[0].repair_unit["scope_policy"] == "allowed_paths"
+    assert commit_results and commit_results[0][0] is False
+    assert "allowed_paths_write_blocked" in commit_results[0][1]
+    assert "frontend/src/lib/ws.ts" in commit_results[0][1]
+    assert payload["repair"]["terminal_state"] == "escalated"

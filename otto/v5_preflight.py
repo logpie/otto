@@ -31,12 +31,14 @@ class PreflightIssue:
         severity: warn (log), error (log + emit event), block (refuse dispatch).
         message: human-readable description.
         task_id: the task this issue is about, if applicable.
+        paths: issue paths emitted by the clean oracle, if applicable.
     """
 
     kind: str
     severity: Severity
     message: str
     task_id: str | None = None
+    paths: list[str] | None = None
 
 
 def _is_architect(task: dict[str, Any]) -> bool:
@@ -249,9 +251,16 @@ def preflight_issues_from_clean_oracle(
         if isinstance(issue, dict):
             kind = str(issue.get("kind") or "internal_error")
             message = str(issue.get("message") or "clean-deploy failed")
+            raw_paths = [str(path) for path in issue.get("paths") or [] if str(path)]
         else:
             kind = str(getattr(issue, "kind", "") or "internal_error")
             message = str(getattr(issue, "message", "") or "clean-deploy failed")
+            raw_paths = [
+                str(path)
+                for path in getattr(issue, "paths", []) or []
+                if str(path)
+            ]
+        paths = raw_paths or None
         if surface == "scaffold":
             if kind == "script_valid_failed":
                 legacy_kind = "script_valid_failed"
@@ -274,6 +283,7 @@ def preflight_issues_from_clean_oracle(
                     severity="block",
                     message=message,
                     task_id=architect_task_id,
+                    paths=paths,
                 )
             )
             continue
@@ -298,6 +308,7 @@ def preflight_issues_from_clean_oracle(
                 kind=legacy_kind,
                 severity="block",
                 message=message,
+                paths=paths,
             )
         )
     return mapped

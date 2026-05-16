@@ -611,6 +611,47 @@ def _foundation_contract_write_block_detail(feedback: dict[str, Any]) -> str:
         return str(feedback)
 
 
+def _allowed_paths_write_feedback(
+    *,
+    acting_task_id: str,
+    changed_paths: list[str],
+    allowed_paths: list[str] | None,
+    scope_policy: str,
+    operation: str,
+) -> dict[str, Any] | None:
+    if scope_policy != "allowed_paths":
+        return None
+    normalized_changes = [
+        _normalize_contract_path(path)
+        for path in changed_paths
+        if _normalize_contract_path(path)
+    ]
+    normalized_allowed = [
+        _normalize_contract_path(path)
+        for path in allowed_paths or []
+        if _normalize_contract_path(path)
+    ]
+    outside_scope = [
+        path
+        for path in normalized_changes
+        if not normalized_allowed
+        or not any(_path_overlaps(path, allowed) for allowed in normalized_allowed)
+    ]
+    if not outside_scope:
+        return None
+    return {
+        "kind": "allowed_paths_write_blocked",
+        "step_id": "allowed_paths_write_gate",
+        "message": "scoped repair attempted to write outside allowed paths",
+        "task_id": acting_task_id,
+        "operation": operation,
+        "scope_policy": scope_policy,
+        "allowed_paths": normalized_allowed,
+        "changed_paths": outside_scope,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
 def _foundation_contract_for_feedback_path(
     *,
     project_dir: Path,
@@ -870,6 +911,15 @@ def _smoke_payload_paths(payload: dict[str, Any]) -> list[str]:
             normalized = _normalize_contract_path(str(raw))
             if normalized:
                 paths.append(normalized)
+    clean_oracle_result = payload.get("clean_oracle_result")
+    if isinstance(clean_oracle_result, dict):
+        for issue in clean_oracle_result.get("issues") or []:
+            if not isinstance(issue, dict):
+                continue
+            for raw in issue.get("paths") or []:
+                normalized = _normalize_contract_path(str(raw))
+                if normalized:
+                    paths.append(normalized)
     repair = payload.get("repair")
     if isinstance(repair, dict):
         for raw in repair.get("attempted_paths") or []:
@@ -891,6 +941,35 @@ def _smoke_payload_within_task_scope(
         any(_path_overlaps(issue_path, owned) for owned in owned_paths)
         for issue_path in issue_paths
     )
+
+
+def _smoke_repair_unrouteable_feedback(
+    *,
+    child_task_id: str,
+    parent_task_id: str,
+    parent_integration_branch: str,
+    source_branch: str,
+    pre_merge_ref: str,
+    smoke_payload: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "kind": "integration_smoke_unrouteable",
+        "step_id": "integration_smoke_repair",
+        "message": _preflight_blocking_summary(
+            "Integration smoke failure is unrouteable because the clean-oracle payload has no issue paths",
+            smoke_payload,
+        ),
+        "task_id": child_task_id,
+        "parent_task_id": parent_task_id,
+        "parent_integration_branch": parent_integration_branch,
+        "source_branch": source_branch,
+        "pre_merge_ref": pre_merge_ref,
+        "paths": [],
+        "repair_path": "",
+        "owner_task_id": parent_task_id,
+        "smoke_payload": smoke_payload,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
 
 
 def _smoke_repair_feedback(
@@ -945,12 +1024,10 @@ def _schedule_smoke_repair_needed(
     pre_merge_ref: str,
     smoke_payload: dict[str, Any],
     contract: dict[str, Any] | None,
+    repair_path: str,
+    attempt_key: str,
     on_event: Any = None,
 ) -> str:
-    issue_paths = _smoke_payload_paths(smoke_payload)
-    repair_path = _normalize_contract_path(
-        str((contract or {}).get("path") or (issue_paths[0] if issue_paths else ""))
-    )
     owner_id = str((contract or {}).get("owner_task_id") or parent_task_id).strip()
     is_foundation = contract is not None
     repair_route = "foundation_contract_amendment" if is_foundation else "integration_smoke_repair"
@@ -958,7 +1035,7 @@ def _schedule_smoke_repair_needed(
     attempt_count = _increment_contract_amendment_attempt(
         project_dir,
         child_task_id,
-        repair_path or "integration_smoke_repair",
+        attempt_key,
     )
     intent = (
         "Repair integration smoke clean-deploy failure for "
@@ -1077,10 +1154,32 @@ def _route_out_of_scope_smoke_failure(
         child_task_id=child_task_id,
         feedback=feedback,
     )
+    issue_paths = _smoke_payload_paths(smoke_payload)
     repair_path = _normalize_contract_path(
-        str((contract or {}).get("path") or ((_smoke_payload_paths(smoke_payload) or [""])[0]))
+        str((contract or {}).get("path") or ((issue_paths or [""])[0]))
     )
-    current_attempts = _contract_amendment_attempt_count(child, repair_path)
+    if not repair_path:
+        unrouteable = _smoke_repair_unrouteable_feedback(
+            child_task_id=child_task_id,
+            parent_task_id=parent_task_id,
+            parent_integration_branch=parent_integration_branch,
+            source_branch=source_branch,
+            pre_merge_ref=pre_merge_ref,
+            smoke_payload=smoke_payload,
+        )
+        _record_structured_merge_failed(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=str(unrouteable["message"]),
+            origin="integration_smoke_unrouteable",
+            phase="integration_smoke_repair",
+            structured_reason=unrouteable,
+            on_event=on_event,
+        )
+        return True
+    attempt_key = repair_path
+    current_attempts = _contract_amendment_attempt_count(child, attempt_key)
     if current_attempts >= MAX_CONTRACT_AMENDMENT_ATTEMPTS:
         exhausted = _contract_amendment_exhausted_feedback(
             child_task_id=child_task_id,
@@ -1121,6 +1220,8 @@ def _route_out_of_scope_smoke_failure(
         pre_merge_ref=pre_merge_ref,
         smoke_payload=smoke_payload,
         contract=contract,
+        repair_path=repair_path,
+        attempt_key=attempt_key,
         on_event=on_event,
     )
     return True
@@ -2296,11 +2397,30 @@ async def _run_preflight_payload_repair_session(
     async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
         from otto.v5_branching import commit_integration_worktree
 
+        changed_paths = _git_diff_name_only(worktree_path)
+        scope_feedback = _allowed_paths_write_feedback(
+            acting_task_id=task_id,
+            changed_paths=changed_paths,
+            allowed_paths=allowed_paths,
+            scope_policy=scope_policy,
+            operation=f"{repair_phase}_repair_commit",
+        )
+        if scope_feedback is not None:
+            detail = _foundation_contract_write_block_detail(scope_feedback)
+            _emit(on_event, {
+                "event": f"{event_prefix}_repair_commit_failed",
+                "task_id": task_id,
+                "repair_phase": repair_phase,
+                "worktree": str(worktree_path),
+                "detail": detail,
+                "structured_reason": scope_feedback,
+            })
+            return False, detail
         feedback = _foundation_contract_write_feedback(
             project_dir=project_dir,
             acting_task_id=task_id,
             parent_integration_branch=integration_branch or _branch_checked_out(worktree_path) or "main",
-            changed_paths=_git_diff_name_only(worktree_path),
+            changed_paths=changed_paths,
             operation=f"{repair_phase}_repair_commit",
         )
         if feedback is not None:
@@ -5679,6 +5799,8 @@ async def _repair_stale_target_and_retry_merge(
                     session_dir=child_session_dir,
                     config=config,
                     integration_branch=parent_integration_branch,
+                    allowed_paths=_task_owned_paths(get_task(project_dir, child_task_id) or {}),
+                    scope_policy="allowed_paths",
                     on_event=on_event,
                 )
                 if _preflight_repair_escalated(oracle) or _integration_smoke_blocks(oracle):
@@ -6011,6 +6133,8 @@ async def _merge_child_branch(
                             session_dir=child_session_dir,
                             config=config,
                             integration_branch=parent_integration_branch,
+                            allowed_paths=_task_owned_paths(get_task(project_dir, child_task_id) or {}),
+                            scope_policy="allowed_paths",
                             on_event=on_event,
                         )
                         if not (
@@ -6872,6 +6996,7 @@ def _preflight_issue_payload(issue: Any) -> dict[str, Any]:
         "severity": getattr(issue, "severity", "warn"),
         "message": getattr(issue, "message", ""),
         "task_id": getattr(issue, "task_id", None),
+        "paths": list(getattr(issue, "paths", None) or []),
     }
 
 
@@ -6972,6 +7097,8 @@ async def _run_integration_smoke_preflight_with_repair(
     config: dict[str, Any],
     integration_branch: str | None,
     journey_scope: ExecutionScope = "subtree_integration",
+    allowed_paths: list[str] | None = None,
+    scope_policy: str = "unrestricted",
     on_event: Any = None,
 ) -> dict[str, Any]:
     """Run clean-deploy smoke and repair blocking issues before continuing."""
@@ -7009,6 +7136,8 @@ async def _run_integration_smoke_preflight_with_repair(
         integration_context={
             "smoke_phase": phase,
         },
+        allowed_paths=allowed_paths,
+        scope_policy=scope_policy,
         journey_scope=journey_scope,
     )
 
