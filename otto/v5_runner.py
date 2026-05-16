@@ -29,8 +29,11 @@ Phase 2 design notes:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import fcntl
 import hashlib
 import logging
+import re
 import shutil
 import subprocess
 import json
@@ -747,6 +750,26 @@ def _integration_union_missing_contributions(
     return missing
 
 
+@contextlib.contextmanager
+def _integration_union_guard_lock(
+    project_dir: Path,
+    parent_integration_branch: str,
+) -> Iterator[None]:
+    """Serialize union-guard state updates for one integration target."""
+    from otto.v5_branching import _git_common_dir
+
+    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", parent_integration_branch).strip("-") or "target"
+    lock_dir = _git_common_dir(project_dir) / "otto-union-guard-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{safe}.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _integration_union_reason_text(feedback: dict[str, Any]) -> str:
     raw_missing = feedback.get("missing")
     missing: list[Any] = raw_missing if isinstance(raw_missing, list) else []
@@ -839,51 +862,55 @@ def _record_and_check_integration_union(
     source_branch: str,
     pre_merge_ref: str,
 ) -> dict[str, Any] | None:
-    parent_task_id = _parent_task_id_for_child(
+    with _integration_union_guard_lock(
         project_dir,
-        child_task_id,
         parent_integration_branch,
-    )
-    parent_task = get_task(project_dir, parent_task_id) or {}
-    state = _integration_union_state_from_task(parent_task, parent_integration_branch)
-    additions_by_path = _git_added_lines_by_path_between(
-        project_dir,
-        pre_merge_ref,
-        source_branch,
-    )
-    touched_paths = _git_changed_paths_between_refs(
-        project_dir,
-        pre_merge_ref,
-        source_branch,
-    )
-    state = _merge_integration_union_state(
-        state=state,
-        child_task_id=child_task_id,
-        source_branch=source_branch,
-        base_ref=pre_merge_ref,
-        head_ref=source_branch,
-        additions_by_path=additions_by_path,
-        touched_paths=touched_paths,
-    )
-    update_task_metadata(project_dir, parent_task_id, integration_union_guard=state)
-    shared_paths = _integration_union_shared_paths(state)
-    final_text_by_path = {
-        path: _git_show_text_at_ref(project_dir, parent_integration_branch, path)
-        for path in shared_paths
-    }
-    missing = _integration_union_missing_contributions(state, final_text_by_path)
-    if not missing:
-        return None
-    post_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
-    return _integration_union_feedback(
-        parent_integration_branch=parent_integration_branch,
-        child_task_id=child_task_id,
-        source_branch=source_branch,
-        base_ref=pre_merge_ref,
-        post_merge_ref=post_merge_ref,
-        missing=missing,
-        final_text_by_path=final_text_by_path,
-    )
+    ):
+        parent_task_id = _parent_task_id_for_child(
+            project_dir,
+            child_task_id,
+            parent_integration_branch,
+        )
+        parent_task = get_task(project_dir, parent_task_id) or {}
+        state = _integration_union_state_from_task(parent_task, parent_integration_branch)
+        additions_by_path = _git_added_lines_by_path_between(
+            project_dir,
+            pre_merge_ref,
+            source_branch,
+        )
+        touched_paths = _git_changed_paths_between_refs(
+            project_dir,
+            pre_merge_ref,
+            source_branch,
+        )
+        state = _merge_integration_union_state(
+            state=state,
+            child_task_id=child_task_id,
+            source_branch=source_branch,
+            base_ref=pre_merge_ref,
+            head_ref=source_branch,
+            additions_by_path=additions_by_path,
+            touched_paths=touched_paths,
+        )
+        update_task_metadata(project_dir, parent_task_id, integration_union_guard=state)
+        shared_paths = _integration_union_shared_paths(state)
+        final_text_by_path = {
+            path: _git_show_text_at_ref(project_dir, parent_integration_branch, path)
+            for path in shared_paths
+        }
+        missing = _integration_union_missing_contributions(state, final_text_by_path)
+        if not missing:
+            return None
+        post_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+        return _integration_union_feedback(
+            parent_integration_branch=parent_integration_branch,
+            child_task_id=child_task_id,
+            source_branch=source_branch,
+            base_ref=pre_merge_ref,
+            post_merge_ref=post_merge_ref,
+            missing=missing,
+            final_text_by_path=final_text_by_path,
+        )
 
 
 def _read_text_artifact(path: Path, *, max_chars: int = 60000) -> dict[str, Any]:
@@ -3662,6 +3689,94 @@ async def _repair_child_upward_merge_gate_once(
     return True, repair.summary
 
 
+def _stale_target_gate_feedback(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    parent_integration_branch: str,
+    detail: str,
+    prior_repair_detail: str,
+    origin: str,
+    previous_feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from otto.v5_branching import child_branch_name
+
+    source_branch = child_branch_name(child_task_id)
+    base_ref = _git_capture(project_dir, ["merge-base", parent_integration_branch, source_branch])
+    target_head = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+    source_head = _git_capture(project_dir, ["rev-parse", source_branch])
+    feedback: dict[str, Any] = {
+        "kind": "stale_integration_target_after_repair",
+        "step_id": "child_merge_retry",
+        "message": detail,
+        "paths": _git_changed_paths_between_refs(project_dir, base_ref, source_branch)
+        if base_ref
+        else [],
+        "parent_integration_branch": parent_integration_branch,
+        "prior_repair_detail": prior_repair_detail,
+        "origin": origin,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "integration_context": {
+            "merge_refs": {
+                "base_ref": base_ref,
+                "ours_ref": parent_integration_branch,
+                "ours_head": target_head,
+                "theirs_ref": source_branch,
+                "theirs_head": source_head,
+            },
+            "stale_target_gate": {
+                "kind": "stale_integration_target_after_repair",
+                "detail": detail,
+                "prior_repair_detail": prior_repair_detail,
+                "previous_feedback": previous_feedback or {},
+            },
+        },
+    }
+    if previous_feedback is not None:
+        feedback["previous_gate_feedback"] = previous_feedback
+    return feedback
+
+
+async def _repair_child_stale_target_gate_once(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    child_worktree: Path,
+    child_session_dir: Path,
+    parent_integration_branch: str,
+    result: LeadResult,
+    config: dict[str, Any],
+    detail: str,
+    prior_repair_detail: str,
+    origin: str,
+    previous_feedback: dict[str, Any] | None = None,
+    on_event: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    feedback = _stale_target_gate_feedback(
+        project_dir=project_dir,
+        child_task_id=child_task_id,
+        parent_integration_branch=parent_integration_branch,
+        detail=detail,
+        prior_repair_detail=prior_repair_detail,
+        origin=origin,
+        previous_feedback=previous_feedback,
+    )
+    repaired, repair_detail = await _repair_child_upward_merge_gate_once(
+        project_dir=project_dir,
+        child_task_id=child_task_id,
+        child_worktree=child_worktree,
+        child_session_dir=child_session_dir,
+        parent_integration_branch=parent_integration_branch,
+        result=result,
+        config=config,
+        original_detail=detail,
+        on_event=on_event,
+        gate_feedback=feedback,
+        origin=origin,
+    )
+    return repaired, repair_detail, feedback
+
+
 async def _merge_child_branch(
     *,
     project_dir: Path,
@@ -3754,7 +3869,39 @@ async def _merge_child_branch(
                         oracle,
                     )
             else:
-                detail = f"{detail}; conflict repair attempt: {repair_detail}"
+                stale_repaired, stale_detail, stale_feedback = (
+                    await _repair_child_stale_target_gate_once(
+                        project_dir=project_dir,
+                        child_task_id=child_task_id,
+                        child_worktree=child_worktree,
+                        child_session_dir=child_session_dir,
+                        parent_integration_branch=parent_integration_branch,
+                        result=result,
+                        config=config,
+                        detail=detail,
+                        prior_repair_detail=repair_detail,
+                        origin="stale_target_merge_gate",
+                        on_event=on_event,
+                    )
+                )
+                if stale_repaired:
+                    pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+                    try:
+                        ok, detail = merge_child_into_integration(
+                            project_dir=project_dir,
+                            child_task_id=child_task_id,
+                            parent_integration_branch=parent_integration_branch,
+                        )
+                    except MergeWorktreeDirtyError as exc:
+                        ok = False
+                        detail = str(exc)
+                if not ok:
+                    detail = (
+                        f"{detail}; conflict repair attempt: {repair_detail}; "
+                        f"stale target repair attempt: {stale_detail}"
+                    )
+                    if isinstance(result.verify_result, dict):
+                        result.verify_result.setdefault("structured_reason", stale_feedback)
         else:
             detail = f"{detail}; conflict repair attempt: {repair_detail}"
     if not ok and not _looks_like_merge_conflict(detail):
@@ -3864,26 +4011,55 @@ async def _merge_child_branch(
             ok = False
             detail = str(exc)
         if not ok:
-            reason = (
-                f"{detail}; integration union repair merge retry attempt: {repair_detail}; "
-                f"original refusal: {union_feedback.get('message')}"
+            stale_repaired, stale_detail, stale_feedback = (
+                await _repair_child_stale_target_gate_once(
+                    project_dir=project_dir,
+                    child_task_id=child_task_id,
+                    child_worktree=child_worktree,
+                    child_session_dir=child_session_dir,
+                    parent_integration_branch=parent_integration_branch,
+                    result=result,
+                    config=config,
+                    detail=detail,
+                    prior_repair_detail=repair_detail,
+                    origin="integration_union_guard",
+                    previous_feedback=union_feedback,
+                    on_event=on_event,
+                )
             )
-            _record_task_merge_blocked_reason(
-                project_dir=project_dir,
-                task_id=child_task_id,
-                result=result,
-                reason=reason,
-                origin="integration_union_guard",
-                structured_reason=union_feedback,
-            )
-            _emit(on_event, {
-                "event": "merge_failed",
-                "task_id": child_task_id,
-                "phase": "integration_union_guard",
-                "detail": reason,
-                "structured_reason": union_feedback,
-            })
-            return
+            if stale_repaired:
+                pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+                try:
+                    ok, detail = merge_child_into_integration(
+                        project_dir=project_dir,
+                        child_task_id=child_task_id,
+                        parent_integration_branch=parent_integration_branch,
+                    )
+                except MergeWorktreeDirtyError as exc:
+                    ok = False
+                    detail = str(exc)
+            if not ok:
+                reason = (
+                    f"{detail}; integration union repair merge retry attempt: {repair_detail}; "
+                    f"stale target repair attempt: {stale_detail}; "
+                    f"original refusal: {union_feedback.get('message')}"
+                )
+                _record_task_merge_blocked_reason(
+                    project_dir=project_dir,
+                    task_id=child_task_id,
+                    result=result,
+                    reason=reason,
+                    origin="integration_union_guard",
+                    structured_reason=stale_feedback,
+                )
+                _emit(on_event, {
+                    "event": "merge_failed",
+                    "task_id": child_task_id,
+                    "phase": "integration_union_guard",
+                    "detail": reason,
+                    "structured_reason": stale_feedback,
+                })
+                return
 
         followup_feedback = _record_and_check_integration_union(
             project_dir=project_dir,
@@ -3897,25 +4073,70 @@ async def _merge_child_branch(
                 followup_feedback.get("message")
                 or _integration_union_reason_text(followup_feedback)
             )
-            reason = (
-                f"{followup_detail}; integration union repair attempt: {repair_detail}"
-            )
-            _record_task_merge_blocked_reason(
-                project_dir=project_dir,
-                task_id=child_task_id,
-                result=result,
-                reason=reason,
-                origin="integration_union_guard",
-                structured_reason=followup_feedback,
-            )
             _emit(on_event, {
-                "event": "merge_failed",
+                "event": "integration_union_incomplete",
                 "task_id": child_task_id,
-                "phase": "integration_union_guard",
-                "detail": reason,
+                "into": parent_integration_branch,
+                "detail": followup_detail,
                 "structured_reason": followup_feedback,
+                "after_repair": True,
             })
-            return
+            stale_repaired, stale_detail, stale_feedback = (
+                await _repair_child_stale_target_gate_once(
+                    project_dir=project_dir,
+                    child_task_id=child_task_id,
+                    child_worktree=child_worktree,
+                    child_session_dir=child_session_dir,
+                    parent_integration_branch=parent_integration_branch,
+                    result=result,
+                    config=config,
+                    detail=followup_detail,
+                    prior_repair_detail=repair_detail,
+                    origin="integration_union_guard",
+                    previous_feedback=followup_feedback,
+                    on_event=on_event,
+                )
+            )
+            if stale_repaired:
+                pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+                try:
+                    ok, detail = merge_child_into_integration(
+                        project_dir=project_dir,
+                        child_task_id=child_task_id,
+                        parent_integration_branch=parent_integration_branch,
+                    )
+                except MergeWorktreeDirtyError as exc:
+                    ok = False
+                    detail = str(exc)
+                if ok:
+                    followup_feedback = _record_and_check_integration_union(
+                        project_dir=project_dir,
+                        parent_integration_branch=parent_integration_branch,
+                        child_task_id=child_task_id,
+                        source_branch=source_branch,
+                        pre_merge_ref=pre_merge_ref,
+                    )
+            if not stale_repaired or not ok or followup_feedback is not None:
+                reason = (
+                    f"{followup_detail}; integration union repair attempt: {repair_detail}; "
+                    f"stale target repair attempt: {stale_detail}"
+                )
+                _record_task_merge_blocked_reason(
+                    project_dir=project_dir,
+                    task_id=child_task_id,
+                    result=result,
+                    reason=reason,
+                    origin="integration_union_guard",
+                    structured_reason=stale_feedback,
+                )
+                _emit(on_event, {
+                    "event": "merge_failed",
+                    "task_id": child_task_id,
+                    "phase": "integration_union_guard",
+                    "detail": reason,
+                    "structured_reason": stale_feedback,
+                })
+                return
 
     _emit(on_event, {
         "event": "merged",

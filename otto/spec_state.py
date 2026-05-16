@@ -54,8 +54,10 @@ to restart the merge from a clean base.
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import json
 import logging
+import os
 import subprocess
 import time
 from collections import defaultdict
@@ -314,15 +316,11 @@ def journal_path(session_dir: Path) -> Path:
     return Path(session_dir) / JOURNAL_FILENAME
 
 
-def _next_event_id(session_dir: Path) -> str:
-    """Generate the next stable event id for this session.
+def _journal_lock_path(target: Path) -> Path:
+    return target.with_suffix(target.suffix + ".lock")
 
-    Format: ``ev-NNNNNN`` based on the current line count of
-    `spec-state.jsonl`. New events get the next number; once written,
-    an event's id is permanent. Amendments reference these via
-    `Amendment.trigger_event_id`.
-    """
-    target = journal_path(session_dir)
+
+def _next_event_id_for_target(target: Path) -> str:
     if not target.exists():
         return "ev-000001"
     try:
@@ -331,6 +329,17 @@ def _next_event_id(session_dir: Path) -> str:
     except OSError:
         count = 0
     return f"ev-{count + 1:06d}"
+
+
+def _next_event_id(session_dir: Path) -> str:
+    """Generate the next stable event id for this session.
+
+    Format: ``ev-NNNNNN`` based on the current line count of
+    `spec-state.jsonl`. New events get the next number; once written,
+    an event's id is permanent. Amendments reference these via
+    `Amendment.trigger_event_id`.
+    """
+    return _next_event_id_for_target(journal_path(session_dir))
 
 
 def append_event(session_dir: Path, event: Event) -> Event:
@@ -348,12 +357,21 @@ def append_event(session_dir: Path, event: Event) -> Event:
         raise ValueError(f"unknown event kind {event.kind!r}; expected one of {EVENT_KINDS}")
     target = journal_path(session_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
-    if not event.event_id:
-        event = dataclasses.replace(event, event_id=_next_event_id(session_dir))
-    payload = dataclasses.asdict(event)
-    line = json.dumps(payload, sort_keys=True) + "\n"
-    with target.open("a", encoding="utf-8") as fh:
-        fh.write(line)
+    lock_fd = os.open(str(_journal_lock_path(target)), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if not event.event_id:
+            event = dataclasses.replace(event, event_id=_next_event_id_for_target(target))
+        payload = dataclasses.asdict(event)
+        line = json.dumps(payload, sort_keys=True) + "\n"
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+            fh.flush()
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
     return event
 
 
