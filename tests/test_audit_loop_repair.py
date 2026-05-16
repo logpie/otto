@@ -332,6 +332,39 @@ def test_re_audit_still_partial_does_not_flip_succeeded() -> None:
     assert any(kind == "audit.repair_session.oracle_gate" for kind, _payload in events)
 
 
+def test_re_audit_omitting_attempted_feature_halts_as_no_progress() -> None:
+    spec = _spec("f1")
+    fix_agent, fix_calls = _make_fix_agent(succeed=True)
+    re_audit_calls: list[list[str]] = []
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def empty_re_audit(feature_ids: list[str]) -> list[dict[str, Any]]:
+        re_audit_calls.append(list(feature_ids))
+        return []
+
+    result = asyncio.run(
+        repair_failing_features(
+            spec=spec,
+            feature_verdicts=[
+                _verdict("f1", "blocked", evidence_refs=["walkthrough.jsonl#L7"])
+            ],
+            fix_agent=fix_agent,
+            re_audit=empty_re_audit,
+            max_attempts_per_run=3,
+            max_audit_passes=5,
+            on_event=lambda kind, payload: events.append((kind, payload)),
+        )
+    )
+
+    assert fix_calls == [("f1", "g")]
+    assert re_audit_calls == [["f1"]]
+    assert result.audit_passes_run == 2
+    assert len(result.attempts) == 1
+    assert result.attempts[0].succeeded is False
+    assert result.halted_reason == "no_progress:oracle_state_unchanged"
+    assert any(kind == "audit.repair_session.no_progress" for kind, _payload in events)
+
+
 def test_repair_loop_retries_feature_that_reaudit_keeps_partial() -> None:
     spec = _spec_by_group({"f1": "g1", "f2": "g2"})
     fix_agent, fix_calls = _make_fix_agent(succeed=True)

@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from otto.repair_evidence import repair_evidence_from_payload
+
 
 @dataclass(frozen=True)
 class RepairGateDecision:
@@ -41,7 +43,8 @@ _NON_REPAIRABLE_REASONS_BY_CODE = {
 
 def repair_gate_for_verdict(verdict_payload: dict[str, Any]) -> RepairGateDecision:
     """Classify whether an audit feature verdict should trigger repair."""
-    verdict = _clean(verdict_payload.get("verdict"))
+    evidence = repair_evidence_from_payload(verdict_payload)
+    verdict = evidence.raw_verdict
     if verdict in {"", "passed"}:
         return RepairGateDecision(NO_REPAIR, False, "feature already passed")
 
@@ -49,10 +52,7 @@ def repair_gate_for_verdict(verdict_payload: dict[str, Any]) -> RepairGateDecisi
     if non_repairable_reason is not None:
         return RepairGateDecision(NO_REPAIR, False, non_repairable_reason)
 
-    # The legacy audit schema has no dedicated actionability boolean.
-    # `failed`/`partial` are the auditor's explicit failing-finding signal;
-    # ambiguous states such as `blocked`/`missing` need evidence below.
-    if verdict in {"failed", "partial"} or _has_actionable_failing_evidence(verdict_payload):
+    if evidence.is_actionable_for_repair:
         return RepairGateDecision(REPAIR_NOW, True, "audit finding is actionable")
 
     return RepairGateDecision(
@@ -85,31 +85,3 @@ def _non_repairable_reason_for_code(value: Any) -> str | None:
     if not code:
         return None
     return _NON_REPAIRABLE_REASONS_BY_CODE.get(code)
-
-
-def _has_actionable_failing_evidence(payload: dict[str, Any]) -> bool:
-    """Return True when an ambiguous verdict has concrete repair evidence.
-
-    The primary signal is evidence attached to the failing finding. Product-wide
-    quality findings and severity findings are also auditor-authored repair
-    findings, even though they may not have per-feature artifact refs. Optional
-    evidence-strength metadata counts only when it positively claims the
-    feature was actually evaluated.
-    """
-    for key in ("evidence_refs", "check_evidence_refs", "severity_findings", "quality_findings"):
-        if _list_has_values(payload.get(key)):
-            return True
-    return _has_positive_evidence_strength(payload)
-
-
-def _list_has_values(value: Any) -> bool:
-    return isinstance(value, list) and any(str(item).strip() for item in value)
-
-
-def _has_positive_evidence_strength(payload: dict[str, Any]) -> bool:
-    completeness = _clean(payload.get("evidence_completeness"))
-    if completeness in {"full", "partial", "proxy_only"}:
-        return True
-
-    confidence = _clean(payload.get("coverage_confidence"))
-    return confidence in {"high", "medium"}

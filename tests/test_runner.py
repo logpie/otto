@@ -157,6 +157,79 @@ def test_feature_audits_to_verdicts_preserves_evidence_gate_fields() -> None:
     ]
 
 
+def test_recovered_feature_verdicts_preserve_repair_actionability(tmp_path: Path) -> None:
+    from otto.audit import _recover_audit_output_from_feature_verdicts
+    from otto.audit_loop import features_to_repair
+
+    spec = Spec(
+        intent="recover timeout",
+        project_kind="webapp",
+        groups=[
+            Group(id="calc", name="Calculator"),
+            Group(id="profile", name="Profile"),
+        ],
+        features=[
+            Feature(id="calc_total", name="Calculate total", group_id="calc"),
+            Feature(id="profile_save", name="Save profile", group_id="profile"),
+        ],
+    )
+    verdict_path = tmp_path / "feature-verdicts.json"
+    verdict_path.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "verdicts": [
+                {
+                    "feature_id": "calc_total",
+                    "verdict": "failed",
+                    "detail": "total is wrong",
+                },
+                {
+                    "feature_id": "profile_save",
+                    "verdict": "blocked",
+                    "detail": "save could not be completed",
+                    "check_evidence_refs": ["checks.json#profile_save"],
+                    "severity_findings": ["important: save button did not persist"],
+                    "quality_findings": ["profile save has no success state"],
+                    "coverage_confidence": "medium",
+                    "evidence_completeness": "partial",
+                    "surface": "DOM",
+                    "methodology": "live-ui-events",
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    recovered = _recover_audit_output_from_feature_verdicts(
+        verdict_path,
+        spec,
+        "audit timed out",
+    )
+    assert recovered is not None
+    audit_result = AuditResult(
+        verdict=recovered.verdict,
+        narrative=recovered.narrative,
+        feature_audits=recovered.feature_audits,
+    )
+
+    verdicts = _repair_verdicts_for_audit(spec, audit_result)
+    assert verdicts[0]["verdict"] == "failed"
+    assert verdicts[0]["evidence_refs"] == []
+    assert verdicts[1]["check_evidence_refs"] == ["checks.json#profile_save"]
+    assert verdicts[1]["severity_findings"] == ["important: save button did not persist"]
+    assert verdicts[1]["quality_findings"] == ["profile save has no success state"]
+    assert verdicts[1]["coverage_confidence"] == "medium"
+    assert verdicts[1]["evidence_completeness"] == "partial"
+    assert verdicts[1]["surface"] == "DOM"
+    assert verdicts[1]["methodology"] == "live-ui-events"
+
+    candidates = features_to_repair(spec, verdicts, max_attempts_per_run=10)
+    assert [candidate.feature_id for candidate in candidates] == [
+        "calc_total",
+        "profile_save",
+    ]
+
+
 def test_feature_audits_to_verdicts_maps_group_id_to_best_matching_feature() -> None:
     """A group-level audit miss must still route to a concrete Feature repair."""
     from otto.audit import FeatureAudit

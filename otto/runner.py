@@ -80,6 +80,10 @@ from otto.merge_queue import (
     MergeQueueResult,
     run_merge_queue,
 )
+from otto.repair_evidence import (
+    repair_evidence_from_payload,
+    repair_evidence_payload_fields,
+)
 from otto.render import render_run
 from otto.resume import ResumePlan
 from otto.seed import SeedResult, seed_fixtures
@@ -1461,16 +1465,18 @@ def _spec_with_group_feature_fallbacks(spec: Spec) -> Spec:
 
 
 def _feature_verdict_payload(feature_id: str, feature_audit: Any) -> dict[str, Any]:
+    evidence = repair_evidence_from_payload(feature_audit)
+    status = str(getattr(feature_audit, "status", "") or "").strip().lower()
+    verdict = evidence.raw_verdict or status
     payload = {
         "feature_id": feature_id,
-        "verdict": feature_audit.status,
+        "verdict": verdict,
         "detail": feature_audit.detail,
-        "evidence_refs": list(feature_audit.evidence_refs),
+        "evidence_refs": list(evidence.evidence_refs),
     }
-    for key in ("surface", "methodology", "evidence_completeness", "coverage_confidence"):
-        value = str(getattr(feature_audit, key, "") or "").strip()
-        if value:
-            payload[key] = value
+    payload.update(repair_evidence_payload_fields(feature_audit))
+    if evidence.raw_verdict and evidence.raw_verdict != status:
+        payload["raw_verdict"] = evidence.raw_verdict
     return payload
 
 

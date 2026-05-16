@@ -513,6 +513,11 @@ async def repair_failing_features(
             "verdict_count": len(new_verdicts),
         })
         oracle_state_after = _feature_verdict_signature(new_verdicts, attempted_ids)
+        oracle_state_after = _fill_missing_attempted_oracle_state(
+            before=oracle_state_before,
+            after=oracle_state_after,
+            feature_ids=attempted_ids,
+        )
 
         # Backfill each RepairAttempt.new_verdict from the re-audit output.
         by_id: dict[str, str] = {}
@@ -640,6 +645,27 @@ def _feature_verdict_signature(
             "evidence_refs": [str(ref) for ref in refs] if isinstance(refs, list) else [],
         }
     return [by_id[feature_id] for feature_id in feature_ids if feature_id in by_id]
+
+
+def _fill_missing_attempted_oracle_state(
+    *,
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+    feature_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Make omitted attempted ids count as unchanged oracle state.
+
+    A re-audit that omits a just-attempted Feature has not proven progress for
+    that Feature. Preserve the prior signature only for no-progress detection;
+    this does not backfill or synthesize a new verdict payload.
+    """
+    before_by_id = {str(item.get("feature_id") or ""): item for item in before}
+    after_by_id = {str(item.get("feature_id") or ""): item for item in after}
+    filled = dict(after_by_id)
+    for feature_id in feature_ids:
+        if feature_id not in filled and feature_id in before_by_id:
+            filled[feature_id] = before_by_id[feature_id]
+    return [filled[feature_id] for feature_id in feature_ids if feature_id in filled]
 
 
 def _unique_feature_ids(feature_ids: Iterable[str]) -> list[str]:

@@ -61,6 +61,7 @@ from otto.build import (
 from otto.checks import Evidence, run_checks
 from otto.merge_queue import MergeQueueResult
 from otto.prompts import render_prompt
+from otto.repair_evidence import repair_evidence_from_payload
 from otto.spec_compile import Feature, Spec
 from otto.spec_state import emit
 
@@ -156,10 +157,14 @@ class FeatureAudit:
     detail: str = ""  # 1-2 sentence rationale
     evidence_refs: list[str] = field(default_factory=list)
     feature_id: str = ""
+    raw_verdict: str = ""
     surface: str = ""
     methodology: str = ""
     evidence_completeness: str = ""
     coverage_confidence: str = ""
+    check_evidence_refs: list[str] = field(default_factory=list)
+    severity_findings: list[str] = field(default_factory=list)
+    quality_findings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -2553,6 +2558,58 @@ def _compose_verdict(
     return verdict, narrative
 
 
+def _feature_audit_from_entry(
+    entry: dict[str, Any],
+    *,
+    require_feature_id: bool,
+    recovery: bool,
+) -> FeatureAudit | None:
+    feature_id = str(entry.get("feature_id") or "").strip()
+    if require_feature_id and not feature_id:
+        return None
+    name = str(entry.get("name") or feature_id).strip()
+    if not name:
+        return None
+
+    evidence = repair_evidence_from_payload(entry)
+    status = _feature_audit_status_from_repair_verdict(evidence.raw_verdict)
+    raw_verdict = evidence.raw_verdict or status
+    detail = str(entry.get("detail") or "")
+    if recovery and status == "passed" and not evidence.evidence_refs:
+        status = "partial"
+        raw_verdict = "partial"
+        detail = (
+            detail
+            + " Fallback recovery found no evidence_refs for this passed Feature."
+        ).strip()
+
+    return FeatureAudit(
+        name=name,
+        status=status,
+        detail=detail,
+        evidence_refs=list(evidence.evidence_refs),
+        feature_id=feature_id,
+        raw_verdict=raw_verdict,
+        surface=evidence.surface,
+        methodology=evidence.methodology,
+        evidence_completeness=evidence.evidence_completeness,
+        coverage_confidence=evidence.coverage_confidence,
+        check_evidence_refs=list(evidence.check_evidence_refs),
+        severity_findings=list(evidence.severity_findings),
+        quality_findings=list(evidence.quality_findings),
+    )
+
+
+def _feature_audit_status_from_repair_verdict(
+    raw_verdict: str,
+) -> Literal["passed", "partial", "blocked"]:
+    if raw_verdict == "passed":
+        return "passed"
+    if raw_verdict in {"failed", "partial"}:
+        return "partial"
+    return "blocked"
+
+
 def _audit_output_from_dict(data: dict[str, Any]) -> AuditAgentOutput:
     verdict_str = str(data.get("verdict") or "blocked").lower()
     verdict = (
@@ -2586,41 +2643,21 @@ def _audit_output_from_dict(data: dict[str, Any]) -> AuditAgentOutput:
 
     # A0.4: per-Feature audits. Canonical wire key is `feature_audits`.
     # Permissive — invalid status → "blocked" (defensive default),
-    # missing fields → empty.
+    # missing fields → empty. Repair-evidence fields are parsed through the
+    # shared contract used by timeout recovery and Layer 2 gating.
     feature_audits: list[FeatureAudit] = []
     raw_feats = data.get("feature_audits") or []
     if isinstance(raw_feats, list):
         for entry in raw_feats:
             if not isinstance(entry, dict):
                 continue
-            feature_id = str(entry.get("feature_id") or "").strip()
-            name = str(entry.get("name") or feature_id).strip()
-            if not name:
-                continue
-            status_raw = str(entry.get("status") or "").strip().lower()
-            status: Literal["passed", "partial", "blocked"]
-            if status_raw == "passed":
-                status = "passed"
-            elif status_raw == "partial":
-                status = "partial"
-            else:
-                status = "blocked"
-            evidence_raw = entry.get("evidence_refs") or []
-            evidence_refs = (
-                [str(e) for e in evidence_raw if e]
-                if isinstance(evidence_raw, list) else []
+            feature_audit = _feature_audit_from_entry(
+                entry,
+                require_feature_id=False,
+                recovery=False,
             )
-            feature_audits.append(FeatureAudit(
-                name=name,
-                status=status,
-                detail=str(entry.get("detail") or ""),
-                evidence_refs=evidence_refs,
-                feature_id=feature_id,
-                surface=str(entry.get("surface") or ""),
-                methodology=str(entry.get("methodology") or ""),
-                evidence_completeness=str(entry.get("evidence_completeness") or ""),
-                coverage_confidence=str(entry.get("coverage_confidence") or ""),
-            ))
+            if feature_audit is not None:
+                feature_audits.append(feature_audit)
 
     return AuditAgentOutput(
         verdict=verdict,
@@ -2802,39 +2839,13 @@ def _recover_audit_output_from_feature_verdicts(
     for entry in raw_verdicts:
         if not isinstance(entry, dict):
             continue
-        feature_id = str(entry.get("feature_id") or "").strip()
-        if not feature_id:
-            continue
-        name = str(entry.get("name") or feature_id).strip()
-        status_raw = str(entry.get("status") or entry.get("verdict") or "").strip().lower()
-        status: Literal["passed", "partial", "blocked"]
-        if status_raw == "passed":
-            status = "passed"
-        elif status_raw == "partial":
-            status = "partial"
-        else:
-            status = "blocked"
-        evidence_raw = entry.get("evidence_refs") or []
-        evidence_refs = (
-            [str(ref) for ref in evidence_raw if ref]
-            if isinstance(evidence_raw, list) else []
+        feature_audit = _feature_audit_from_entry(
+            entry,
+            require_feature_id=True,
+            recovery=True,
         )
-        detail = str(entry.get("detail") or "")
-        if status == "passed" and not evidence_refs:
-            status = "partial"
-            detail = (
-                detail
-                + " Fallback recovery found no evidence_refs for this passed Feature."
-            ).strip()
-        feature_audits.append(
-            FeatureAudit(
-                feature_id=feature_id,
-                name=name,
-                status=status,
-                detail=detail,
-                evidence_refs=evidence_refs,
-            )
-        )
+        if feature_audit is not None:
+            feature_audits.append(feature_audit)
 
     expected_ids = [feature.id for feature in spec.features if feature.id]
     by_feature_id = {audit.feature_id: audit for audit in feature_audits}
