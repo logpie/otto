@@ -1315,6 +1315,7 @@ def test_brownfield_layer2_repairs_features_with_group_name_alias(
                         name="intword",
                         status="blocked",
                         detail="intword does not parse comma strings",
+                        evidence_refs=["walkthrough.jsonl#L2"],
                     )
                 ],
             )

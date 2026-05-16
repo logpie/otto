@@ -93,11 +93,19 @@ def test_repair_gate_defaults_detector_findings_to_agent_repair() -> None:
             "methodology": "http-request",
             "evidence_refs": ["curl /dashboard"],
         },
-        {"feature_id": "search", "verdict": "blocked", "detail": ""},
     ):
         decision = repair_gate_for_verdict(payload)
         assert decision.action == REPAIR_NOW
         assert decision.actionable is True
+
+
+def test_repair_gate_requires_evidence_for_blocked_findings() -> None:
+    decision = repair_gate_for_verdict(
+        {"feature_id": "search", "verdict": "blocked", "detail": ""}
+    )
+
+    assert decision.action == NO_REPAIR
+    assert decision.actionable is False
 
 
 def test_repair_gate_keeps_typed_non_actionable_provider_failures_out_of_repair() -> None:

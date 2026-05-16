@@ -149,6 +149,12 @@ async def test_unverified_child_runs_verify_repair_before_merge(
         "otto.v5_branching.merge_child_into_integration",
         fake_merge_child_into_integration,
     )
+    monkeypatch.setattr(
+        v5_runner,
+        "_record_and_check_integration_union",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(v5_runner, "_git_capture", lambda *_args, **_kwargs: "abc123")
 
     result = await _run_child(
         project_dir=project,

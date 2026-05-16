@@ -55,13 +55,13 @@ def test_repair_gate_routes_curl_only_ui_story_to_agent() -> None:
     assert decision.actionable is True
 
 
-def test_repair_gate_routes_empty_verdict_detail_to_agent() -> None:
+def test_repair_gate_blocks_no_evidence_blocked_verdict() -> None:
     decision = repair_gate_for_verdict(
         {"feature_id": "search", "verdict": "blocked", "detail": ""}
     )
 
-    assert decision.action == REPAIR_NOW
-    assert decision.actionable is True
+    assert decision.action == NO_REPAIR
+    assert decision.actionable is False
 
 
 def test_repair_gate_blocks_typed_provider_auth_failure() -> None:

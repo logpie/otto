@@ -247,7 +247,7 @@ def test_repair_dispatches_per_feature(test_max=10) -> None:
             spec=spec,
             feature_verdicts=[
                 _verdict("f1", "partial"),
-                _verdict("f2", "blocked"),
+                _verdict("f2", "blocked", evidence_refs=["walkthrough#L2"]),
             ],
             fix_agent=fix_agent,
             re_audit=re_audit,
@@ -282,7 +282,12 @@ def test_repair_coalesces_same_group_failures_before_reaudit() -> None:
             spec=spec,
             feature_verdicts=[
                 _verdict("f1", "partial", "form is missing"),
-                _verdict("f2", "blocked", "filters are missing"),
+                _verdict(
+                    "f2",
+                    "blocked",
+                    "filters are missing",
+                    evidence_refs=["walkthrough#L3"],
+                ),
             ],
             fix_agent=fix_agent,
             re_audit=re_audit,
@@ -446,7 +451,7 @@ def test_max_attempts_per_run_does_not_truncate_first_failing_group_attempts() -
     assert fix_calls[2][0] == "f3"
 
 
-def test_unclassified_blocked_verdicts_get_agent_repair_attempts() -> None:
+def test_no_evidence_blocked_verdicts_do_not_crowd_out_real_repairs() -> None:
     spec = _spec_by_group({
         "not_seen": "g1",
         "crashing_api": "g2",
@@ -488,13 +493,11 @@ def test_unclassified_blocked_verdicts_get_agent_repair_attempts() -> None:
     )
 
     assert [feature_id for feature_id, _ in fix_calls] == [
-        "not_seen",
         "crashing_api",
         "wrong_output",
     ]
-    assert re_audit_calls == [["not_seen", "crashing_api", "wrong_output"]]
+    assert re_audit_calls == [["crashing_api", "wrong_output"]]
     assert [a.feature_id for a in result.attempts] == [
-        "not_seen",
         "crashing_api",
         "wrong_output",
     ]

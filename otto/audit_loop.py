@@ -146,9 +146,10 @@ def _is_actionable_repair_verdict(
 ) -> bool:
     """Return whether a verdict should be routed to a repair agent.
 
-    Non-passing detector verdicts default to repair. Deterministic opt-out is
-    allowed only through typed non-repairable codes handled by
-    ``repair_gate_for_verdict``.
+    Non-passing status alone is not enough here: ``blocked`` can mean either a
+    real failure or an audit coverage gap. ``repair_gate_for_verdict`` keeps the
+    decision evidence-driven so non-evaluated features cannot perpetuate the
+    repair loop.
     """
     del verdict
     return repair_gate_for_verdict(verdict_payload).actionable

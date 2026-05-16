@@ -1,9 +1,9 @@
 """Repair-gate policy for audit findings.
 
-Detector-found product gaps default into agent repair. The smoke/verify oracle
-decides whether the repair worked. Deterministic ``no_repair`` is reserved for
-typed failure codes that a coding agent provably cannot fix, such as exhausted
-provider authentication.
+Layer 2 repair is driven by actionable failing evidence, not by status names
+alone. A non-passing feature verdict can mean either "the auditor found a real
+product failure" or "the auditor could not evaluate this feature"; only the
+former should spend a repair attempt.
 """
 
 from __future__ import annotations
@@ -49,7 +49,17 @@ def repair_gate_for_verdict(verdict_payload: dict[str, Any]) -> RepairGateDecisi
     if non_repairable_reason is not None:
         return RepairGateDecision(NO_REPAIR, False, non_repairable_reason)
 
-    return RepairGateDecision(REPAIR_NOW, True, "audit evidence is actionable")
+    # The legacy audit schema has no dedicated actionability boolean.
+    # `failed`/`partial` are the auditor's explicit failing-finding signal;
+    # ambiguous states such as `blocked`/`missing` need evidence below.
+    if verdict in {"failed", "partial"} or _has_actionable_failing_evidence(verdict_payload):
+        return RepairGateDecision(REPAIR_NOW, True, "audit finding is actionable")
+
+    return RepairGateDecision(
+        NO_REPAIR,
+        False,
+        "audit verdict has no actionable failing evidence",
+    )
 
 
 def _clean(value: Any) -> str:
@@ -75,3 +85,31 @@ def _non_repairable_reason_for_code(value: Any) -> str | None:
     if not code:
         return None
     return _NON_REPAIRABLE_REASONS_BY_CODE.get(code)
+
+
+def _has_actionable_failing_evidence(payload: dict[str, Any]) -> bool:
+    """Return True when an ambiguous verdict has concrete repair evidence.
+
+    The primary signal is evidence attached to the failing finding. Product-wide
+    quality findings and severity findings are also auditor-authored repair
+    findings, even though they may not have per-feature artifact refs. Optional
+    evidence-strength metadata counts only when it positively claims the
+    feature was actually evaluated.
+    """
+    for key in ("evidence_refs", "check_evidence_refs", "severity_findings", "quality_findings"):
+        if _list_has_values(payload.get(key)):
+            return True
+    return _has_positive_evidence_strength(payload)
+
+
+def _list_has_values(value: Any) -> bool:
+    return isinstance(value, list) and any(str(item).strip() for item in value)
+
+
+def _has_positive_evidence_strength(payload: dict[str, Any]) -> bool:
+    completeness = _clean(payload.get("evidence_completeness"))
+    if completeness in {"full", "partial", "proxy_only"}:
+        return True
+
+    confidence = _clean(payload.get("coverage_confidence"))
+    return confidence in {"high", "medium"}
