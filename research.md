@@ -2184,3 +2184,106 @@ exclusive. Open question for review: is the right primitive an explicit
 **foundation slice type** in the spec/decomposition, or an
 ownership-validation pass + dispatch-ordering rule layered on the
 existing decomposition? Codex dual-review next.
+
+---
+
+## Codex design review (2026-05-16) — REVISE, incorporated
+
+Codex independently reviewed with full run+repo context. Verdict
+REVISE; all corrections accepted (code-grounded). Resulting **final
+decisions**:
+
+### Root cause — corrected
+
+- **A (architectural root) + the create-anywhere loophole.** `owned_paths`
+  is only a *write*-scope; `detect_scope_violations`
+  (`otto/build.py:~568`) **permits newly-created unowned paths**, and
+  agents may create files anywhere (`build.py:~20`). That is the precise
+  mechanism by which multiple leaves *invent* `backend/auth.py` before
+  git ever sees an add/add. Must be named explicitly — closing the
+  ownership model without closing this loophole does nothing.
+- **B and C are INDEPENDENT defects, not symptoms of A** — they bite
+  even with perfect ownership.
+  - B (repair-scope bloat): the repair prompt instructs the agent to make
+    the *full acceptance oracle* (incl. clean-deploy + composite gate)
+    pass (`otto/v5_preflight_repair.py:~988`); the merge-conflict packet
+    is correctly path-scoped (`v5_runner.py:~4809`) but the runner then
+    invokes integration-smoke repair after conflict repair
+    (`v5_runner.py:~4277`) → time burn regardless of ownership.
+  - C (verification isolation): `build_clean_verify_oracle_command` sets
+    `OTTO_CLEAN_VERIFY_WORKTREE` (`otto/v5_clean_verify.py:~677`) but the
+    CLI consumes `Path.cwd()` (`otto/cli.py:~333`) → clean-verify runs
+    against ambient main, not the repair worktree.
+- **D splits into two bugs:** D1 over-literal union guard
+  (`v5_runner.py:~722` records exact added lines + text-containment
+  check); D2 **missing shared-contract repair routing** — the scope-gate
+  correctly rejects a leaf editing out-of-scope shared files; the real
+  defect is that the union/shared repair is *routed to the leaf at all*
+  instead of to a foundation/contract-amendment owner.
+
+So: **5 distinct defect classes** (A+loophole, B, C, D1, D2), not 4.
+
+### Primitive decision — RESOLVED
+
+Do **NOT** add foundation ownership to flat schema v4. The flat compiler
+explicitly emits "NO groups, NO owned_paths, NO shared_contracts"
+(`otto/spec_compile_flat.py:~11`); `owned_paths` originate at **runtime**
+via `mcp__otto__submit_subtask` (`otto/mcp_tools.py:~197,~243`,
+`otto/queue/task_graph.py:~170`). Therefore the primitive is a
+**runtime decomposition/task-graph primitive**:
+- add `task_role ∈ {foundation, feature, contract_amendment, integration}`
+  + machine-readable `foundation_contracts` (exclusive owner + semantic
+  check type) on the task graph;
+- THEN an ownership-validation pass on top.
+- Validation **alone is insufficient** — architect-first ordering
+  *already* existed (`otto/lead.py:~589`) and leaves *did* depend on
+  scaffold, yet it failed because scaffold owned broad trees and no one
+  exclusively owned the shared contracts. Reword "compile-time
+  fail-fast" → **"decomposition/architect-gate fail-fast"**.
+
+### Final repro scenes (5 — Codex specs adopted)
+
+1. **Shared-foundation not isolated (don't wait for add/add).** Seam:
+   `_process_children` after architect pass, beside
+   `check_route_registration_isolation` (`v5_runner.py:~2984`). Fixture:
+   architect owns `backend/`, leaves own feature paths, CHARTER declares
+   `backend/auth.py` + `frontend/src/lib/ws.ts` as foundation contracts,
+   leaves depend on architect. Inject `_run_child`; raise if a leaf
+   dispatches. Assert: architect re-entered/blocked
+   `kind=shared_foundation_not_isolated`; **no feature leaf dispatches**.
+2. **Repair-scope bloat (real merge path).** Seam: `_merge_child_branch`
+   conflict path. Fake `merge_child_into_integration`: conflict →
+   success after `_repair_child_merge_conflict_once`; fake
+   smoke/clean-deploy fails on `frontend/vite.config.ts`. Assert: no
+   leaf repair loop touches that file; runner emits/enqueues a
+   foundation/integration repair need. RED today (smoke repair runs
+   after conflict repair).
+3. **Verification isolation.** Seam: `clean_verify_command`. CWD=main,
+   env `OTTO_CLEAN_VERIFY_WORKTREE=/tmp/repair-worktree`, monkeypatch
+   `verify_from_clean_oracle` to capture the project path. Assert
+   captured path == repair worktree, not CWD. RED (`cli.py:~333`).
+4. **Semantic union guard ONLY.** Seam:
+   `_integration_union_missing_contributions` /
+   `_record_and_check_integration_union`. Fixture: scaffold contributed
+   `connect(workspaceId: string)`; final has compatible
+   `connect(workspaceId: string, token?: string)` + required exports.
+   Assert: no `integration_union_incomplete` for paths declared
+   *semantic foundation contracts*. **Keep exact additive line-union for
+   route registries** (don't make registries semantic).
+5. **Shared-contract repair routing (the b15 scope-gate trap).** Seam:
+   `_record_and_check_integration_union` → `_repair_child_upward_merge
+   _gate_once` (`v5_runner.py:~4535`). Fixture: union feedback path =
+   `frontend/src/lib/ws.ts`, child owned_paths exclude it, a foundation
+   owner exists. Assert: runner does **not** launch a leaf repair packet;
+   it creates/records a foundation contract-amendment repair.
+
+All scenes: real code path, only the agent step injected, deterministic,
+seconds-to-minutes, RED now → GREEN after fix, permanent regression.
+
+### Net plan
+
+Build the 5 RED-first scenes (Codex builds — it designed them + has the
+log context), confirm RED, then Codex implements the root fixes
+(correctness-critical) under the Plan Gate + Implementation Gate. Fix
+order driven by dependency: A+loophole & the runtime `task_role`
+primitive first (unblocks 1/4/5), then B, C independently.
