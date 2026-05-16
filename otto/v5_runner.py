@@ -3777,6 +3777,38 @@ def _child_merge_conflict_smoke_failed_feedback(
     return feedback
 
 
+def _child_repair_helper_crashed_feedback(
+    *,
+    child_task_id: str,
+    parent_integration_branch: str,
+    source_branch: str,
+    pre_merge_ref: str,
+    origin: str,
+    phase: str,
+    exc: Exception,
+    previous_feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    feedback: dict[str, Any] = {
+        "kind": "child_repair_helper_crashed",
+        "step_id": phase,
+        "message": f"{origin} crashed: {type(exc).__name__}: {exc}",
+        "task_id": child_task_id,
+        "origin": origin,
+        "phase": phase,
+        "parent_integration_branch": parent_integration_branch,
+        "source_branch": source_branch,
+        "pre_merge_ref": pre_merge_ref,
+        "exception": {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        },
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if previous_feedback is not None:
+        feedback["previous_gate_feedback"] = previous_feedback
+    return feedback
+
+
 async def _repair_child_upward_merge_gate_once(
     *,
     project_dir: Path,
@@ -3834,16 +3866,6 @@ async def _repair_child_upward_merge_gate_once(
         reason = (
             f"{origin} repair did not pass: "
             f"{repair.summary}; original refusal: {original_detail}"
-        )
-        _record_structured_merge_failed(
-            project_dir=project_dir,
-            task_id=child_task_id,
-            result=result,
-            reason=reason,
-            origin=origin,
-            phase=origin,
-            structured_reason=feedback,
-            on_event=on_event,
         )
         return False, reason
     return True, repair.summary
@@ -4060,6 +4082,9 @@ async def _repair_stale_target_and_retry_merge(
     except MergeWorktreeDirtyError as exc:
         ok = False
         merge_detail = str(exc)
+    except Exception as exc:  # noqa: BLE001 - retry merge failure must stay terminal-structured
+        ok = False
+        merge_detail = f"stale target retry merge crashed: {type(exc).__name__}: {exc}"
 
     if ok and run_smoke_preflight:
         try:
@@ -4198,17 +4223,42 @@ async def _merge_child_branch(
     except MergeWorktreeDirtyError as exc:
         ok = False
         detail = str(exc)
+    except Exception as exc:  # noqa: BLE001 - merge path must not escape post-commit
+        ok = False
+        detail = f"merge_child_into_integration crashed: {type(exc).__name__}: {exc}"
     if not ok and _looks_like_merge_conflict(detail):
-        repaired, repair_detail = await _repair_child_merge_conflict_once(
-            project_dir=project_dir,
-            child_task_id=child_task_id,
-            child_worktree=child_worktree,
-            child_session_dir=child_session_dir,
-            parent_integration_branch=parent_integration_branch,
-            config=config,
-            original_detail=detail,
-            on_event=on_event,
-        )
+        try:
+            repaired, repair_detail = await _repair_child_merge_conflict_once(
+                project_dir=project_dir,
+                child_task_id=child_task_id,
+                child_worktree=child_worktree,
+                child_session_dir=child_session_dir,
+                parent_integration_branch=parent_integration_branch,
+                config=config,
+                original_detail=detail,
+                on_event=on_event,
+            )
+        except Exception as exc:  # noqa: BLE001 - repair helper crash is terminal-structured
+            feedback = _child_repair_helper_crashed_feedback(
+                child_task_id=child_task_id,
+                parent_integration_branch=parent_integration_branch,
+                source_branch=source_branch,
+                pre_merge_ref=pre_merge_ref,
+                origin="merge_conflict_repair",
+                phase="merge_conflict_repair",
+                exc=exc,
+            )
+            _record_structured_merge_failed(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                reason=str(feedback["message"]),
+                origin="merge_conflict_repair",
+                phase="merge_conflict_repair",
+                structured_reason=feedback,
+                on_event=on_event,
+            )
+            return
         if repaired:
             pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
             try:
@@ -4220,6 +4270,9 @@ async def _merge_child_branch(
             except MergeWorktreeDirtyError as exc:
                 ok = False
                 detail = str(exc)
+            except Exception as exc:  # noqa: BLE001 - merge path must not escape post-commit
+                ok = False
+                detail = f"merge after conflict repair crashed: {type(exc).__name__}: {exc}"
             if ok:
                 try:
                     oracle = await _run_integration_smoke_preflight_with_repair(
@@ -4256,11 +4309,41 @@ async def _merge_child_branch(
                         on_event=on_event,
                     )
                     return
-                if _preflight_repair_escalated(oracle) or _integration_smoke_blocks(oracle):
+                try:
+                    smoke_blocks = (
+                        _preflight_repair_escalated(oracle)
+                        or _integration_smoke_blocks(oracle)
+                    )
                     detail = _preflight_blocking_summary(
                         "Child merge conflict repair smoke oracle failed",
                         oracle,
+                    ) if smoke_blocks else ""
+                except Exception as exc:  # noqa: BLE001 - smoke evaluation must stay structured
+                    detail = (
+                        "Child merge conflict repair smoke oracle evaluation crashed: "
+                        f"{type(exc).__name__}: {exc}"
                     )
+                    feedback = _child_merge_conflict_smoke_failed_feedback(
+                        child_task_id=child_task_id,
+                        parent_integration_branch=parent_integration_branch,
+                        source_branch=source_branch,
+                        pre_merge_ref=pre_merge_ref,
+                        detail=detail,
+                        oracle=oracle if isinstance(oracle, dict) else None,
+                        exc=exc,
+                    )
+                    _record_structured_merge_failed(
+                        project_dir=project_dir,
+                        task_id=child_task_id,
+                        result=result,
+                        reason=detail,
+                        origin="child_merge_conflict_smoke",
+                        phase="child_merge_conflict_repair",
+                        structured_reason=feedback,
+                        on_event=on_event,
+                    )
+                    return
+                if smoke_blocks:
                     feedback = _child_merge_conflict_smoke_failed_feedback(
                         child_task_id=child_task_id,
                         parent_integration_branch=parent_integration_branch,
@@ -4281,22 +4364,44 @@ async def _merge_child_branch(
                     )
                     return
             else:
-                retry = await _repair_stale_target_and_retry_merge(
-                    project_dir=project_dir,
-                    child_task_id=child_task_id,
-                    child_worktree=child_worktree,
-                    child_session_dir=child_session_dir,
-                    parent_integration_branch=parent_integration_branch,
-                    result=result,
-                    config=config,
-                    detail=detail,
-                    prior_repair_detail=repair_detail,
-                    origin="stale_target_merge_gate",
-                    terminal_phase="merge",
-                    source_branch=source_branch,
-                    run_smoke_preflight=True,
-                    on_event=on_event,
-                )
+                try:
+                    retry = await _repair_stale_target_and_retry_merge(
+                        project_dir=project_dir,
+                        child_task_id=child_task_id,
+                        child_worktree=child_worktree,
+                        child_session_dir=child_session_dir,
+                        parent_integration_branch=parent_integration_branch,
+                        result=result,
+                        config=config,
+                        detail=detail,
+                        prior_repair_detail=repair_detail,
+                        origin="stale_target_merge_gate",
+                        terminal_phase="merge",
+                        source_branch=source_branch,
+                        run_smoke_preflight=True,
+                        on_event=on_event,
+                    )
+                except Exception as exc:  # noqa: BLE001 - repair helper crash is terminal-structured
+                    feedback = _child_repair_helper_crashed_feedback(
+                        child_task_id=child_task_id,
+                        parent_integration_branch=parent_integration_branch,
+                        source_branch=source_branch,
+                        pre_merge_ref=pre_merge_ref,
+                        origin="stale_target_merge_gate",
+                        phase="merge",
+                        exc=exc,
+                    )
+                    _record_structured_merge_failed(
+                        project_dir=project_dir,
+                        task_id=child_task_id,
+                        result=result,
+                        reason=str(feedback["message"]),
+                        origin="stale_target_merge_gate",
+                        phase="merge",
+                        structured_reason=feedback,
+                        on_event=on_event,
+                    )
+                    return
                 if retry.terminal_recorded:
                     return
                 ok = retry.ok
@@ -4305,17 +4410,39 @@ async def _merge_child_branch(
         else:
             detail = f"{detail}; conflict repair attempt: {repair_detail}"
     if not ok and not _looks_like_merge_conflict(detail):
-        repaired, repair_detail = await _repair_child_upward_merge_gate_once(
-            project_dir=project_dir,
-            child_task_id=child_task_id,
-            child_worktree=child_worktree,
-            child_session_dir=child_session_dir,
-            parent_integration_branch=parent_integration_branch,
-            result=result,
-            config=config,
-            original_detail=detail,
-            on_event=on_event,
-        )
+        try:
+            repaired, repair_detail = await _repair_child_upward_merge_gate_once(
+                project_dir=project_dir,
+                child_task_id=child_task_id,
+                child_worktree=child_worktree,
+                child_session_dir=child_session_dir,
+                parent_integration_branch=parent_integration_branch,
+                result=result,
+                config=config,
+                original_detail=detail,
+                on_event=on_event,
+            )
+        except Exception as exc:  # noqa: BLE001 - repair helper crash is terminal-structured
+            feedback = _child_repair_helper_crashed_feedback(
+                child_task_id=child_task_id,
+                parent_integration_branch=parent_integration_branch,
+                source_branch=source_branch,
+                pre_merge_ref=pre_merge_ref,
+                origin="upward_merge_gate",
+                phase="upward_merge_gate",
+                exc=exc,
+            )
+            _record_structured_merge_failed(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                reason=str(feedback["message"]),
+                origin="upward_merge_gate",
+                phase="upward_merge_gate",
+                structured_reason=feedback,
+                on_event=on_event,
+            )
+            return
         if repaired:
             pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
             try:
@@ -4327,6 +4454,9 @@ async def _merge_child_branch(
             except MergeWorktreeDirtyError as exc:
                 ok = False
                 detail = str(exc)
+            except Exception as exc:  # noqa: BLE001 - merge path must not escape post-commit
+                ok = False
+                detail = f"merge after upward repair crashed: {type(exc).__name__}: {exc}"
         if not ok:
             detail = f"{detail}; upward merge gate repair attempt: {repair_detail}"
     if not ok:
@@ -4411,7 +4541,6 @@ async def _merge_child_branch(
             "detail": detail,
             "structured_reason": union_feedback,
         })
-        repair_recorded_block = False
         try:
             repaired, repair_detail = await _repair_child_upward_merge_gate_once(
                 project_dir=project_dir,
@@ -4426,23 +4555,40 @@ async def _merge_child_branch(
                 gate_feedback=union_feedback,
                 origin="integration_union_guard",
             )
-            repair_recorded_block = not repaired
-        except Exception as exc:  # noqa: BLE001 - convert repair crash into a durable merge block
-            repaired = False
-            repair_detail = f"integration union repair crashed: {type(exc).__name__}: {exc}"
+        except Exception as exc:  # noqa: BLE001 - repair helper crash is terminal-structured
+            feedback = _child_repair_helper_crashed_feedback(
+                child_task_id=child_task_id,
+                parent_integration_branch=parent_integration_branch,
+                source_branch=source_branch,
+                pre_merge_ref=pre_merge_ref,
+                origin="integration_union_guard",
+                phase="integration_union_guard",
+                exc=exc,
+                previous_feedback=union_feedback,
+            )
+            _record_structured_merge_failed(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                reason=str(feedback["message"]),
+                origin="integration_union_guard",
+                phase="integration_union_guard",
+                structured_reason=feedback,
+                on_event=on_event,
+            )
+            return
         if not repaired:
             reason = f"{detail}; union repair attempt: {repair_detail}"
-            if not repair_recorded_block:
-                _record_structured_merge_failed(
-                    project_dir=project_dir,
-                    task_id=child_task_id,
-                    result=result,
-                    reason=reason,
-                    origin="integration_union_guard",
-                    phase="integration_union_guard",
-                    structured_reason=union_feedback,
-                    on_event=on_event,
-                )
+            _record_structured_merge_failed(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                reason=reason,
+                origin="integration_union_guard",
+                phase="integration_union_guard",
+                structured_reason=union_feedback,
+                on_event=on_event,
+            )
             return
 
         pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
@@ -4481,23 +4627,49 @@ async def _merge_child_branch(
         except MergeWorktreeDirtyError as exc:
             ok = False
             detail = str(exc)
+        except Exception as exc:  # noqa: BLE001 - merge path must not escape post-commit
+            ok = False
+            detail = f"merge after integration union repair crashed: {type(exc).__name__}: {exc}"
         if not ok:
-            retry = await _repair_stale_target_and_retry_merge(
-                project_dir=project_dir,
-                child_task_id=child_task_id,
-                child_worktree=child_worktree,
-                child_session_dir=child_session_dir,
-                parent_integration_branch=parent_integration_branch,
-                result=result,
-                config=config,
-                detail=detail,
-                prior_repair_detail=repair_detail,
-                origin="integration_union_guard",
-                terminal_phase="integration_union_guard",
-                source_branch=source_branch,
-                previous_feedback=union_feedback,
-                on_event=on_event,
-            )
+            try:
+                retry = await _repair_stale_target_and_retry_merge(
+                    project_dir=project_dir,
+                    child_task_id=child_task_id,
+                    child_worktree=child_worktree,
+                    child_session_dir=child_session_dir,
+                    parent_integration_branch=parent_integration_branch,
+                    result=result,
+                    config=config,
+                    detail=detail,
+                    prior_repair_detail=repair_detail,
+                    origin="integration_union_guard",
+                    terminal_phase="integration_union_guard",
+                    source_branch=source_branch,
+                    previous_feedback=union_feedback,
+                    on_event=on_event,
+                )
+            except Exception as exc:  # noqa: BLE001 - repair helper crash is terminal-structured
+                feedback = _child_repair_helper_crashed_feedback(
+                    child_task_id=child_task_id,
+                    parent_integration_branch=parent_integration_branch,
+                    source_branch=source_branch,
+                    pre_merge_ref=pre_merge_ref,
+                    origin="integration_union_guard",
+                    phase="integration_union_guard",
+                    exc=exc,
+                    previous_feedback=union_feedback,
+                )
+                _record_structured_merge_failed(
+                    project_dir=project_dir,
+                    task_id=child_task_id,
+                    result=result,
+                    reason=str(feedback["message"]),
+                    origin="integration_union_guard",
+                    phase="integration_union_guard",
+                    structured_reason=feedback,
+                    on_event=on_event,
+                )
+                return
             if retry.terminal_recorded:
                 return
             ok = retry.ok
@@ -4537,29 +4709,76 @@ async def _merge_child_branch(
                 followup_feedback.get("message")
                 or _integration_union_reason_text(followup_feedback)
             )
-            retry = await _repair_stale_target_and_retry_merge(
-                project_dir=project_dir,
-                child_task_id=child_task_id,
-                child_worktree=child_worktree,
-                child_session_dir=child_session_dir,
-                parent_integration_branch=parent_integration_branch,
-                result=result,
-                config=config,
-                detail=followup_detail,
-                prior_repair_detail=repair_detail,
-                origin="integration_union_guard",
-                terminal_phase="integration_union_guard",
-                source_branch=source_branch,
-                previous_feedback=followup_feedback,
-                check_union_after_merge=True,
-                emit_union_feedback=True,
-                on_event=on_event,
-            )
+            try:
+                retry = await _repair_stale_target_and_retry_merge(
+                    project_dir=project_dir,
+                    child_task_id=child_task_id,
+                    child_worktree=child_worktree,
+                    child_session_dir=child_session_dir,
+                    parent_integration_branch=parent_integration_branch,
+                    result=result,
+                    config=config,
+                    detail=followup_detail,
+                    prior_repair_detail=repair_detail,
+                    origin="integration_union_guard",
+                    terminal_phase="integration_union_guard",
+                    source_branch=source_branch,
+                    previous_feedback=followup_feedback,
+                    check_union_after_merge=True,
+                    emit_union_feedback=True,
+                    on_event=on_event,
+                )
+            except Exception as exc:  # noqa: BLE001 - repair helper crash is terminal-structured
+                feedback = _child_repair_helper_crashed_feedback(
+                    child_task_id=child_task_id,
+                    parent_integration_branch=parent_integration_branch,
+                    source_branch=source_branch,
+                    pre_merge_ref=pre_merge_ref,
+                    origin="integration_union_guard",
+                    phase="integration_union_guard",
+                    exc=exc,
+                    previous_feedback=followup_feedback,
+                )
+                _record_structured_merge_failed(
+                    project_dir=project_dir,
+                    task_id=child_task_id,
+                    result=result,
+                    reason=str(feedback["message"]),
+                    origin="integration_union_guard",
+                    phase="integration_union_guard",
+                    structured_reason=feedback,
+                    on_event=on_event,
+                )
+                return
             if retry.terminal_recorded:
                 return
             ok = retry.ok
             detail = retry.detail
             pre_merge_ref = retry.pre_merge_ref
+
+    if not ok:
+        reason = f"child merge path ended without success: {detail}"
+        feedback = {
+            "kind": "child_merge_path_incomplete",
+            "step_id": "child_merge",
+            "message": reason,
+            "task_id": child_task_id,
+            "source_branch": source_branch,
+            "parent_integration_branch": parent_integration_branch,
+            "pre_merge_ref": pre_merge_ref,
+            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        _record_structured_merge_failed(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=reason,
+            origin="child_merge",
+            phase="merge",
+            structured_reason=feedback,
+            on_event=on_event,
+        )
+        return
 
     _emit(on_event, {
         "event": "merged",
