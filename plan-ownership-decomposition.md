@@ -91,19 +91,27 @@ existing `tests/test_v5_*`/`task_graph`/`subtask` test regresses.
    `detect_scope_violations` never runs on the v5 path. The single
    enforced invariant: **a task may write a `foundation_contract` path
    only if it is that contract's `owner_task_id` or a
-   `contract_amendment` for it.** Enforce it as a shared helper applied
-   at ALL v5 commit/merge admission points, not just the one site:
+   `contract_amendment` for it.** Enforce it as a shared helper at
+   **every runner-managed commit/merge admission point** — implementer
+   MUST enumerate them via
+   `rg "commit_worktree\(|commit_integration_worktree\(" otto/v5_runner.py`
+   and gate each (or document a proof a site cannot touch a foundation
+   contract). Known sites that MUST be covered:
    - pre-`commit_worktree` dirty/untracked worktree paths in
      `_merge_child_branch`;
-   - **and** the already-committed child-branch delta vs the parent
-     integration branch before `merge_child_into_integration` (child
-     verify-repair and conflict-repair commit through separate hooks —
-     `v5_runner.py:~2077`, `~4924` — that bypass a dirty-only check);
-   - the integration-agent commit path
-     `_commit_integration_agent_changes` (`v5_runner.py:~5552`): an
-     integration agent editing a foundation contract it does not own
-     must be gated the same way (allowed only if integration/owner/
-     amendment, else routed per S2).
+   - the already-committed child-branch delta vs the parent integration
+     branch before `merge_child_into_integration` (verify-repair &
+     conflict-repair commit through separate hooks —
+     `v5_runner.py:~2077`, `~4924` — bypass a dirty-only check);
+   - `_commit_integration_agent_changes` (`v5_runner.py:~5552`);
+   - the preflight/checkout repair hook → `commit_integration_worktree`
+     (`v5_runner.py:~1381`; stages product paths from dirty state,
+     `v5_branching.py:~1096`);
+   - the subtree-propagation repair `commit_worktree`
+     (`v5_runner.py:~1760`).
+   A write to a foundation-contract path by a non-owner/non-amendment
+   task → gated (allowed only if owner / amendment / integration-of-
+   record, else routed per S2).
    Violation → structured block BEFORE branch advance, routed per S2.
    Tighten `detect_scope_violations` (newly-created foundation path =
    violation) as a secondary defense only.
@@ -129,12 +137,19 @@ machinery; emit `foundation_contract_amendment_repair`).
 
 **Lifecycle — concrete net-new state machine (must be specified, it
 does not exist today):**
-- The blocked leaf does NOT take a terminal verdict. Add a non-terminal
-  **state field** `blocked_pending_contract_amendment` +
-  `blocked_on_task_id=<amendment>` on the task record — do NOT add a new
-  member to the `Verdict` type (`task_graph.py:~54`) or to
-  `_NON_RUNNABLE_VERDICTS` (`subtask.py:~140`); keep the leaf's verdict
-  non-terminal so it stays a graph citizen.
+- The blocked leaf does NOT take a terminal verdict. **But a passing
+  leaf already has `verdict=pass` persisted** by `run_lead`→`set_verdict`
+  (`lead.py:~364`) before the merge path runs, and `pass` is
+  non-runnable (`_NON_RUNNABLE_VERDICTS`, `subtask.py:~140`/`~227`).
+  Therefore add a named transition
+  `set_contract_amendment_blocked(task_id, amendment_id, …)` that:
+  records `last_agent_verdict=pass` (preserve history), **clears
+  `verdict`/`completed_at` so the task is no longer non-runnable**, sets
+  the non-terminal state `blocked_pending_contract_amendment` +
+  `blocked_on_task_id=<amendment>`, and preserves enough merge context
+  to retry ONLY the merge after the amendment passes. Do NOT add a new
+  `Verdict` member (`task_graph.py:~54`) or touch
+  `_NON_RUNNABLE_VERDICTS`.
 - Ready-selection (`take_ready`, `subtask.py:~223`) gains a
   `blocked_on_task_id` gate analogous to the existing `depends_on`
   check: a task with an unsatisfied `blocked_on_task_id` is skipped
@@ -207,7 +222,11 @@ detection-only + S2-routed repair-need:
   (`~4091`) — equally a 1799s-style leaf loop.
 On an out-of-scope/foundation clean-deploy failure from either, emit a
 correctly-owned `foundation_repair_needed`/`integration_repair_needed`
-(routed per S2) instead of widening the leaf. Repair-packet allowed
+that — like S2 — **creates a runnable graph task (owner = the
+foundation/integration owner) AND sets the original leaf's
+`blocked_on_task_id` + `blocked_pending_contract_amendment` state via
+the same S2 transition**, NOT a dangling event. (A bare event would
+re-introduce the dead-end.) Instead of widening the leaf. Repair-packet allowed
 paths stay scoped to the conflict; the `v5_preflight_repair.py:~988`
 prompt must not demand the full acceptance oracle from a leaf conflict
 repair.
@@ -363,4 +382,24 @@ before final capstone). **Per step: the repro assertion adjustment
 (#2/#3/#5) lands in that step BEFORE its production change** (RED-first
 oracle fix), then the production fix flips it GREEN.
 
-(Round 3 trail appended after re-review.)
+### Round 3 — Codex (REVISE) — 3 narrow gaps closed; direction approved
+
+- [ISSUE] S1.3 still enumerated only 3 admission points; 2 more runner
+  commit hooks (`commit_integration_worktree` preflight/checkout repair
+  ~1381; subtree-propagation repair `commit_worktree` ~1760) write
+  product paths — **fixed**: S1.3 now mandates enumerating ALL via
+  `rg "commit_worktree\(|commit_integration_worktree\("` + gates the 5
+  known sites (or documents a proof).
+- [ISSUE] S2 missed clearing the already-persisted `verdict=pass`
+  (`run_lead`→`set_verdict` `lead.py:~364`; `pass` is non-runnable) —
+  **fixed**: S2 now specifies a named `set_contract_amendment_blocked`
+  transition that records `last_agent_verdict=pass`, clears
+  `verdict`/`completed_at` (un-non-runnable), sets the blocked state.
+- [ISSUE] S4 repair-need could degrade to a dangling event — **fixed**:
+  S4 now requires it create a runnable graph task + set the leaf's
+  `blocked_on_task_id` via the same S2 transition.
+
+Findings narrowed each round (8 → 3 → 3 bounded); direction approved by
+Codex. Safe order unchanged: S0→S1→S2→S3→S4→S5.
+
+(Round 4 trail appended after re-review.)
