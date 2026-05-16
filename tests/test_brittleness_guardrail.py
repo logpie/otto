@@ -127,6 +127,13 @@ VERDICT_ADVISORY_COLLECTIONS = {"advisories"}
 BAD_DEPENDENCY_VERDICTS = {"catastrophic", "merge_blocked", "unverified"}
 DEPENDENCY_CONTEXT = {"dependency", "dependencies", "ready", "done", "completed", "terminal"}
 IDENTITY_CONTEXT = {"branch", "worktree", "identity", "cwd", "project_dir", "base_ref"}
+JOURNEY_VERDICT_SINK_REL = "otto/journey_verdict_sink.py"
+JOURNEY_AGGREGATE_HEURISTIC_MARKERS = {
+    "overall_native_passed",
+    "overall_browser_passed",
+    "native tests passed",
+    "browser journey passed",
+}
 TOLERATED_STATE_READER_SYMBOL_PARTS = {
     "rows",
     "events",
@@ -449,6 +456,7 @@ def _scan_file(path: Path) -> list[Violation]:
     visitor.violations.extend(_repair_prompt_packet_violations(tree, _rel(path)))
     visitor.violations.extend(_repair_symptom_cap_violations(tree, _rel(path)))
     visitor.violations.extend(_verdict_text_scan_gate_violations(tree, _rel(path)))
+    visitor.violations.extend(_journey_verdict_authority_violations(tree, _rel(path)))
     return visitor.violations
 
 
@@ -591,6 +599,69 @@ def _verdict_text_scan_gate_violations(tree: ast.AST, rel_path: str) -> list[Vio
     return violations
 
 
+def _journey_verdict_authority_violations(tree: ast.AST, rel_path: str) -> list[Violation]:
+    if rel_path == JOURNEY_VERDICT_SINK_REL:
+        return []
+    violations: list[Violation] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        name = node.name
+        text = ast.unparse(node)
+        lowered = text.lower()
+        if _reads_agent_narrated_journey_passed(node):
+            violations.append(Violation(
+                rel_path=rel_path,
+                symbol=name,
+                rule="journey_verdict_from_agent_narration",
+                line=getattr(node, "lineno", 1),
+                detail=(
+                    "behavior journey verdicts must come from resolve_journey_verdicts "
+                    "using controller-run executor results, not agent_verdict['journeys'][].passed"
+                ),
+            ))
+        if any(marker in lowered for marker in JOURNEY_AGGREGATE_HEURISTIC_MARKERS):
+            violations.append(Violation(
+                rel_path=rel_path,
+                symbol=name,
+                rule="journey_verdict_from_aggregate_tests",
+                line=getattr(node, "lineno", 1),
+                detail=(
+                    "native-test/browser aggregate success must not synthesize "
+                    "behavior journey pass verdicts"
+                ),
+            ))
+    return violations
+
+
+def _reads_agent_narrated_journey_passed(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    reads_agent_journeys = False
+    reads_passed = False
+    for child in ast.walk(node):
+        if (
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and child.func.attr == "get"
+            and _name_text(child.func.value) == "agent_verdict"
+            and child.args
+            and isinstance(child.args[0], ast.Constant)
+            and child.args[0].value == "journeys"
+        ):
+            reads_agent_journeys = True
+        if (
+            isinstance(child, ast.Subscript)
+            and _name_text(child.value) == "agent_verdict"
+            and isinstance(child.slice, ast.Constant)
+            and child.slice.value == "journeys"
+        ):
+            reads_agent_journeys = True
+        if isinstance(child, ast.Constant) and child.value == "passed":
+            reads_passed = True
+        if isinstance(child, ast.Attribute) and child.attr == "passed":
+            reads_passed = True
+    return reads_agent_journeys and reads_passed
+
+
 def test_brittleness_guardrail_has_reasoned_allowlist() -> None:
     assert ALLOWLIST, "ALLOWLIST must be explicit; do not hide violations inline"
     for key, allow in ALLOWLIST.items():
@@ -627,4 +698,15 @@ def test_verdict_text_scan_guardrail_step2() -> None:
     path = OTTO_ROOT / "v5_verification_plan.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     violations = _verdict_text_scan_gate_violations(tree, _rel(path))
+    assert not violations, "\n".join(violation.render() for violation in violations)
+
+
+def test_journey_verdict_authority_guardrail_unit3() -> None:
+    violations: list[Violation] = []
+    for path in sorted(OTTO_ROOT.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        violations.extend(_journey_verdict_authority_violations(tree, _rel(path)))
+
     assert not violations, "\n".join(violation.render() for violation in violations)

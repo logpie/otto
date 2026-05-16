@@ -6,7 +6,7 @@ Replaces v4's group/contract synthesis. Emits:
     - intent_claims[]: raw claims extracted from intent.md
     - core_entities[]: product entities, fields, states, primary actions
     - cold_start_states[] / permissions[] / quality_constraints[]
-    - behavior_journeys[]: capped illustrative journeys
+    - behavior_journeys[]: capped typed verification journeys
 
 NO groups, NO owned_paths, NO shared_contracts, NO frozen ownership of any kind.
 The Lead at runtime decides decomposition; integration audit at every merge node
@@ -209,7 +209,6 @@ def _is_structured_spec(spec: dict[str, Any]) -> bool:
                 "covers_primary_actions" in j
                 or "start_state" in j
                 or "entry_route" in j
-                or "role" in j
             )
             for j in _as_list(spec.get("behavior_journeys"))
         ),
@@ -328,8 +327,6 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
     if structured:
         for idx, journey in enumerate(journeys):
             jid = _obj_id(journey) or f"index {idx}"
-            if journey.get("role") != "illustrative":
-                warnings.append(f"behavior_journeys[{jid}].role should be 'illustrative'")
             if not isinstance(journey.get("covers_primary_actions"), list):
                 warnings.append(f"behavior_journeys[{jid}].covers_primary_actions should be a list")
             if not str(journey.get("start_state") or "").strip():
@@ -485,7 +482,6 @@ Use this shape. Keep it compact; empty arrays are fine when a field is not usefu
   "behavior_journeys": [
     {{
       "id": "snake_case_short_id",
-      "role": "illustrative",
       "description": "User-language steps describing what happens.",
       "covers_primary_actions": ["entity.action"],
       "start_state": "unauthenticated",
@@ -732,7 +728,6 @@ async def compile_flat_spec(
                             "type": "object",
                             "properties": {
                                 "id": {"type": "string"},
-                                "role": {"type": "string"},
                                 "description": {"type": "string"},
                                 "covers_primary_actions": {
                                     "type": "array",
@@ -759,7 +754,6 @@ async def compile_flat_spec(
                             },
                             "required": [
                                 "id",
-                                "role",
                                 "description",
                                 "covers_primary_actions",
                                 "start_state",
@@ -915,7 +909,6 @@ async def compile_flat_spec(
             behavior_journeys=[
                 {
                     "id": str(j.get("id") or ""),
-                    "role": str(j.get("role") or ""),
                     "description": str(j.get("description") or ""),
                     "covers_primary_actions": [
                         str(a) for a in _as_list(j.get("covers_primary_actions"))

@@ -174,7 +174,7 @@ def validate_lead_verdict(
     journey_verdicts = (
         _journey_verdicts_from_sink(
             spec,
-            agent_verdict,
+            session_dir=session_dir,
             execution_scope=resolved_execution_scope,
         )
         if spec and full_matrix and not verification_contract_failures
@@ -867,38 +867,29 @@ def _advise_deprecation_warnings(
 
 
 def _check_local_scope_evidence(agent_verdict: dict[str, Any]) -> list[dict[str, Any]]:
-    journeys = agent_verdict.get("journeys")
     evidence = agent_verdict.get("evidence")
     test_command = str(agent_verdict.get("test_command") or "").strip()
-    has_journey_evidence = any(
-        isinstance(item, dict)
-        and (
-            item.get("passed") is True
-            or str(item.get("detail") or "").strip()
-        )
-        for item in (journeys if isinstance(journeys, list) else [])
-    )
     has_file_evidence = any(
         str(item or "").strip()
         for item in (evidence if isinstance(evidence, list) else [])
     )
-    passed = bool(test_command or has_journey_evidence or has_file_evidence)
+    passed = bool(test_command or has_file_evidence)
     return [_check(
         "local_scope_check",
         "test_or_journey_evidence",
         passed,
         (
-            "leaf verdict includes local test, journey, or evidence data"
+            "leaf verdict includes local test or evidence data"
             if passed
-            else "leaf verdict lacks local test_command, passed/detailed journeys, and evidence entries"
+            else "leaf verdict lacks local test_command and evidence entries"
         ),
     )]
 
 
 def _journey_verdicts_from_sink(
     spec: dict[str, Any],
-    agent_verdict: dict[str, Any],
     *,
+    session_dir: Path,
     execution_scope: ExecutionScope,
 ) -> list[dict[str, Any]]:
     journeys = [
@@ -909,30 +900,27 @@ def _journey_verdicts_from_sink(
     return resolve_journey_verdicts(
         journeys=journeys,
         execution_scope=execution_scope,
-        legacy_results=_legacy_agent_journey_results(agent_verdict),
+        executor_results=_load_controller_executor_results(session_dir),
+        registered_executor_levels={"ui", "api"},
     )
 
 
-def _legacy_agent_journey_results(agent_verdict: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        {
-            "id": str(journey.get("id") or ""),
-            "passed": journey.get("passed") is True,
-            "detail": str(journey.get("detail") or ""),
-        }
-        for journey in agent_verdict.get("journeys") or []
-        if isinstance(journey, dict) and journey.get("id")
-    ]
-
-
-def _missing_passed_journeys(spec: dict[str, Any], agent_verdict: dict[str, Any]) -> list[str]:
-    return failed_journey_ids(
-        _journey_verdicts_from_sink(
-            spec,
-            agent_verdict,
-            execution_scope="root_integration",
-        )
-    )
+def _load_controller_executor_results(session_dir: Path) -> list[dict[str, Any]]:
+    candidates = [session_dir / "verify" / "api-executor-results.json"]
+    journeys_dir = session_dir / "journeys"
+    if journeys_dir.exists():
+        candidates.extend(journeys_dir.rglob("journey-verdicts.json"))
+    existing = [path for path in candidates if path.is_file()]
+    existing.sort(key=lambda path: path.stat().st_mtime)
+    results: list[dict[str, Any]] = []
+    for path in existing:
+        payload = _load_json(path)
+        if not isinstance(payload, dict):
+            continue
+        for item in payload.get("executor_results") or []:
+            if isinstance(item, dict):
+                results.append(dict(item))
+    return results
 
 
 def _coverage_label(item: Any) -> str:
