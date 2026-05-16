@@ -1132,3 +1132,50 @@ Plan Gate: n/a (fix dispatched from RED repro evidence, not a written plan).
 Implementation Gate: 4 review rounds + 1 confirmation (8 findings) → APPROVED.
 Commits: 401e78f6c (repros) · 6796a9058 → f92b55ff9 → 3779aca79 → 9d82e48f8
 → b7ed0366a (fix series).
+
+---
+
+## Spec-Compile Timeout Robustness — Implementation Gate (2026-05-16)
+
+Reviewed: 798b0a0d4 → a75677088 (bounded compile-timeout re-entry +
+structured terminal; default 600→1200). Surfaced by the iTracker capstone
+crashing catastrophic at the 600s spec-compile cap.
+
+### Round 1 — Codex
+- [CRITICAL] compile created a fresh/discarded RunBudget → not bounded by
+  run budget — fixed by Codex (a75677088): single invocation RunBudget
+  threaded through compile + raise_compile_budget_exhausted_if_needed.
+- [IMPORTANT] for_call() could yield 0/neg → degenerate 0s attempt —
+  fixed: budget.exhausted()/<=0 guard before dispatch → structured terminal.
+- [IMPORTANT] runner.py run_pipeline(spec=None) still escaped uncaught —
+  fixed: catches SpecValidationError → shared record_compile_failure_terminal
+  → blocked RunResult.
+- [IMPORTANT] timeout detection too broad (substring search) — fixed:
+  anchored fullmatch on exc.reason vs the exact agent.py outer-timeout shape.
+- [NOTE→addressed] test gaps — repro expanded 4→10.
+- [REJECTED/REVERTED by Claude] Codex added an out-of-scope
+  _repair_verdicts_for_audit "product-wide PASSED backfill" to green a
+  broadened test selection; it masked a PRE-EXISTING unrelated failure
+  (test_runner.py::test_layer2_repairs_multiple_actionable_features_by_default,
+  red at fd476df20, before this arc). Reverted in full; no verdict-semantics
+  change shipped. Pre-existing test tracked separately, intentionally left red.
+
+### Round 2 — Codex re-reviewed fixes
+- APPROVED. No CRITICAL/IMPORTANT.
+- [NOTE] downstream build/merge/audit still use BuildBudget not RunBudget
+  (accepted "minimum approach": compile just can't continue with 0 time).
+- [NOTE] SpecCompileBudgetExhaustedError records attempts=len(timeout_attempts),
+  undercounting a prior non-timeout attempt — structured-reason fidelity
+  only; control flow bounded/correct. Tracked follow-up.
+
+Implementation Gate: 1 review round + 1 confirmation → APPROVED.
+Commits: 798b0a0d4 → a75677088.
+
+### Separate finding (NOT this fix's scope) — capstone compile-convergence
+Live iTracker capstone (47-feature intent) crashed twice in spec-compile:
+600s (old default) then 1800s. Root: the compile AGENT thinking-loops —
+repeatedly emits "Let me write the spec JSON now" across elapsed 278s→773s
+→1288s without ever emitting the Write/structured-output. This timeout fix
+correctly converts that catastrophic crash into an honest bounded terminal
+but does NOT make the agent converge. Compile-agent convergence on very
+large intents is a separate open issue (prompt/agent design).
