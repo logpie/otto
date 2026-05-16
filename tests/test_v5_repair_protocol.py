@@ -465,6 +465,103 @@ async def test_post_commit_gate_blocks_committed_change_outside_owned_glob(tmp_p
     assert result.composite_gate["scope_violations"] == ["src/other/x.tsx"]
 
 
+@pytest.mark.asyncio
+async def test_merge_conflict_scope_carves_in_conflicted_paths_but_blocks_unrelated(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "backend").mkdir()
+    (repo / "backend" / "main.py").write_text("value = 'base'\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "seed shared backend")
+
+    async def forbidden_agent(prompt: str, options: Any, **kwargs: Any) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt, options, kwargs
+        raise AssertionError("passing clean-deploy should not dispatch an agent")
+
+    allowed_packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-conflicted-shared-allowed",
+        budget=RepairBudget(agent_turns=0, oracle_invocations=0),
+        allowed_paths=(),
+        scope_policy="allowed_paths",
+    )
+    allowed_packet.repair_unit["phase"] = "merge"
+    allowed_packet.repair_unit["repair_phase"] = "merge"
+    allowed_packet.repair_unit["conflicted_paths"] = ["backend/main.py"]
+    allowed_packet.integration_context["conflict_packet"] = {
+        "unmerged_paths": ["backend/main.py"],
+    }
+    allowed_packet.latest_oracle_result = _oracle_result(passed=True).to_jsonable()
+
+    async def commit_conflicted_path(
+        _packet: RepairPacket,
+        _oracle_result: CleanOracleResult,
+    ) -> tuple[bool, str]:
+        (repo / "backend" / "main.py").write_text("value = 'resolved'\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        proc = _git(repo, "commit", "-q", "-m", "resolve conflicted shared file")
+        return proc.returncode == 0, proc.stderr or proc.stdout
+
+    allowed = await run_oracle_repair_agent(
+        allowed_packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=forbidden_agent,
+        oracle_runner=lambda _packet: _oracle_result(passed=True),
+        commit_hook=commit_conflicted_path,
+    )
+
+    assert allowed.verdict == "pass"
+    assert allowed.composite_gate is not None
+    assert allowed.composite_gate["scope_ok"] is True
+    assert allowed.composite_gate["scope_violations"] == []
+
+    unrelated_packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-conflicted-shared-unrelated-blocked",
+        budget=RepairBudget(agent_turns=0, oracle_invocations=0),
+        allowed_paths=(),
+        scope_policy="allowed_paths",
+    )
+    unrelated_packet.repair_unit["phase"] = "merge"
+    unrelated_packet.repair_unit["repair_phase"] = "merge"
+    unrelated_packet.repair_unit["conflicted_paths"] = ["backend/main.py"]
+    unrelated_packet.integration_context["conflict_packet"] = {
+        "unmerged_paths": ["backend/main.py"],
+    }
+    unrelated_packet.latest_oracle_result = _oracle_result(passed=True).to_jsonable()
+
+    async def commit_unrelated_path(
+        _packet: RepairPacket,
+        _oracle_result: CleanOracleResult,
+    ) -> tuple[bool, str]:
+        (repo / "backend" / "main.py").write_text("value = 'resolved again'\n", encoding="utf-8")
+        (repo / "docs").mkdir(exist_ok=True)
+        (repo / "docs" / "stray.md").write_text("unrelated\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        proc = _git(repo, "commit", "-q", "-m", "resolve plus unrelated file")
+        return proc.returncode == 0, proc.stderr or proc.stdout
+
+    blocked = await run_oracle_repair_agent(
+        unrelated_packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=forbidden_agent,
+        oracle_runner=lambda _packet: _oracle_result(passed=True),
+        commit_hook=commit_unrelated_path,
+    )
+
+    assert blocked.verdict == "merge_blocked"
+    assert blocked.composite_gate is not None
+    assert blocked.composite_gate["scope_ok"] is False
+    assert blocked.composite_gate["scope_violations"] == ["docs/stray.md"]
+    assert blocked.composite_gate["reasons"]
+    assert blocked.escalation is not None
+    assert blocked.escalation["composite_gate"]["reasons"]
+
+
 def test_clean_verify_oracle_serialization_omits_secret_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

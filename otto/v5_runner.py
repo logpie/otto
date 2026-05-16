@@ -3010,6 +3010,7 @@ async def _repair_child_merge_conflict_once(
         expected_artifact_paths=[conflict_packet_path] if conflict_packet_path else [],
         allowed_paths=paths,
         scope_policy="allowed_paths" if paths else "unrestricted",
+        repair_unit_extra={"conflicted_paths": paths},
     )
     _emit(on_event, {
         "event": "merge_conflict_repair_agent_start",

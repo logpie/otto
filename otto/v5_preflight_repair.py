@@ -449,11 +449,100 @@ def _has_conflict_markers(worktree: Path, paths: list[str]) -> bool:
 
 
 def _has_unmerged_paths(worktree: Path) -> bool:
+    return bool(_unmerged_path_names(worktree))
+
+
+def _unmerged_path_names(worktree: Path) -> list[str]:
+    output = _git_capture(worktree, ["diff", "--name-only", "--diff-filter=U"])
+    if output:
+        return sorted({line.strip() for line in output.splitlines() if line.strip()})
+    paths: list[str] = []
     for line in _git_status_porcelain(worktree).splitlines():
         status = line[:2]
         if "U" in status or status in {"AA", "DD"}:
-            return True
-    return False
+            rel = _porcelain_path(line)
+            if rel:
+                paths.append(rel)
+    return sorted(dict.fromkeys(paths))
+
+
+def _conflict_scope_paths(packet: RepairPacket) -> list[str]:
+    paths: list[str] = []
+    for raw in (
+        packet.repair_unit.get("conflicted_paths"),
+        packet.repair_unit.get("scope_carve_in_paths"),
+    ):
+        if isinstance(raw, list):
+            paths.extend(str(path) for path in raw if str(path))
+    conflict_packet = packet.integration_context.get("conflict_packet")
+    if isinstance(conflict_packet, dict):
+        paths.extend(
+            str(path)
+            for path in (conflict_packet.get("unmerged_paths") or [])
+            if str(path)
+        )
+    return sorted(dict.fromkeys(paths))
+
+
+def _composite_gate_block_reasons(
+    gate: dict[str, Any],
+    *,
+    required_keys: list[str],
+) -> list[dict[str, Any]]:
+    reasons: list[dict[str, Any]] = []
+    if "oracle_passed" in required_keys and not bool(gate.get("oracle_passed")):
+        reasons.append({
+            "kind": "clean_deploy_failed",
+            "message": "clean-deploy oracle did not pass",
+            "paths": [],
+        })
+    if "clean_worktree" in required_keys and not bool(gate.get("clean_worktree")):
+        dirty_paths = [str(path) for path in (gate.get("dirty_paths") or [])]
+        reasons.append({
+            "kind": "dirty_worktree",
+            "message": "repair worktree still has uncommitted changes after commit",
+            "paths": dirty_paths,
+        })
+    if "conflict_markers" in required_keys and not bool(gate.get("conflict_markers")):
+        marker_paths = [str(path) for path in (gate.get("conflict_marker_paths") or [])]
+        reasons.append({
+            "kind": "conflict_markers",
+            "message": "conflict markers remain in repair worktree",
+            "paths": marker_paths,
+        })
+    if "unmerged_paths" in required_keys and not bool(gate.get("unmerged_paths")):
+        unmerged_paths = [str(path) for path in (gate.get("unmerged_path_names") or [])]
+        reasons.append({
+            "kind": "unmerged_paths",
+            "message": "git index still has unmerged paths",
+            "paths": unmerged_paths,
+        })
+    if "scope_ok" in required_keys and not bool(gate.get("scope_ok")):
+        scope_violations = [str(path) for path in (gate.get("scope_violations") or [])]
+        reasons.append({
+            "kind": "scope_violation",
+            "message": "repair changed paths outside the allowed conflict scope",
+            "paths": scope_violations,
+        })
+    if "verdict_consistency" in required_keys and not bool(gate.get("verdict_consistency")):
+        reasons.append({
+            "kind": "verdict_consistency",
+            "message": "repair verdict state is inconsistent",
+            "paths": [],
+        })
+    if "graph_invariants" in required_keys and not bool(gate.get("graph_invariants")):
+        reasons.append({
+            "kind": "graph_invariants",
+            "message": "task graph invariants failed",
+            "paths": [],
+        })
+    if not reasons and not bool(gate.get("passed")):
+        reasons.append({
+            "kind": "composite_gate_failed",
+            "message": "composite landing gate failed without a classified check",
+            "paths": [],
+        })
+    return reasons
 
 
 def _changed_paths_since_repair_start(
@@ -484,11 +573,13 @@ def _evaluate_composite_gate(
     baseline = baseline_raw if isinstance(baseline_raw, dict) else None
     changed_since_baseline = _changed_paths_since_repair_start(packet, worktree, baseline)
     allowed_paths = [str(path) for path in (packet.repair_unit.get("allowed_paths") or [])]
+    conflict_scope_paths = _conflict_scope_paths(packet)
+    effective_allowed_paths = sorted(dict.fromkeys([*allowed_paths, *conflict_scope_paths]))
     scope_policy = str(packet.repair_unit.get("scope_policy") or "unrestricted")
     scope_violations = (
         [
             path for path in changed_since_baseline
-            if not _path_allowed(path, allowed_paths)
+            if not _path_allowed(path, effective_allowed_paths)
         ]
         if scope_policy == "allowed_paths"
         else []
@@ -496,15 +587,21 @@ def _evaluate_composite_gate(
     dirty_paths = _modified_paths_since_baseline(worktree, None)
     conflict_marker_paths = sorted(dict.fromkeys([*dirty_paths, *changed_since_baseline]))
     conflict_markers = _has_conflict_markers(worktree, conflict_marker_paths)
-    unmerged = _has_unmerged_paths(worktree)
-    gate = {
+    unmerged_path_names = _unmerged_path_names(worktree)
+    unmerged = bool(unmerged_path_names)
+    gate: dict[str, Any] = {
         "oracle_passed": oracle_result.passed,
         "clean_worktree": not dirty_paths,
         "require_clean_worktree": require_clean_worktree,
         "dirty_paths": dirty_paths,
         "changed_paths": changed_since_baseline,
+        "allowed_paths": allowed_paths,
+        "conflict_scope_paths": conflict_scope_paths,
+        "effective_allowed_paths": effective_allowed_paths,
+        "conflict_marker_paths": conflict_marker_paths,
         "conflict_markers": not conflict_markers,
         "unmerged_paths": not unmerged,
+        "unmerged_path_names": unmerged_path_names,
         "scope_ok": not scope_violations,
         "scope_violations": scope_violations,
         "verdict_consistency": True,
@@ -521,6 +618,13 @@ def _evaluate_composite_gate(
     if require_clean_worktree:
         required_keys.append("clean_worktree")
     gate["passed"] = all(bool(gate[key]) for key in required_keys)
+    gate["required_checks"] = required_keys
+    reasons = _composite_gate_block_reasons(gate, required_keys=required_keys)
+    gate["reasons"] = reasons
+    if reasons:
+        gate["summary"] = "; ".join(str(reason["message"]) for reason in reasons)
+    else:
+        gate["summary"] = "composite landing gate passed"
     return gate
 
 
@@ -679,6 +783,62 @@ def _infra_oracle_result(packet: RepairPacket, message: str) -> CleanOracleResul
     )
 
 
+def _composite_gate_oracle_result(
+    packet: RepairPacket,
+    prior_oracle: CleanOracleResult,
+    *,
+    gate: dict[str, Any],
+    stage: str,
+) -> CleanOracleResult:
+    worktree = Path(str(packet.repair_unit.get("worktree") or "."))
+    reasons = gate.get("reasons") if isinstance(gate.get("reasons"), list) else []
+    reason_text = gate.get("summary") or "composite landing gate blocked repair"
+    reason_payload = json.dumps(reasons, sort_keys=True, default=str)
+    message = (
+        f"{stage} composite landing gate blocked repair: {reason_text}. "
+        f"Reasons: {reason_payload}"
+    )
+    paths: list[str] = []
+    for key in (
+        "scope_violations",
+        "dirty_paths",
+        "unmerged_path_names",
+        "conflict_marker_paths",
+    ):
+        paths.extend(str(path) for path in (gate.get(key) or []) if str(path))
+    step = CleanOracleStepResult(
+        id=f"composite_gate:{stage}",
+        status="failed",
+        return_code=1,
+        command_identity="otto composite landing gate",
+        command=["otto", "composite-gate", stage],
+        cwd=str(worktree),
+        env={},
+        started_at=_iso_now(),
+        reason=message,
+    )
+    issue = CleanOracleIssue(
+        kind="composite_gate_blocked",
+        severity="block",
+        message=message,
+        step_id=step.id,
+        paths=sorted(dict.fromkeys(paths)),
+        command_identity=step.command_identity,
+        return_code=step.return_code,
+    )
+    return CleanOracleResult.from_parts(
+        passed=False,
+        scope=prior_oracle.scope,
+        issues=[issue],
+        steps=[step],
+        artifact_path_refs=list(prior_oracle.artifact_path_refs),
+        command=list(prior_oracle.command),
+        env=dict(prior_oracle.env),
+        project_dir=worktree,
+        temp_dir=None,
+    )
+
+
 def _parse_event_epoch_s(value: Any) -> float | None:
     if not isinstance(value, str) or not value:
         return None
@@ -827,8 +987,10 @@ async def _maybe_await(value: Any) -> Any:
 
 def _repair_prompt(packet: RepairPacket) -> str:
     return (
-        "Repair this worktree so the clean-deploy oracle passes. Preserve the "
-        "product contract, P0-P4 merge invariants, and owned-path/scope rules. "
+        "Repair this worktree so the full acceptance oracle passes: clean-deploy "
+        "plus the composite landing gate (scope, conflict markers, dirty state, "
+        "and graph/verdict invariants). Preserve the product contract, P0-P4 "
+        "merge invariants, and owned-path/scope rules. "
         "Diagnose from the complete evidence packet. Run the oracle as your "
         "acceptance loop. Stop only when the oracle passes or you can produce a "
         "structured escalation record explaining why it cannot within budget.\n\n"
@@ -846,15 +1008,22 @@ def _structured_escalation(
     oracle_invocations: int,
     cost_usd: float,
     closeout_summary: str = "",
+    composite_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     worktree = Path(str(packet.repair_unit.get("worktree") or "."))
     baseline_raw = packet.current_state.get("scope_baseline")
     baseline = baseline_raw if isinstance(baseline_raw, dict) else None
+    if composite_gate is None and isinstance(
+        packet.current_state.get("latest_composite_gate"),
+        dict,
+    ):
+        composite_gate = dict(packet.current_state["latest_composite_gate"])
     return {
         "reason": reason,
         "oracle_command": packet.acceptance_oracle.get("command") or [],
         "oracle_env": packet.acceptance_oracle.get("env") or {},
         "final_oracle_result": packet.latest_oracle_result,
+        "composite_gate": composite_gate,
         "all_issues": (packet.latest_oracle_result or {}).get("issues") or [],
         "attempt_timeline": packet.events(),
         "agent_turns_used": agent_turns_used,
@@ -1004,6 +1173,11 @@ async def run_oracle_repair_agent(
         allow_closeout: bool = True,
     ) -> OracleRepairResult:
         nonlocal cost_usd, agent_turns_used, closeout_turns_used, last_activity_epoch_s
+        if composite_gate is None and isinstance(
+            packet.current_state.get("latest_composite_gate"),
+            dict,
+        ):
+            composite_gate = dict(packet.current_state["latest_composite_gate"])
         closeout_summary = ""
         if (
             allow_closeout
@@ -1071,6 +1245,7 @@ async def run_oracle_repair_agent(
             oracle_invocations=oracle_invocations,
             cost_usd=cost_usd,
             closeout_summary=closeout_summary,
+            composite_gate=composite_gate,
         )
         packet.append_event("repair_escalated", digest=latest_oracle.digest, payload=escalation)
         packet.persist()
@@ -1086,23 +1261,63 @@ async def run_oracle_repair_agent(
             escalation=escalation,
         )
 
-    async def accept_or_block_passed_oracle() -> OracleRepairResult:
+    def record_composite_gate_feedback(
+        *,
+        stage: str,
+        gate: dict[str, Any],
+        prior_oracle: CleanOracleResult,
+    ) -> None:
+        nonlocal latest_oracle, last_activity_epoch_s
+        gate = dict(gate)
+        if not gate.get("reasons"):
+            gate["reasons"] = _composite_gate_block_reasons(
+                gate,
+                required_keys=[str(key) for key in (gate.get("required_checks") or [])],
+            )
+        if not gate.get("summary"):
+            reasons = gate.get("reasons") if isinstance(gate.get("reasons"), list) else []
+            gate["summary"] = (
+                "; ".join(str(reason.get("message") or reason.get("kind")) for reason in reasons)
+                if reasons
+                else "composite landing gate blocked repair"
+            )
+        composite_oracle = _composite_gate_oracle_result(
+            packet,
+            prior_oracle,
+            gate=gate,
+            stage=stage,
+        )
+        packet.current_state["last_clean_deploy_oracle_result"] = prior_oracle.to_jsonable()
+        packet.current_state["latest_composite_gate"] = gate
+        packet.latest_oracle_result = composite_oracle.to_jsonable()
+        packet.append_event(
+            "composite_gate",
+            digest=composite_oracle.digest,
+            payload={
+                "stage": stage,
+                "passed": False,
+                "summary": gate.get("summary") or "",
+                "reasons": gate.get("reasons") or [],
+                "gate": gate,
+            },
+        )
+        packet.persist()
+        latest_oracle = composite_oracle
+        last_activity_epoch_s = time.time()
+
+    async def accept_or_block_passed_oracle() -> OracleRepairResult | None:
         pre_commit_gate = _evaluate_composite_gate(
             packet,
             latest_oracle,
             require_clean_worktree=False,
         )
         if not pre_commit_gate["passed"]:
-            return OracleRepairResult(
-                verdict="merge_blocked",
-                summary="clean-deploy passed but pre-commit composite repair gate blocked landing",
-                agent_session_id=packet.agent_session_id,
-                cost_usd=cost_usd,
-                agent_turns_used=agent_turns_used,
-                oracle_invocations=oracle_invocations,
-                packet_path=str(packet.packet_path),
-                composite_gate=pre_commit_gate,
+            record_composite_gate_feedback(
+                stage="pre_commit",
+                gate=pre_commit_gate,
+                prior_oracle=latest_oracle,
             )
+            return None
         if commit_hook is not None:
             ok, detail = await _maybe_await(commit_hook(packet, latest_oracle))
             packet.append_event(
@@ -1134,20 +1349,19 @@ async def run_oracle_repair_agent(
                 packet_path=str(packet.packet_path),
                 composite_gate=post_commit_gate,
             )
-        return OracleRepairResult(
-            verdict="merge_blocked",
-            summary="clean-deploy passed but composite repair gate blocked landing",
-            agent_session_id=packet.agent_session_id,
-            cost_usd=cost_usd,
-            agent_turns_used=agent_turns_used,
-            oracle_invocations=oracle_invocations,
-            packet_path=str(packet.packet_path),
-            composite_gate=post_commit_gate,
+        record_composite_gate_feedback(
+            stage="post_commit",
+            gate=post_commit_gate,
+            prior_oracle=latest_oracle,
         )
+        return None
 
     while True:
         if latest_oracle.passed:
-            return await accept_or_block_passed_oracle()
+            accepted = await accept_or_block_passed_oracle()
+            if accepted is not None:
+                return accepted
+            continue
 
         reason = budget_exhausted_reason()
         if reason is not None:
@@ -1218,7 +1432,10 @@ async def run_oracle_repair_agent(
         packet.persist()
         reconcile_replayed_usage()
         if latest_oracle.passed:
-            return await accept_or_block_passed_oracle()
+            accepted = await accept_or_block_passed_oracle()
+            if accepted is not None:
+                return accepted
+            continue
 
         reason = budget_exhausted_reason(include_turn_limit=False)
         if reason is not None:

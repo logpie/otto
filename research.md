@@ -1715,3 +1715,20 @@ Base: `e7ca4406b`
   `resolve_journey_verdicts` caller matches the current signature.
 - Required no-regress batch: focused `tests/test_journey_*` plus the requested
   v5 repair/protocol/hardening/planning/smoke/merge suites, ruff, basedpyright.
+## 2026-05-16T03:46:57Z - Conflict Repair Composite Gate Re-entry
+
+### Existing seam
+- `otto/v5_runner.py:_merge_child_branch` calls the real `merge_child_into_integration`; on a conflict it calls `_repair_child_merge_conflict_once`, then retries the merge.
+- `_repair_child_merge_conflict_once` builds a `RepairPacket` with `phase="merge"`, `repair_phase="merge"`, clean-deploy as the stored oracle command, and `allowed_paths` from the conflict packet's `unmerged_paths`.
+- `otto/v5_preflight_repair.py:run_oracle_repair_agent` runs the durable repair loop. When `latest_oracle.passed` becomes true, `accept_or_block_passed_oracle()` evaluates `_evaluate_composite_gate()`.
+- Current bug confirmed in code: if the pre-commit or post-commit composite gate fails after clean-deploy passes, `accept_or_block_passed_oracle()` returns `OracleRepairResult(verdict="merge_blocked", ...)` immediately. It does not write a structured gate-failure event, does not convert the composite failure into the next durable-loop signal, and does not call `block_with_escalation()`.
+
+### Constraints
+- Do not weaken composite checks: unrelated scope violations, conflict markers, unmerged paths, dirty post-commit state, and graph/verdict checks must still block.
+- The fix belongs at the repair-loop/composite-gate seam, not in the clean-deploy oracle.
+- Conflict repair should treat the conflicted paths as in-scope even when they are shared/architect-owned files; unrelated files must remain blocked.
+- The deterministic repro should use real git branches and `merge_child_into_integration` through `_merge_child_branch`, with only the agent turn controlled to avoid LLM/network nondeterminism.
+
+### Open questions / judgment calls
+- Composite-gate failures should be represented as durable repair feedback without spending another expensive clean-deploy oracle invocation. I will record a `composite_gate` packet event, update `latest_oracle_result` to a synthetic blocking oracle result, and let the existing agent-turn budget decide whether another agent turn is available.
+- The local `/codex-gate` MCP tool described in project instructions is not available in this session's tool list, so plan/implementation gate review cannot be invoked here. I will compensate with red/green repro, focused protocol tests, and the requested no-regress batch.

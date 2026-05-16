@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,19 @@ def _init_repo(repo: Path) -> None:
     (repo / "README.md").write_text("init\n")
     _git(repo, "add", ".gitignore", "README.md")
     _git(repo, "commit", "-q", "-m", "init")
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _repair_packet_path_from_prompt(prompt: str) -> Path:
+    for line in prompt.splitlines():
+        if line.startswith("Repair packet: "):
+            return Path(line.split(": ", 1)[1])
+    raise AssertionError(f"repair prompt did not include packet path: {prompt}")
 
 
 def _seed_integration_task(repo: Path, task_id: str) -> str:
@@ -243,6 +257,172 @@ def test_child_merge_uses_existing_integration_worktree_owner(tmp_path: Path) ->
         "nested child output\n"
     )
     assert _git(repo, "branch", "--show-current").stdout.strip() == "main"
+
+
+@pytest.mark.asyncio
+async def test_merge_conflict_composite_gate_failure_reenters_repair_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean-deploy pass is not enough when the composite landing gate blocks.
+
+    This drives the real child merge path through:
+    merge_child_into_integration -> conflict packet -> merge repair packet ->
+    composite gate -> same durable repair loop.
+    """
+    from otto import v5_runner
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    port = _free_port()
+    (repo / "CHARTER.md").write_text(f"# Tiny fixture\n\nPort: {port}\n", encoding="utf-8")
+    (repo / "start.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"PORT=\"${{PORT:-{port}}}\"\n"
+        "python3 -m http.server \"$PORT\" --bind 127.0.0.1\n",
+        encoding="utf-8",
+    )
+    (repo / "start.sh").chmod(0o755)
+    (repo / "backend").mkdir()
+    (repo / "backend" / "main.py").write_text(
+        "def route() -> str:\n"
+        "    return 'base'\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    seed = _git(repo, "commit", "-q", "-m", "tiny clean-deploy fixture")
+    assert seed.returncode == 0, seed.stderr
+
+    parent_branch = integration_branch_name("parent")
+    child_task_id = "v5-child"
+    child_branch = child_branch_name(child_task_id)
+    _git(repo, "branch", parent_branch, "main")
+    _git(repo, "checkout", "-q", parent_branch)
+    (repo / "backend" / "main.py").write_text(
+        "def route() -> str:\n"
+        "    return 'parent'\n",
+        encoding="utf-8",
+    )
+    parent_commit = _git(repo, "commit", "-am", "parent edits shared route")
+    assert parent_commit.returncode == 0, parent_commit.stderr
+
+    child_worktree = tmp_path / "child-wt"
+    add_child = _git(repo, "worktree", "add", "-q", "-b", child_branch, str(child_worktree), "main")
+    assert add_child.returncode == 0, add_child.stderr
+    (child_worktree / "backend" / "main.py").write_text(
+        "def route() -> str:\n"
+        "    return 'child'\n",
+        encoding="utf-8",
+    )
+    _git(child_worktree, "add", "backend/main.py")
+    child_commit = _git(child_worktree, "commit", "-q", "-m", "child edits shared route")
+    assert child_commit.returncode == 0, child_commit.stderr
+
+    record_task(repo, task_id="root", intent="root", parent_task_id=None)
+    record_task(
+        repo,
+        task_id=child_task_id,
+        intent="edit shared route",
+        parent_task_id="root",
+        integration_branch=parent_branch,
+    )
+    set_verdict(repo, child_task_id, "pass", cost_usd=0.1)
+
+    agent_packets: list[dict[str, Any]] = []
+
+    async def fake_run_agent_with_timeout(
+        prompt: str,
+        options: Any,
+        **kwargs: Any,
+    ) -> tuple[str, float, str, dict[str, Any]]:
+        del options, kwargs
+        from otto.v5_clean_verify import verify_from_clean_oracle
+        from otto.v5_preflight_repair import append_repair_packet_oracle_event
+
+        packet_path = _repair_packet_path_from_prompt(prompt)
+        packet_payload = json.loads(packet_path.read_text(encoding="utf-8"))
+        agent_packets.append(packet_payload)
+
+        if len(agent_packets) == 1:
+            merge = _git(child_worktree, "merge", "--no-ff", "--no-commit", parent_branch)
+            assert merge.returncode != 0, merge.stdout + merge.stderr
+            (child_worktree / "backend" / "main.py").write_text(
+                "def route() -> str:\n"
+                "    return 'parent+child'\n",
+                encoding="utf-8",
+            )
+            _git(child_worktree, "add", "backend/main.py")
+            (child_worktree / "docs").mkdir()
+            (child_worktree / "docs" / "stray.md").write_text(
+                "unrelated composite-gate violation\n",
+                encoding="utf-8",
+            )
+            oracle = verify_from_clean_oracle(child_worktree, scope="subtree")
+            assert oracle.passed is True
+            append_repair_packet_oracle_event(packet_path, oracle, source="agent-test")
+            return "resolved markers but left an unrelated file", 0.01, "sess-conflict", {}
+
+        gate = packet_payload["current_state"].get("latest_composite_gate")
+        assert gate is not None
+        assert gate["passed"] is False
+        assert gate["reasons"]
+        assert "docs/" in json.dumps(gate, sort_keys=True)
+        (child_worktree / "docs" / "stray.md").unlink()
+        oracle = verify_from_clean_oracle(child_worktree, scope="subtree")
+        assert oracle.passed is True
+        append_repair_packet_oracle_event(packet_path, oracle, source="agent-test")
+        return "removed unrelated file after composite feedback", 0.01, "sess-conflict", {}
+
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+    monkeypatch.setattr(
+        v5_runner,
+        "_run_integration_smoke_preflight_with_repair",
+        _passing_smoke_preflight,
+    )
+
+    result = LeadResult(task_id=child_task_id, verdict="pass", cost_usd=0.1)
+    await v5_runner._merge_child_branch(
+        project_dir=repo,
+        child_task_id=child_task_id,
+        child_worktree=child_worktree,
+        child_session_dir=tmp_path / "session",
+        parent_integration_branch=parent_branch,
+        result=result,
+        config={
+            "default_branch": "main",
+            "merge_repair_agent_turns": 2,
+            "merge_repair_oracle_invocations": 6,
+            "merge_repair_oracle_timeout_s": 30,
+        },
+        on_event=events.append,
+    )
+
+    assert result.verdict == "pass"
+    assert len(agent_packets) == 2
+    assert _git(repo, "show", f"{parent_branch}:backend/main.py").stdout == (
+        "def route() -> str:\n"
+        "    return 'parent+child'\n"
+    )
+    assert _git(repo, "cat-file", "-e", f"{parent_branch}:docs/stray.md").returncode != 0
+
+    start_event = next(e for e in events if e.get("event") == "merge_conflict_repair_agent_start")
+    packet_path = Path(start_event["repair_packet"])
+    packet_events = [
+        json.loads(line)
+        for line in (packet_path.parent / "repair_packet.events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    composite_events = [
+        row for row in packet_events if row["event"].get("type") == "composite_gate"
+    ]
+    assert composite_events
+    assert composite_events[0]["event"]["passed"] is False
+    assert composite_events[0]["event"]["reasons"]
+    assert "docs/" in json.dumps(composite_events[0]["event"], sort_keys=True)
+    agent_turns = [row for row in packet_events if row["event"].get("type") == "agent_turn"]
+    assert len(agent_turns) == 2
+    assert composite_events[0]["seq"] < agent_turns[1]["seq"]
 
 
 @pytest.mark.asyncio
