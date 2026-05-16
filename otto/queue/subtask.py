@@ -239,7 +239,7 @@ def _globally_non_runnable_task_ids(project_dir: Path) -> set[str]:
     terminal for the planning Lead's own dispatch: that Lead already emitted
     children and must not be picked up again by a sibling scheduler loop.
     """
-    from otto.queue.task_graph import read_graph
+    from otto.queue.task_graph import contract_amendment_retry_is_stale, read_graph
 
     try:
         graph = read_graph(project_dir)
@@ -247,7 +247,11 @@ def _globally_non_runnable_task_ids(project_dir: Path) -> set[str]:
         return set()
     done: set[str] = set()
     for tid, t in (graph.get("tasks") or {}).items():
-        if isinstance(t, dict) and t.get("contract_amendment_retry_in_progress"):
+        if (
+            isinstance(t, dict)
+            and t.get("contract_amendment_retry_in_progress")
+            and not contract_amendment_retry_is_stale(t)
+        ):
             done.add(tid)
             continue
         verdict = t.get("verdict")

@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import pytest
@@ -413,6 +414,186 @@ async def test_merge_retry_window_is_durably_non_ready_before_pass(
     assert leaf["verdict"] == "pass"
     assert leaf["contract_amendment_retry_merge"] is False
     assert leaf["contract_amendment_retry_in_progress"] is False
+
+
+@pytest.mark.asyncio
+async def test_merge_retry_atomic_claim_allows_exactly_one_merger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_root_with_contract(tmp_path)
+    _enqueue_known(tmp_path, task_id="leaf", owned_paths=["frontend/src/features/comments/"])
+    record_task(
+        tmp_path,
+        task_id="amendment",
+        parent_task_id=ROOT_TASK_ID,
+        intent="amendment",
+        integration_branch="i2p/root/integration",
+        owned_paths=["frontend/src/lib/ws.ts"],
+        task_role="contract_amendment",
+    )
+    set_verdict(tmp_path, "leaf", "pass")
+    set_contract_amendment_blocked(
+        tmp_path,
+        "leaf",
+        "amendment",
+        merge_context={
+            "child_session_dir": str(tmp_path / "otto_logs" / "sessions" / "leaf"),
+            "parent_integration_branch": "i2p/root/integration",
+        },
+    )
+    set_verdict(tmp_path, "amendment", "pass")
+    v5_runner._settle_contract_amendment_dependents(
+        project_dir=tmp_path,
+        amendment_id="amendment",
+        amendment_result=LeadResult(task_id="amendment", verdict="pass", decomposition="inline"),
+        completed={"leaf"},
+        child_results={"leaf": LeadResult(task_id="leaf", verdict="pass", decomposition="inline")},
+    )
+    leaf_entry = next(
+        entry
+        for entry in take_ready(tmp_path, completed_task_ids=set(), in_flight_task_ids=set())
+        if entry["task_id"] == "leaf"
+    )
+
+    monkeypatch.setattr(v5_branching, "setup_child_worktree", lambda **_kwargs: tmp_path)
+    merge_calls: list[str] = []
+    loser_results: list[LeadResult] = []
+
+    async def merge_once(**_kwargs: object) -> None:
+        merge_calls.append("winner")
+        loser_results.append(
+            await v5_runner._run_child(
+                project_dir=tmp_path,
+                entry=leaf_entry,
+                config={},
+                max_parallel=1,
+                on_event=None,
+            )
+        )
+
+    monkeypatch.setattr(v5_runner, "_merge_child_branch", merge_once)
+
+    winner = await v5_runner._run_child(
+        project_dir=tmp_path,
+        entry=leaf_entry,
+        config={},
+        max_parallel=1,
+        on_event=None,
+    )
+
+    leaf = get_task(tmp_path, "leaf") or {}
+    assert winner.verdict == "pass"
+    assert [result.verdict for result in loser_results] == ["unverified"]
+    assert loser_results[0].failure_reason == (
+        "contract amendment merge-only retry is already claimed by another runner"
+    )
+    assert merge_calls == ["winner"]
+    assert leaf["verdict"] == "pass"
+    assert leaf["contract_amendment_retry_merge"] is False
+    assert leaf["contract_amendment_retry_in_progress"] is False
+
+
+@pytest.mark.asyncio
+async def test_stale_merge_retry_is_recovered_or_bounded_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _record_root_with_contract(tmp_path)
+    monkeypatch.setattr(v5_branching, "setup_child_worktree", lambda **_kwargs: tmp_path)
+    recovered_merges: list[str] = []
+
+    async def successful_merge(**kwargs: object) -> None:
+        recovered_merges.append(str(kwargs["child_task_id"]))
+
+    monkeypatch.setattr(v5_runner, "_merge_child_branch", successful_merge)
+
+    for leaf_id in ("recover-leaf", "exhausted-leaf"):
+        _enqueue_known(tmp_path, task_id=leaf_id, owned_paths=[f"frontend/src/features/{leaf_id}/"])
+        record_task(
+            tmp_path,
+            task_id=f"amendment-{leaf_id}",
+            parent_task_id=ROOT_TASK_ID,
+            intent=f"amendment-{leaf_id}",
+            integration_branch="i2p/root/integration",
+            owned_paths=["frontend/src/lib/ws.ts"],
+            task_role="contract_amendment",
+        )
+        set_verdict(tmp_path, leaf_id, "pass")
+        set_contract_amendment_blocked(
+            tmp_path,
+            leaf_id,
+            f"amendment-{leaf_id}",
+            merge_context={
+                "child_session_dir": str(tmp_path / "otto_logs" / "sessions" / leaf_id),
+                "parent_integration_branch": "i2p/root/integration",
+            },
+        )
+        set_verdict(tmp_path, f"amendment-{leaf_id}", "pass")
+        v5_runner._settle_contract_amendment_dependents(
+            project_dir=tmp_path,
+            amendment_id=f"amendment-{leaf_id}",
+            amendment_result=LeadResult(task_id=f"amendment-{leaf_id}", verdict="pass", decomposition="inline"),
+            completed={leaf_id},
+            child_results={leaf_id: LeadResult(task_id=leaf_id, verdict="pass", decomposition="inline")},
+        )
+        update_task_metadata(
+            tmp_path,
+            leaf_id,
+            contract_amendment_retry_in_progress=True,
+            contract_amendment_retry_owner="dead-owner",
+            contract_amendment_retry_owner_pid=999999,
+            contract_amendment_retry_owner_host=socket.gethostname(),
+            contract_amendment_retry_merge_started_at="1970-01-01T00:00:00Z",
+            contract_amendment_retry_heartbeat_at="1970-01-01T00:00:00Z",
+            contract_amendment_retry_claim_count=1
+            if leaf_id == "recover-leaf"
+            else 2,
+            contract_amendment_retry_max_claims=2,
+        )
+
+    ready_by_id = {
+        entry["task_id"]: entry
+        for entry in take_ready(tmp_path, completed_task_ids=set(), in_flight_task_ids=set())
+    }
+    assert "recover-leaf" in ready_by_id
+    assert "exhausted-leaf" in ready_by_id
+    assert (get_task(tmp_path, "recover-leaf") or {})["contract_amendment_retry_merge"] is True
+    assert (get_task(tmp_path, "exhausted-leaf") or {})["contract_amendment_retry_merge"] is True
+
+    recovered = await v5_runner._run_child(
+        project_dir=tmp_path,
+        entry=ready_by_id["recover-leaf"],
+        config={},
+        max_parallel=1,
+        on_event=None,
+    )
+    exhausted = await v5_runner._run_child(
+        project_dir=tmp_path,
+        entry=ready_by_id["exhausted-leaf"],
+        config={},
+        max_parallel=1,
+        on_event=None,
+    )
+
+    recovered_leaf = get_task(tmp_path, "recover-leaf") or {}
+    exhausted_leaf = get_task(tmp_path, "exhausted-leaf") or {}
+    assert recovered.verdict == "pass"
+    assert recovered_leaf["verdict"] == "pass"
+    assert recovered_leaf["contract_amendment_retry_claim_count"] == 2
+    assert recovered_leaf["contract_amendment_retry_merge"] is False
+    assert exhausted.verdict == "merge_blocked"
+    assert exhausted_leaf["verdict"] == "merge_blocked"
+    assert exhausted_leaf["merge_blocked_origin"] == "contract_amendment"
+    assert exhausted_leaf["merge_blocked_structured_reason"]["kind"] == (
+        "contract_amendment_retry_claims_exhausted"
+    )
+    assert exhausted_leaf["contract_amendment_retry_merge"] is False
+    assert "exhausted-leaf" not in {
+        entry["task_id"]
+        for entry in take_ready(tmp_path, completed_task_ids=set(), in_flight_task_ids=set())
+    }
+    assert recovered_merges == ["recover-leaf"]
 
 
 @pytest.mark.asyncio

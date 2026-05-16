@@ -91,6 +91,7 @@ from otto.queue.task_graph import (
     set_contract_amendment_blocked,
     set_verdict,
     set_verdict_and_metadata,
+    terminalize_stale_contract_amendment_retry_if_exhausted,
     tree_total_cost,
     update_task_metadata,
 )
@@ -980,6 +981,63 @@ def _persist_successful_contract_amendment_retry(
         "event": "contract_amendment_leaf_retry_verdict_restored",
         "task_id": task_id,
         "verdict": terminal_verdict,
+    })
+    return True
+
+
+def _terminalize_stale_contract_amendment_retry_if_exhausted(
+    *,
+    project_dir: Path,
+    task_id: str,
+    result: LeadResult,
+    on_event: Any = None,
+) -> bool:
+    latest = get_task(project_dir, task_id) or {}
+    try:
+        claim_count = int(latest.get("contract_amendment_retry_claim_count") or 0)
+    except (TypeError, ValueError):
+        claim_count = 0
+    try:
+        max_claims = int(latest.get("contract_amendment_retry_max_claims") or 2)
+    except (TypeError, ValueError):
+        max_claims = 2
+    reason = (
+        "contract amendment merge-only retry owner became stale and retry "
+        f"claim budget was exhausted ({claim_count}/{max_claims}); refusing "
+        "ordinary redispatch"
+    )
+    structured_reason = {
+        "kind": "contract_amendment_retry_claims_exhausted",
+        "step_id": "foundation_contract_amendment_retry",
+        "message": reason,
+        "task_id": task_id,
+        "claim_count": claim_count,
+        "max_claims": max_claims,
+        "retry_owner": latest.get("contract_amendment_retry_owner"),
+        "retry_owner_pid": latest.get("contract_amendment_retry_owner_pid"),
+        "retry_owner_host": latest.get("contract_amendment_retry_owner_host"),
+        "retry_heartbeat_at": latest.get("contract_amendment_retry_heartbeat_at"),
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if not terminalize_stale_contract_amendment_retry_if_exhausted(
+        project_dir,
+        task_id,
+        reason=reason,
+        structured_reason=structured_reason,
+    ):
+        return False
+    result.verdict = "merge_blocked"
+    result.failure_reason = reason
+    result.verify_called = True
+    result.verify_result = {
+        "verdict": "merge_blocked",
+        "summary": reason,
+        "structured_reason": structured_reason,
+    }
+    _emit(on_event, {
+        "event": "contract_amendment_leaf_retry_claims_exhausted",
+        "task_id": task_id,
+        "structured_reason": structured_reason,
     })
     return True
 
@@ -4581,7 +4639,33 @@ async def _run_child(
             decomposition=str(task_entry.get("decomposition") or "inline"),
             verify_called=True,
         )
-        mark_contract_amendment_retry_in_progress(project_dir, tid)
+        claimed = mark_contract_amendment_retry_in_progress(
+            project_dir,
+            tid,
+            owner_id=child_session_id,
+        )
+        if not claimed:
+            if _terminalize_stale_contract_amendment_retry_if_exhausted(
+                project_dir=project_dir,
+                task_id=tid,
+                result=retry_result,
+                on_event=on_event,
+            ):
+                return retry_result
+            retry_result.verdict = "unverified"
+            retry_result.failure_reason = (
+                "contract amendment merge-only retry is already claimed by another runner"
+            )
+            retry_result.verify_result = {
+                "verdict": "unverified",
+                "summary": retry_result.failure_reason,
+                "phase": "contract_amendment_retry_claim",
+            }
+            _emit(on_event, {
+                "event": "contract_amendment_leaf_merge_retry_claim_skipped",
+                "task_id": tid,
+            })
+            return retry_result
         _emit(on_event, {
             "event": "contract_amendment_leaf_merge_retry",
             "task_id": tid,

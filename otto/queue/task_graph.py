@@ -36,10 +36,12 @@ calls under load do not race.
 
 from __future__ import annotations
 
+import calendar
 import contextlib
 import fcntl
 import json
 import os
+import socket
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -63,6 +65,8 @@ Verdict = Literal[
 Decomposition = Literal["inline", "emit", "pending", "unknown"]
 TaskRole = Literal["foundation", "feature", "contract_amendment", "integration"]
 TASK_ROLES: set[str] = {"foundation", "feature", "contract_amendment", "integration"}
+CONTRACT_AMENDMENT_RETRY_MAX_CLAIMS = 2
+CONTRACT_AMENDMENT_RETRY_STALE_SECONDS = 15 * 60
 
 
 def task_graph_path(project_dir: Path) -> Path:
@@ -72,6 +76,56 @@ def task_graph_path(project_dir: Path) -> Path:
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _parse_iso_seconds(value: Any) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return calendar.timegm(time.strptime(value.strip(), "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _pid_is_running(pid: Any) -> bool:
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid_int <= 0:
+        return False
+    try:
+        os.kill(pid_int, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def contract_amendment_retry_is_stale(
+    task: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    """Return whether an in-progress merge-only retry can be reclaimed."""
+    if not task.get("contract_amendment_retry_in_progress"):
+        return False
+    if not task.get("contract_amendment_retry_merge"):
+        return False
+    now = time.time() if now is None else now
+    owner_host = str(task.get("contract_amendment_retry_owner_host") or "")
+    if owner_host == socket.gethostname():
+        owner_pid = task.get("contract_amendment_retry_owner_pid")
+        if owner_pid is not None and not _pid_is_running(owner_pid):
+            return True
+    heartbeat = (
+        _parse_iso_seconds(task.get("contract_amendment_retry_heartbeat_at"))
+        or _parse_iso_seconds(task.get("contract_amendment_retry_merge_started_at"))
+    )
+    if heartbeat is None:
+        return True
+    return now - heartbeat > CONTRACT_AMENDMENT_RETRY_STALE_SECONDS
 
 
 def _empty_graph() -> dict[str, Any]:
@@ -388,8 +442,10 @@ def clear_contract_amendment_blocked_tasks(
 def mark_contract_amendment_retry_in_progress(
     project_dir: Path,
     task_id: str,
+    *,
+    owner_id: str | None = None,
 ) -> bool:
-    """Durably mark a merge-only amendment retry as non-dispatchable."""
+    """Atomically claim a merge-only amendment retry under the task-graph lock."""
     with _locked_graph(project_dir) as (_path, graph):
         task = graph["tasks"].get(task_id)
         if not isinstance(task, dict):
@@ -400,8 +456,94 @@ def mark_contract_amendment_retry_in_progress(
             return False
         if not task.get("contract_amendment_retry_merge"):
             return False
+        if task.get("contract_amendment_retry_in_progress"):
+            if not contract_amendment_retry_is_stale(task):
+                return False
+            try:
+                claim_count = int(task.get("contract_amendment_retry_claim_count") or 0)
+            except (TypeError, ValueError):
+                claim_count = 0
+            try:
+                max_claims = int(
+                    task.get("contract_amendment_retry_max_claims")
+                    or CONTRACT_AMENDMENT_RETRY_MAX_CLAIMS
+                )
+            except (TypeError, ValueError):
+                max_claims = CONTRACT_AMENDMENT_RETRY_MAX_CLAIMS
+            if claim_count >= max_claims:
+                return False
+        else:
+            try:
+                claim_count = int(task.get("contract_amendment_retry_claim_count") or 0)
+            except (TypeError, ValueError):
+                claim_count = 0
+            max_claims = CONTRACT_AMENDMENT_RETRY_MAX_CLAIMS
         task["contract_amendment_retry_in_progress"] = True
-        task["contract_amendment_retry_merge_started_at"] = _now_iso()
+        now = _now_iso()
+        claim_count += 1
+        owner_token = owner_id or f"{socket.gethostname()}:{os.getpid()}:{now}:{claim_count}"
+        task["contract_amendment_retry_merge_started_at"] = now
+        task["contract_amendment_retry_heartbeat_at"] = now
+        task["contract_amendment_retry_owner"] = owner_token
+        task["contract_amendment_retry_owner_pid"] = os.getpid()
+        task["contract_amendment_retry_owner_host"] = socket.gethostname()
+        task["contract_amendment_retry_claim_count"] = claim_count
+        task["contract_amendment_retry_max_claims"] = max_claims
+        merge_context = task.get("contract_amendment_merge_context")
+        if not isinstance(merge_context, dict):
+            merge_context = {}
+        merge_context = dict(merge_context)
+        merge_context["retry_owner"] = owner_token
+        merge_context["retry_claim_count"] = claim_count
+        merge_context["retry_claimed_at"] = now
+        task["contract_amendment_merge_context"] = merge_context
+        return True
+
+
+def terminalize_stale_contract_amendment_retry_if_exhausted(
+    project_dir: Path,
+    task_id: str,
+    *,
+    reason: str,
+    structured_reason: dict[str, Any],
+) -> bool:
+    """Persist merge_blocked when stale retry claims are exhausted."""
+    with _locked_graph(project_dir) as (_path, graph):
+        task = graph["tasks"].get(task_id)
+        if not isinstance(task, dict):
+            return False
+        if task.get("blocked_pending_contract_amendment") or task.get("blocked_on_task_id"):
+            return False
+        if task.get("verdict") in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}:
+            return False
+        if not task.get("contract_amendment_retry_merge"):
+            return False
+        if not task.get("contract_amendment_retry_in_progress"):
+            return False
+        if not contract_amendment_retry_is_stale(task):
+            return False
+        try:
+            claim_count = int(task.get("contract_amendment_retry_claim_count") or 0)
+        except (TypeError, ValueError):
+            claim_count = 0
+        try:
+            max_claims = int(
+                task.get("contract_amendment_retry_max_claims")
+                or CONTRACT_AMENDMENT_RETRY_MAX_CLAIMS
+            )
+        except (TypeError, ValueError):
+            max_claims = CONTRACT_AMENDMENT_RETRY_MAX_CLAIMS
+        if claim_count < max_claims:
+            return False
+        task["verdict"] = "merge_blocked"
+        task["completed_at"] = _now_iso()
+        task["failure_reason"] = reason
+        task["merge_blocked_origin"] = "contract_amendment"
+        task["merge_blocked_reason"] = reason
+        task["merge_blocked_structured_reason"] = dict(structured_reason)
+        task["contract_amendment_retry_merge"] = False
+        task["contract_amendment_retry_in_progress"] = False
+        task["contract_amendment_retry_exhausted_at"] = _now_iso()
         return True
 
 
