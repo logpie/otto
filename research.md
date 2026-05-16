@@ -1870,3 +1870,108 @@ Base: `e7ca4406b`
   `verdict="blocked"` and a structured reason payload when the compile failure
   exposes one. This keeps compile terminal state structured without changing
   merge/v5 runner code.
+
+---
+
+# Research — compile-agent NON-CONVERGENCE on large intents (2026-05-16)
+
+_Author: Claude. Status: for user review BEFORE any plan. This is a
+DIFFERENT, deeper issue than the timeout-robustness fix above — that fix
+only makes this fail honestly; it does not make the agent converge._
+
+## Symptom
+
+iTracker capstone (47-feature Linear-lite intent) crashes in spec-compile.
+Two independent live runs, deterministic, identical:
+
+| Run | spec_timeout | msgs | Write calls | thinking chars | text chars | outcome |
+|-----|-------------:|-----:|------------:|---------------:|-----------:|---------|
+| seamfix-010431  | 600s  | 14 | **0** | 28,787 | 60 | crash `Timed out after 600s` |
+| seamfix2-011925 | 1800s | 19 | **0** | 26,895 | 0  | crash `Timed out after 1800s` |
+
+The agent **never emits the spec by ANY channel** (no `Write` to
+`spec.json`, no `<spec_json>` text, no structured output) — only
+`thinking` blocks. 3× the time did not help; it produced more
+"Let me write the spec JSON now" cycles with ~500s silent reasoning gaps:
+
+```
+[68s]   thinking 6900c  analyze intent…             → ToolSearch
+[74s]   Read intent.md, Read otto.yaml
+[276s]  thinking 19580c "…Let me write the spec JSON. design groups: 1 foundation…" → ToolSearch
+[278s]  thinking 88c    "…I'll be thorough and carefully structured."
+[773s]  thinking 67c    "Let me write the spec JSON now. I'll write it directly to the file."
+[1288s] thinking 67c    "Let me write the spec JSON now. I'll write it directly to the file."
+(timeout)
+```
+
+Non-convergence, not slow generation.
+
+## Code path
+
+- `compile_spec()` → bounded retry → `_run_compile_agent(attempt,timeout)`
+  → `run_agent_with_timeout()`.
+- Agent = `make_agent_options(agent_type="spec")`: claude_code **preset**
+  SDK, provider `claude`, model **sonnet**, `max_turns=200`. **No
+  thinking-budget / max-output cap, no structured_output schema** for the
+  spec agent.
+- Emission priority: (1) structured `spec_json` field — **not wired** via
+  options; (2) `spec_path.exists()` (Write tool); (3) `<spec_json>` in
+  text. In both failures: none occurred.
+- Prompt: `otto/prompts/compile-spec.md` (**1010 lines**) +
+  `compile-spec-structured-output.md`. Says *"A single JSON object … Write
+  the JSON to `{spec_path}`"*. **No incremental/staged emission, no
+  deliberation bound, no early-write mandate.**
+- `max_turns=200` never approached (14–19 msgs); each turn ≈ 500s of
+  extended thinking. Wall-clock is the only cap that bites.
+
+## Root-cause hypotheses (ranked, evidence-tagged)
+
+- **H1 (strong) — single-shot emission of a very large spec does not
+  converge.** Told to produce ONE giant JSON and `Write` it once; under
+  extended-thinking sonnet it composes/refines mentally forever, never
+  commits. 0 emissions ×2 + ~27K thinking + repeated "I'll write it now"
+  + ~500s silent gaps.
+- **H2 (strong, contributing) — prompt does not bound deliberation or
+  force progressive emission.** 1010-line prompt, no "skeleton first /
+  write early / stop deliberating".
+- **H3 (contributing) — structured-output channel not wired.** Emission
+  depends on one massive Write input or huge `<spec_json>` text — large
+  atomic generations the model fails to finish.
+- **H4 (unlikely; needs control) — general compile breakage.** Smaller
+  runs produced specs; size is the suspected variable, unconfirmed.
+
+## Constraints
+
+- Agile: NO 90-min capstone iteration. Fast deterministic real-code-path
+  controls/repro only.
+- Timeout fix (`798b0a0d4→a75677088`, gate APPROVED) is orthogonal and
+  correct; it makes this fail honestly, not converge.
+- Must not regress small/medium intents (work today) or brownfield.
+- `v5_runner.py` / merge / seam fixes out of scope.
+
+## Open questions (proposed fast validation — for the plan)
+
+1. Control A (~1–2 min): does a *small* intent compile fast with a normal
+   `Write`? Isolates "large intent"; rules H4 in/out.
+2. Control B (~3–9 min, fixed code): iTracker intent at
+   `spec_timeout≈180`, 3 bounded attempts → expect same non-emission loop
+   fast + the new honest terminal. Permanent agile RED repro.
+3. Threshold: at what intent/feature size does convergence break
+   (medium intent)? "Always incremental" vs "incremental above N".
+
+## Candidate fix directions (NOT decided — for discussion)
+
+- **Staged/incremental compile (most promising):** Write a skeleton
+  (groups + deps + shared scaffold) first, then fill features per group
+  across bounded turns — N tractable artifacts, durable on-disk progress
+  each turn, instead of one impossible one.
+- **Prompt hardening:** mandate "write `{spec_path}` early, then refine
+  in place; do not compose the whole spec before writing"; bound
+  deliberation.
+- **Wire a real `spec_json` structured-output schema** so emission is a
+  first-class field, not a giant tool input.
+- **Bound extended thinking** for the compile agent (effort/thinking
+  budget) so it cannot reason indefinitely without acting.
+
+Likely core = staged compile + prompt hardening; others reinforce. Not
+mutually exclusive.
