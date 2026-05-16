@@ -2287,3 +2287,11 @@ log context), confirm RED, then Codex implements the root fixes
 (correctness-critical) under the Plan Gate + Implementation Gate. Fix
 order driven by dependency: A+loophole & the runtime `task_role`
 primitive first (unblocks 1/4/5), then B, C independently.
+
+---
+
+## S1 implementation note (2026-05-16T19:26:14Z)
+
+- S1 consumes the S0 task graph primitive: parent `foundation_contracts` via `_parent_task_id_for_child`, with a compatibility fallback for architect/foundation children that already carry contract metadata.
+- Runner-managed write admissions found by `rg "commit_worktree\(|commit_integration_worktree\(" otto/v5_runner.py`: preflight repair, integration-agent commit, root inline commit, subtree propagation repair, child verify repair, scaffold repair, child dirty/untracked commit, merge conflict repair. S1 applies one shared foundation-contract write gate to each site, plus pre-merge committed child branch delta checks before merge advancement.
+- S1 stays scoped: no amendment lifecycle, semantic union, smoke split, or clean-verify env behavior.

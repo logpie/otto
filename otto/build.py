@@ -600,6 +600,15 @@ def detect_scope_violations(
             peer_globs.extend(c.owned_paths or [])
 
     violations: list[str] = []
+    critical_contract_paths: list[str] = []
+    for contract in (getattr(spec, "shared_contracts", []) or []):
+        if (
+            getattr(contract, "critical", False)
+            and getattr(contract, "owner_id", "") != group_obj.id
+        ):
+            critical_contract_paths.extend(
+                str(path) for path in (getattr(contract, "paths", []) or [])
+            )
     for raw in modified_paths:
         path = str(raw or "").strip()
         if not path:
@@ -609,6 +618,9 @@ def detect_scope_violations(
             or is_otto_owned_path(path)
             or is_common_build_artifact_path(path)
         ):
+            continue
+        if _matches_any(path, critical_contract_paths):
+            violations.append(path)
             continue
         if _matches_any(path, own_globs):
             continue

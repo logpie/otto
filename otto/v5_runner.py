@@ -492,6 +492,71 @@ def _git_diff_name_only(worktree: Path) -> list[str]:
     return sorted(dict.fromkeys(paths))
 
 
+def _foundation_contract_write_feedback(
+    *,
+    project_dir: Path,
+    acting_task_id: str,
+    parent_integration_branch: str,
+    changed_paths: list[str],
+    operation: str,
+) -> dict[str, Any] | None:
+    normalized_changes = [
+        _normalize_contract_path(path)
+        for path in changed_paths
+        if _normalize_contract_path(path)
+    ]
+    if not normalized_changes:
+        return None
+    parent_id = (
+        ROOT_TASK_ID
+        if acting_task_id == ROOT_TASK_ID
+        else _parent_task_id_for_child(project_dir, acting_task_id, parent_integration_branch)
+    )
+    graph = read_graph(project_dir)
+    tasks = graph.get("tasks") or {}
+    contracts = _foundation_contracts_for_parent(project_dir, parent_id, tasks)
+    if not contracts:
+        return None
+    task = get_task(project_dir, acting_task_id) or {}
+    role = str(task.get("task_role") or "feature")
+    violations: list[dict[str, Any]] = []
+    for contract in contracts:
+        contract_path = _normalize_contract_path(str(contract.get("path") or ""))
+        owner_id = str(contract.get("owner_task_id") or "").strip()
+        if not contract_path:
+            continue
+        if acting_task_id == owner_id or role == "contract_amendment":
+            continue
+        overlapping = [path for path in normalized_changes if _path_overlaps(path, contract_path)]
+        if overlapping:
+            violations.append({
+                "contract_path": contract_path,
+                "owner_task_id": owner_id,
+                "changed_paths": overlapping,
+            })
+    if not violations:
+        return None
+    return {
+        "kind": "foundation_contract_write_blocked",
+        "step_id": "foundation_contract_write_gate",
+        "message": "non-owner task attempted to write a foundation contract path",
+        "task_id": acting_task_id,
+        "task_role": role,
+        "parent_task_id": parent_id,
+        "parent_integration_branch": parent_integration_branch,
+        "operation": operation,
+        "violations": violations,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def _foundation_contract_write_block_detail(feedback: dict[str, Any]) -> str:
+    try:
+        return json.dumps(feedback, sort_keys=True)
+    except TypeError:
+        return str(feedback)
+
+
 def _git_diff_full(worktree: Path, *, max_chars: int = 60000) -> str:
     text = _git_capture(worktree, ["diff", "--", "."], timeout=20)
     if len(text) <= max_chars:
@@ -602,6 +667,87 @@ def _parent_task_id_for_child(
     if parent_task_id:
         return parent_task_id
     return _task_id_for_integration_branch(project_dir, parent_integration_branch)
+
+
+def _normalize_contract_path(path: str) -> str:
+    normalized = str(path or "").strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.strip("/")
+
+
+def _path_overlaps(lhs: str, rhs: str) -> bool:
+    left = _normalize_contract_path(lhs)
+    right = _normalize_contract_path(rhs)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return left.startswith(f"{right}/") or right.startswith(f"{left}/")
+
+
+def _task_owned_paths(task: dict[str, Any]) -> list[str]:
+    return [
+        _normalize_contract_path(path)
+        for path in (task.get("owned_paths") or [])
+        if _normalize_contract_path(str(path))
+    ]
+
+
+def _is_foundation_task(task: dict[str, Any]) -> bool:
+    if task.get("task_role") == "foundation":
+        return True
+    intent = str(task.get("intent") or "").lstrip().lower()
+    return intent.startswith("architect") or intent.startswith("scaffold")
+
+
+def _foundation_contracts_for_parent(
+    project_dir: Path,
+    parent_task_id: str,
+    tasks: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    tasks = tasks if tasks is not None else (read_graph(project_dir).get("tasks") or {})
+    parent = tasks.get(parent_task_id) if isinstance(tasks, dict) else None
+    raw = parent.get("foundation_contracts") if isinstance(parent, dict) else None
+    contracts = [dict(item) for item in (raw or []) if isinstance(item, dict)]
+    if contracts:
+        return contracts
+    # Compatibility with early S0 repros: parent metadata is authoritative, but
+    # a passed foundation child may still carry the contracts before persistence.
+    for task_id, task in (tasks or {}).items():
+        if not isinstance(task, dict):
+            continue
+        if task.get("parent_task_id") != parent_task_id:
+            continue
+        if not _is_foundation_task(task):
+            continue
+        raw_child = task.get("foundation_contracts")
+        for item in raw_child or []:
+            if isinstance(item, dict):
+                contract = dict(item)
+                contract.setdefault("owner_task_id", str(task_id))
+                contracts.append(contract)
+    return contracts
+
+
+def _foundation_contract_findings(contracts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, contract in enumerate(contracts):
+        path = _normalize_contract_path(str(contract.get("path") or ""))
+        owner = str(contract.get("owner_task_id") or "").strip()
+        check = str(contract.get("check") or "").strip()
+        if not path:
+            findings.append({"index": index, "field": "path", "detail": "missing path"})
+        if not owner:
+            findings.append({"index": index, "field": "owner_task_id", "detail": "missing owner_task_id"})
+        if check not in {"literal", "semantic"}:
+            findings.append({"index": index, "field": "check", "detail": "check must be literal or semantic"})
+        if path:
+            if path in seen:
+                findings.append({"index": index, "field": "path", "detail": f"duplicate contract path {path}"})
+            seen.add(path)
+    return findings
 
 
 def _integration_union_empty_state(parent_integration_branch: str) -> dict[str, Any]:
@@ -1378,6 +1524,24 @@ async def _run_preflight_payload_repair_session(
     async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
         from otto.v5_branching import commit_integration_worktree
 
+        feedback = _foundation_contract_write_feedback(
+            project_dir=project_dir,
+            acting_task_id=task_id,
+            parent_integration_branch=integration_branch or _branch_checked_out(worktree_path) or "main",
+            changed_paths=_git_diff_name_only(worktree_path),
+            operation=f"{repair_phase}_repair_commit",
+        )
+        if feedback is not None:
+            detail = _foundation_contract_write_block_detail(feedback)
+            _emit(on_event, {
+                "event": f"{event_prefix}_repair_commit_failed",
+                "task_id": task_id,
+                "repair_phase": repair_phase,
+                "worktree": str(worktree_path),
+                "detail": detail,
+                "structured_reason": feedback,
+            })
+            return False, detail
         commit_ok, commit_detail = commit_integration_worktree(
             worktree_path=worktree_path,
             task_id=f"{task_id}-{repair_phase}",
@@ -1506,6 +1670,31 @@ def _commit_integration_agent_changes(
         return
     from otto.v5_branching import commit_integration_worktree
 
+    feedback = _foundation_contract_write_feedback(
+        project_dir=project_dir,
+        acting_task_id=task_id,
+        parent_integration_branch=_integration_restore_branch(project_dir, task_id, {}),
+        changed_paths=_git_diff_name_only(worktree_path),
+        operation="integration_agent_commit",
+    )
+    if feedback is not None:
+        detail = _foundation_contract_write_block_detail(feedback)
+        _emit(on_event, {
+            "event": "integration_commit_failed",
+            "task_id": task_id,
+            "worktree": str(worktree_path),
+            "detail": detail,
+            "structured_reason": feedback,
+        })
+        _record_task_merge_blocked_reason(
+            project_dir=project_dir,
+            task_id=task_id,
+            result=result,
+            reason=detail,
+            origin="foundation_contract_write_gate",
+            structured_reason=feedback,
+        )
+        return
     ok, detail = commit_integration_worktree(
         worktree_path=worktree_path,
         task_id=task_id,
@@ -1552,6 +1741,31 @@ def _commit_root_inline_changes(
         result.verdict = "merge_blocked"
         return
 
+    feedback = _foundation_contract_write_feedback(
+        project_dir=project_dir,
+        acting_task_id=ROOT_TASK_ID,
+        parent_integration_branch=root_branch,
+        changed_paths=_git_diff_name_only(project_dir),
+        operation="root_inline_commit",
+    )
+    if feedback is not None:
+        detail = _foundation_contract_write_block_detail(feedback)
+        _emit(on_event, {
+            "event": "inline_commit_failed",
+            "task_id": ROOT_TASK_ID,
+            "worktree": str(project_dir),
+            "detail": detail,
+            "structured_reason": feedback,
+        })
+        _record_task_merge_blocked_reason(
+            project_dir=project_dir,
+            task_id=ROOT_TASK_ID,
+            result=result,
+            reason=detail,
+            origin="foundation_contract_write_gate",
+            structured_reason=feedback,
+        )
+        return
     ok, detail = commit_worktree(worktree_path=project_dir, message="v5 inline build")
     _emit(on_event, {
         "event": "inline_commit" if ok else "inline_commit_failed",
@@ -1757,6 +1971,15 @@ async def _repair_subtree_propagation_once(
     async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
         from otto.v5_branching import commit_worktree
 
+        feedback = _foundation_contract_write_feedback(
+            project_dir=project_dir,
+            acting_task_id=task_id,
+            parent_integration_branch=target,
+            changed_paths=_git_diff_name_only(target_worktree),
+            operation="subtree_propagation_repair_commit",
+        )
+        if feedback is not None:
+            return False, _foundation_contract_write_block_detail(feedback)
         return commit_worktree(
             worktree_path=target_worktree,
             message=f"v5 subtree propagation repair: {task_id}",
@@ -1871,11 +2094,15 @@ def _child_result_allows_upward_merge(
     task_id: str,
     result: LeadResult,
 ) -> bool:
+    entry = get_task(project_dir, task_id) or {}
+    if str(entry.get("verdict") or "") == "merge_blocked":
+        return False
+    if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
+        return False
     if result.verdict == "pass":
         return True
     if result.verdict != "partial":
         return False
-    entry = get_task(project_dir, task_id) or {}
     return _result_has_reviewed_partial(result) or entry.get("review_state") == "reviewed_partial"
 
 
@@ -2074,6 +2301,15 @@ async def _run_child_verify_repair_packet(
     async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
         from otto.v5_branching import commit_worktree
 
+        feedback = _foundation_contract_write_feedback(
+            project_dir=project_dir,
+            acting_task_id=child_task_id,
+            parent_integration_branch=parent_integration_branch,
+            changed_paths=_git_diff_name_only(child_worktree),
+            operation="child_verify_repair_commit",
+        )
+        if feedback is not None:
+            return False, _foundation_contract_write_block_detail(feedback)
         return commit_worktree(
             worktree_path=child_worktree,
             message=f"v5 child verify repair: {child_task_id}",
@@ -2694,6 +2930,148 @@ def _reenter_or_block_architect_contract(
     return True
 
 
+def _foundation_scheduler_feedback(
+    *,
+    parent_task_id: str,
+    tasks: dict[str, Any],
+    ready: list[dict[str, Any]],
+    in_flight_task_ids: set[str],
+    contracts: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    sibling_items = [
+        (str(task_id), task)
+        for task_id, task in tasks.items()
+        if isinstance(task, dict) and task.get("parent_task_id") == parent_task_id
+    ]
+    foundation_ids = [
+        task_id
+        for task_id, task in sibling_items
+        if _is_foundation_task(task)
+    ]
+    if not foundation_ids:
+        return None
+    has_declared_contracts = bool(contracts) or any(
+        bool((task or {}).get("foundation_contracts"))
+        for _task_id, task in sibling_items
+        if _is_foundation_task(task)
+    )
+    if not has_declared_contracts:
+        return None
+    ready_features = [
+        str(entry.get("task_id") or "")
+        for entry in ready
+        if str((tasks.get(str(entry.get("task_id") or "")) or entry).get("task_role") or "feature") == "feature"
+    ]
+    if not ready_features:
+        return None
+    unverified_foundations = [
+        task_id
+        for task_id in foundation_ids
+        if task_id in in_flight_task_ids
+        or not _task_entry_allows_upward_merge(tasks.get(task_id) or {})
+    ]
+    contract_findings = _foundation_contract_findings(contracts)
+    if unverified_foundations or not contracts or contract_findings:
+        return {
+            "kind": "shared_foundation_not_ready",
+            "step_id": "foundation_scheduler_ordering",
+            "message": "feature dispatch held until foundation siblings pass and foundation contracts are valid",
+            "parent_task_id": parent_task_id,
+            "ready_feature_task_ids": ready_features,
+            "foundation_task_ids": foundation_ids,
+            "unverified_foundation_task_ids": unverified_foundations,
+            "contracts_present": bool(contracts),
+            "contract_findings": contract_findings,
+            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    return None
+
+
+def _foundation_isolation_feedback(
+    *,
+    parent_task_id: str,
+    architect_task_id: str,
+    tasks: dict[str, Any],
+    contracts: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    findings: list[dict[str, Any]] = _foundation_contract_findings(contracts)
+    contracts_by_path: dict[str, dict[str, Any]] = {}
+    for contract in contracts:
+        path = _normalize_contract_path(str(contract.get("path") or ""))
+        if path:
+            contracts_by_path[path] = contract
+
+    for path, contract in contracts_by_path.items():
+        owner_id = str(contract.get("owner_task_id") or "").strip()
+        owner = tasks.get(owner_id) if owner_id else None
+        owner_paths = _task_owned_paths(owner) if isinstance(owner, dict) else []
+        if not owner_id or not isinstance(owner, dict):
+            findings.append({
+                "kind": "foundation_contract_owner_missing",
+                "path": path,
+                "owner_task_id": owner_id,
+            })
+        elif not any(_path_overlaps(path, owned) for owned in owner_paths):
+            findings.append({
+                "kind": "foundation_contract_not_owned_by_owner",
+                "path": path,
+                "owner_task_id": owner_id,
+                "owner_owned_paths": owner_paths,
+            })
+
+    feature_owners: list[tuple[str, list[str]]] = []
+    for task_id, task in tasks.items():
+        if not isinstance(task, dict) or task.get("parent_task_id") != parent_task_id:
+            continue
+        if task.get("task_role", "feature") != "feature":
+            continue
+        if _task_entry_allows_upward_merge(task) or task.get("verdict") == "merge_blocked":
+            continue
+        owned_paths = _task_owned_paths(task)
+        feature_owners.append((str(task_id), owned_paths))
+        for contract_path, contract in contracts_by_path.items():
+            owner_id = str(contract.get("owner_task_id") or "").strip()
+            if str(task_id) == owner_id:
+                continue
+            overlaps = [owned for owned in owned_paths if _path_overlaps(owned, contract_path)]
+            if overlaps:
+                findings.append({
+                    "kind": "feature_overlaps_foundation_contract",
+                    "task_id": str(task_id),
+                    "owned_paths": overlaps,
+                    "contract_path": contract_path,
+                    "owner_task_id": owner_id,
+                })
+
+    for index, (task_id, owned_paths) in enumerate(feature_owners):
+        for other_id, other_paths in feature_owners[index + 1:]:
+            overlaps = [
+                {"path": path, "other_path": other}
+                for path in owned_paths
+                for other in other_paths
+                if _path_overlaps(path, other)
+            ]
+            if overlaps:
+                findings.append({
+                    "kind": "feature_owned_paths_overlap",
+                    "task_id": task_id,
+                    "other_task_id": other_id,
+                    "overlaps": overlaps,
+                })
+
+    if not findings:
+        return None
+    return {
+        "kind": "shared_foundation_not_isolated",
+        "step_id": "foundation_isolation_gate",
+        "message": "foundation contract paths must be exclusively owned before feature dispatch",
+        "architect_task_id": architect_task_id,
+        "parent_task_id": parent_task_id,
+        "findings": findings,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
 async def _run_scaffold_repair_packet(
     *,
     project_dir: Path,
@@ -2755,6 +3133,15 @@ async def _run_scaffold_repair_packet(
     async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
         from otto.v5_branching import commit_integration_worktree
 
+        feedback = _foundation_contract_write_feedback(
+            project_dir=project_dir,
+            acting_task_id=architect_tid,
+            parent_integration_branch=str(architect_task.get("integration_branch") or "main"),
+            changed_paths=_git_diff_name_only(project_dir),
+            operation="scaffold_repair_commit",
+        )
+        if feedback is not None:
+            return False, _foundation_contract_write_block_detail(feedback)
         return commit_integration_worktree(
             worktree_path=project_dir,
             task_id=f"{architect_tid}-scaffold-repair",
@@ -2840,10 +3227,11 @@ async def _process_children(
             })
 
         # Find ready tasks not yet running.
+        active_task_ids = await dispatch_lease.active_task_ids()
         ready = take_ready(
             project_dir,
             completed_task_ids=completed,
-            in_flight_task_ids=set(in_flight.keys()) | await dispatch_lease.active_task_ids(),
+            in_flight_task_ids=set(in_flight.keys()) | active_task_ids,
         )
         # Filter to descendants of parent_task_id.
         ready = [r for r in ready if _is_descendant_of(project_dir, r["task_id"], parent_task_id)]
@@ -3010,14 +3398,14 @@ async def _process_children(
                 )
                 break
 
+            parent_id = _parent_task_id_for_child(
+                project_dir,
+                architect_tid,
+                str(architect_task.get("integration_branch") or "main"),
+            )
             try:
                 from otto.v5_capability_inventory import persist_foundation_contracts_from_charter
 
-                parent_id = _parent_task_id_for_child(
-                    project_dir,
-                    architect_tid,
-                    str(architect_task.get("integration_branch") or "main"),
-                )
                 foundation_contracts, foundation_findings = (
                     persist_foundation_contracts_from_charter(
                         project_dir,
@@ -3034,11 +3422,7 @@ async def _process_children(
                     "step_id": "architect_foundation_contracts",
                     "message": "architect Foundation Contracts block is invalid",
                     "architect_task_id": architect_tid,
-                    "parent_task_id": _parent_task_id_for_child(
-                        project_dir,
-                        architect_tid,
-                        str(architect_task.get("integration_branch") or "main"),
-                    ),
+                    "parent_task_id": parent_id,
                     "contract_findings": [
                         {"kind": f.kind, "reference": f.reference, "detail": f.detail}
                         for f in foundation_findings
@@ -3067,6 +3451,30 @@ async def _process_children(
                     "architect_task_id": architect_tid,
                     "count": len(foundation_contracts),
                 })
+            else:
+                foundation_contracts = _foundation_contracts_for_parent(
+                    project_dir,
+                    parent_id,
+                    read_graph(project_dir).get("tasks") or {},
+                )
+
+            isolation_feedback = _foundation_isolation_feedback(
+                parent_task_id=parent_id,
+                architect_task_id=architect_tid,
+                tasks=read_graph(project_dir).get("tasks") or {},
+                contracts=foundation_contracts,
+            )
+            if isolation_feedback is not None:
+                retry_architect = _reenter_or_block_architect_contract(
+                    project_dir=project_dir,
+                    architect_tid=architect_tid,
+                    child_results=child_results,
+                    completed=completed,
+                    feedback=isolation_feedback,
+                    origin="architect_contract",
+                    on_event=on_event,
+                )
+                break
 
             # Architect passed AND scaffold preflight is clean.
             # Run shared toolchain preflight in the architect
@@ -3197,6 +3605,27 @@ async def _process_children(
                 logger.warning("coherence check raised: %s", exc)
         if retry_architect:
             continue
+
+        graph = read_graph(project_dir)
+        tasks = graph.get("tasks") or {}
+        contracts = _foundation_contracts_for_parent(project_dir, parent_task_id, tasks)
+        scheduler_feedback = _foundation_scheduler_feedback(
+            parent_task_id=parent_task_id,
+            tasks=tasks,
+            ready=ready,
+            in_flight_task_ids=set(in_flight.keys()) | active_task_ids,
+            contracts=contracts,
+        )
+        if scheduler_feedback is not None:
+            ready_feature_ids = set(scheduler_feedback.get("ready_feature_task_ids") or [])
+            ready = [
+                entry for entry in ready if str(entry.get("task_id") or "") not in ready_feature_ids
+            ]
+            _emit(on_event, {
+                "event": "foundation_feature_dispatch_held",
+                "parent_task_id": parent_task_id,
+                "structured_reason": scheduler_feedback,
+            })
 
         # Spawn ready tasks up to max_parallel.
         spawned_any = False
@@ -4131,6 +4560,16 @@ async def _repair_stale_target_and_retry_merge(
             stale_feedback=stale_feedback,
         )
         return record_terminal(reason=reason, structured_reason=feedback)
+    feedback = _foundation_contract_write_feedback(
+        project_dir=project_dir,
+        acting_task_id=child_task_id,
+        parent_integration_branch=parent_integration_branch,
+        changed_paths=_git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
+        operation="stale_target_retry_merge_delta",
+    )
+    if feedback is not None:
+        reason = _foundation_contract_write_block_detail(feedback)
+        return record_terminal(reason=reason, structured_reason=feedback)
     try:
         ok, merge_detail = merge_child_into_integration(
             project_dir=project_dir,
@@ -4247,6 +4686,26 @@ async def _merge_child_branch(
 
     source_branch = child_branch_name(child_task_id)
     commit_msg = f"v5 task {child_task_id}: {result.verdict}"
+    feedback = _foundation_contract_write_feedback(
+        project_dir=project_dir,
+        acting_task_id=child_task_id,
+        parent_integration_branch=parent_integration_branch,
+        changed_paths=_git_diff_name_only(child_worktree),
+        operation="child_worktree_commit",
+    )
+    if feedback is not None:
+        detail = _foundation_contract_write_block_detail(feedback)
+        _record_structured_merge_failed(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=detail,
+            origin="foundation_contract_write_gate",
+            phase="commit",
+            structured_reason=feedback,
+            on_event=on_event,
+        )
+        return
     ok, detail = commit_worktree(worktree_path=child_worktree, message=commit_msg)
     if not ok:
         logger.warning("commit_worktree(%s) failed: %s", child_task_id, detail)
@@ -4272,6 +4731,26 @@ async def _merge_child_branch(
         return
 
     pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+    feedback = _foundation_contract_write_feedback(
+        project_dir=project_dir,
+        acting_task_id=child_task_id,
+        parent_integration_branch=parent_integration_branch,
+        changed_paths=_git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
+        operation="child_branch_merge_delta",
+    )
+    if feedback is not None:
+        detail = _foundation_contract_write_block_detail(feedback)
+        _record_structured_merge_failed(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=detail,
+            origin="foundation_contract_write_gate",
+            phase="merge",
+            structured_reason=feedback,
+            on_event=on_event,
+        )
+        return
     try:
         ok, detail = merge_child_into_integration(
             project_dir=project_dir,
@@ -4319,6 +4798,26 @@ async def _merge_child_branch(
             return
         if repaired:
             pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+            feedback = _foundation_contract_write_feedback(
+                project_dir=project_dir,
+                acting_task_id=child_task_id,
+                parent_integration_branch=parent_integration_branch,
+                changed_paths=_git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
+                operation="merge_after_conflict_repair_delta",
+            )
+            if feedback is not None:
+                detail = _foundation_contract_write_block_detail(feedback)
+                _record_structured_merge_failed(
+                    project_dir=project_dir,
+                    task_id=child_task_id,
+                    result=result,
+                    reason=detail,
+                    origin="foundation_contract_write_gate",
+                    phase="merge_conflict_repair",
+                    structured_reason=feedback,
+                    on_event=on_event,
+                )
+                return
             try:
                 ok, detail = merge_child_into_integration(
                     project_dir=project_dir,
@@ -4503,6 +5002,26 @@ async def _merge_child_branch(
             return
         if repaired:
             pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+            feedback = _foundation_contract_write_feedback(
+                project_dir=project_dir,
+                acting_task_id=child_task_id,
+                parent_integration_branch=parent_integration_branch,
+                changed_paths=_git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
+                operation="merge_after_upward_repair_delta",
+            )
+            if feedback is not None:
+                detail = _foundation_contract_write_block_detail(feedback)
+                _record_structured_merge_failed(
+                    project_dir=project_dir,
+                    task_id=child_task_id,
+                    result=result,
+                    reason=detail,
+                    origin="foundation_contract_write_gate",
+                    phase="upward_merge_gate",
+                    structured_reason=feedback,
+                    on_event=on_event,
+                )
+                return
             try:
                 ok, detail = merge_child_into_integration(
                     project_dir=project_dir,
@@ -4671,6 +5190,26 @@ async def _merge_child_branch(
                 result=result,
                 reason=reason,
                 origin="integration_union_guard",
+                phase="integration_union_guard",
+                structured_reason=feedback,
+                on_event=on_event,
+            )
+            return
+        feedback = _foundation_contract_write_feedback(
+            project_dir=project_dir,
+            acting_task_id=child_task_id,
+            parent_integration_branch=parent_integration_branch,
+            changed_paths=_git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
+            operation="merge_after_integration_union_repair_delta",
+        )
+        if feedback is not None:
+            detail = _foundation_contract_write_block_detail(feedback)
+            _record_structured_merge_failed(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                reason=detail,
+                origin="foundation_contract_write_gate",
                 phase="integration_union_guard",
                 structured_reason=feedback,
                 on_event=on_event,
@@ -4979,6 +5518,15 @@ async def _repair_child_merge_conflict_once(
     async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
         from otto.v5_branching import commit_worktree
 
+        feedback = _foundation_contract_write_feedback(
+            project_dir=project_dir,
+            acting_task_id=child_task_id,
+            parent_integration_branch=parent_integration_branch,
+            changed_paths=_git_diff_name_only(child_worktree),
+            operation="merge_conflict_repair_commit",
+        )
+        if feedback is not None:
+            return False, _foundation_contract_write_block_detail(feedback)
         return commit_worktree(
             worktree_path=child_worktree,
             message=f"v5 merge conflict repair: {child_task_id}",
