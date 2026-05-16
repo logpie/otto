@@ -3619,6 +3619,96 @@ def _record_task_merge_blocked_reason(
             result.verify_result["structured_reason"] = structured_reason
 
 
+def _record_structured_merge_failed(
+    *,
+    project_dir: Path,
+    task_id: str,
+    result: LeadResult,
+    reason: str,
+    origin: str,
+    phase: str,
+    structured_reason: dict[str, Any],
+    on_event: Any = None,
+) -> None:
+    _record_task_merge_blocked_reason(
+        project_dir=project_dir,
+        task_id=task_id,
+        result=result,
+        reason=reason,
+        origin=origin,
+        structured_reason=structured_reason,
+    )
+    _emit(on_event, {
+        "event": "merge_failed",
+        "task_id": task_id,
+        "phase": phase,
+        "detail": reason,
+        "structured_reason": structured_reason,
+    })
+
+
+def _integration_union_guard_error_feedback(
+    *,
+    child_task_id: str,
+    parent_integration_branch: str,
+    source_branch: str,
+    pre_merge_ref: str,
+    exc: Exception,
+    previous_feedback: dict[str, Any] | None = None,
+    stale_feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    feedback: dict[str, Any] = {
+        "kind": "integration_union_guard_error",
+        "step_id": "integration_union_guard",
+        "message": (
+            "integration union guard errored: "
+            f"{type(exc).__name__}: {exc}"
+        ),
+        "task_id": child_task_id,
+        "parent_integration_branch": parent_integration_branch,
+        "source_branch": source_branch,
+        "pre_merge_ref": pre_merge_ref,
+        "exception": {
+            "type": type(exc).__name__,
+            "message": str(exc),
+        },
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if previous_feedback is not None:
+        feedback["previous_gate_feedback"] = previous_feedback
+    if stale_feedback is not None:
+        feedback["stale_feedback"] = stale_feedback
+    return feedback
+
+
+def _pre_merge_ref_unresolved_feedback(
+    *,
+    kind: str,
+    child_task_id: str,
+    parent_integration_branch: str,
+    source_branch: str,
+    detail: str,
+    prior_repair_detail: str,
+    previous_feedback: dict[str, Any] | None = None,
+    stale_feedback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    feedback: dict[str, Any] = {
+        "kind": kind,
+        "step_id": "child_merge_retry",
+        "message": detail,
+        "task_id": child_task_id,
+        "parent_integration_branch": parent_integration_branch,
+        "source_branch": source_branch,
+        "prior_repair_detail": prior_repair_detail,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if previous_feedback is not None:
+        feedback["previous_gate_feedback"] = previous_feedback
+    if stale_feedback is not None:
+        feedback["stale_feedback"] = stale_feedback
+    return feedback
+
+
 async def _repair_child_upward_merge_gate_once(
     *,
     project_dir: Path,
@@ -3849,21 +3939,16 @@ async def _repair_stale_target_and_retry_merge(
         reason: str,
         structured_reason: dict[str, Any],
     ) -> _StaleTargetRetryResult:
-        _record_task_merge_blocked_reason(
+        _record_structured_merge_failed(
             project_dir=project_dir,
             task_id=child_task_id,
             result=result,
             reason=reason,
             origin=origin,
+            phase=terminal_phase,
             structured_reason=structured_reason,
+            on_event=on_event,
         )
-        _emit(on_event, {
-            "event": "merge_failed",
-            "task_id": child_task_id,
-            "phase": terminal_phase,
-            "detail": reason,
-            "structured_reason": structured_reason,
-        })
         return _StaleTargetRetryResult(
             ok=False,
             detail=reason,
@@ -3879,6 +3964,23 @@ async def _repair_stale_target_and_retry_merge(
         return record_terminal(reason=reason, structured_reason=stale_feedback)
 
     pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+    if not pre_merge_ref:
+        reason = (
+            "stale target retry could not resolve integration pre-merge ref; "
+            f"stale target repair attempt: {stale_detail}; "
+            f"prior repair attempt: {prior_repair_detail}"
+        )
+        feedback = _pre_merge_ref_unresolved_feedback(
+            kind="stale_target_pre_merge_ref_unresolved",
+            child_task_id=child_task_id,
+            parent_integration_branch=parent_integration_branch,
+            source_branch=source_branch,
+            detail=reason,
+            prior_repair_detail=prior_repair_detail,
+            previous_feedback=previous_feedback,
+            stale_feedback=stale_feedback,
+        )
+        return record_terminal(reason=reason, structured_reason=feedback)
     try:
         ok, merge_detail = merge_child_into_integration(
             project_dir=project_dir,
@@ -3922,13 +4024,26 @@ async def _repair_stale_target_and_retry_merge(
         return record_terminal(reason=reason, structured_reason=stale_feedback)
 
     if check_union_after_merge:
-        followup_feedback = _record_and_check_integration_union(
-            project_dir=project_dir,
-            parent_integration_branch=parent_integration_branch,
-            child_task_id=child_task_id,
-            source_branch=source_branch,
-            pre_merge_ref=pre_merge_ref,
-        )
+        try:
+            followup_feedback = _record_and_check_integration_union(
+                project_dir=project_dir,
+                parent_integration_branch=parent_integration_branch,
+                child_task_id=child_task_id,
+                source_branch=source_branch,
+                pre_merge_ref=pre_merge_ref,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep terminal block structured
+            feedback = _integration_union_guard_error_feedback(
+                child_task_id=child_task_id,
+                parent_integration_branch=parent_integration_branch,
+                source_branch=source_branch,
+                pre_merge_ref=pre_merge_ref,
+                exc=exc,
+                previous_feedback=previous_feedback,
+                stale_feedback=stale_feedback,
+            )
+            reason = str(feedback["message"])
+            return record_terminal(reason=reason, structured_reason=feedback)
         if followup_feedback is not None:
             followup_detail = str(
                 followup_feedback.get("message")
@@ -4112,13 +4227,55 @@ async def _merge_child_branch(
         )
         return
 
-    union_feedback = _record_and_check_integration_union(
-        project_dir=project_dir,
-        parent_integration_branch=parent_integration_branch,
-        child_task_id=child_task_id,
-        source_branch=source_branch,
-        pre_merge_ref=pre_merge_ref,
-    )
+    if not pre_merge_ref:
+        reason = "integration union guard could not resolve pre-merge ref"
+        feedback = _pre_merge_ref_unresolved_feedback(
+            kind="integration_union_pre_merge_ref_unresolved",
+            child_task_id=child_task_id,
+            parent_integration_branch=parent_integration_branch,
+            source_branch=source_branch,
+            detail=reason,
+            prior_repair_detail="",
+        )
+        _record_structured_merge_failed(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=reason,
+            origin="integration_union_guard",
+            phase="integration_union_guard",
+            structured_reason=feedback,
+            on_event=on_event,
+        )
+        return
+
+    try:
+        union_feedback = _record_and_check_integration_union(
+            project_dir=project_dir,
+            parent_integration_branch=parent_integration_branch,
+            child_task_id=child_task_id,
+            source_branch=source_branch,
+            pre_merge_ref=pre_merge_ref,
+        )
+    except Exception as exc:  # noqa: BLE001 - keep union guard failures structured
+        feedback = _integration_union_guard_error_feedback(
+            child_task_id=child_task_id,
+            parent_integration_branch=parent_integration_branch,
+            source_branch=source_branch,
+            pre_merge_ref=pre_merge_ref,
+            exc=exc,
+        )
+        _record_structured_merge_failed(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=str(feedback["message"]),
+            origin="integration_union_guard",
+            phase="integration_union_guard",
+            structured_reason=feedback,
+            on_event=on_event,
+        )
+        return
     if union_feedback is not None:
         detail = str(union_feedback.get("message") or _integration_union_reason_text(union_feedback))
         _emit(on_event, {
@@ -4167,6 +4324,32 @@ async def _merge_child_branch(
             return
 
         pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
+        if not pre_merge_ref:
+            reason = (
+                "integration union repair retry could not resolve pre-merge ref; "
+                f"union repair attempt: {repair_detail}; "
+                f"original refusal: {union_feedback.get('message')}"
+            )
+            feedback = _pre_merge_ref_unresolved_feedback(
+                kind="integration_union_pre_merge_ref_unresolved",
+                child_task_id=child_task_id,
+                parent_integration_branch=parent_integration_branch,
+                source_branch=source_branch,
+                detail=reason,
+                prior_repair_detail=repair_detail,
+                previous_feedback=union_feedback,
+            )
+            _record_structured_merge_failed(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                reason=reason,
+                origin="integration_union_guard",
+                phase="integration_union_guard",
+                structured_reason=feedback,
+                on_event=on_event,
+            )
+            return
         try:
             ok, detail = merge_child_into_integration(
                 project_dir=project_dir,
@@ -4199,13 +4382,34 @@ async def _merge_child_branch(
             detail = retry.detail
             pre_merge_ref = retry.pre_merge_ref
 
-        followup_feedback = _record_and_check_integration_union(
-            project_dir=project_dir,
-            parent_integration_branch=parent_integration_branch,
-            child_task_id=child_task_id,
-            source_branch=source_branch,
-            pre_merge_ref=pre_merge_ref,
-        )
+        try:
+            followup_feedback = _record_and_check_integration_union(
+                project_dir=project_dir,
+                parent_integration_branch=parent_integration_branch,
+                child_task_id=child_task_id,
+                source_branch=source_branch,
+                pre_merge_ref=pre_merge_ref,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep union guard failures structured
+            feedback = _integration_union_guard_error_feedback(
+                child_task_id=child_task_id,
+                parent_integration_branch=parent_integration_branch,
+                source_branch=source_branch,
+                pre_merge_ref=pre_merge_ref,
+                exc=exc,
+                previous_feedback=union_feedback,
+            )
+            _record_structured_merge_failed(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                reason=str(feedback["message"]),
+                origin="integration_union_guard",
+                phase="integration_union_guard",
+                structured_reason=feedback,
+                on_event=on_event,
+            )
+            return
         if followup_feedback is not None:
             followup_detail = str(
                 followup_feedback.get("message")
