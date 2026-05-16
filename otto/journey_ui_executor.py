@@ -22,6 +22,26 @@ from otto.observability import iso_timestamp, write_json_atomic, write_text_atom
 from otto.safe_slug import safe_slug
 
 UI_EXECUTOR_SOURCE = "ui_executor"
+ENFORCED_UI_OBSERVABLE_LOCATOR_KEYS = frozenset({
+    "selector",
+    "target_selector",
+    "testid_selector",
+    "testid",
+    "data_testid",
+    "data-testid",
+    "role",
+    "name",
+    "accessible_name",
+    "label",
+    "text",
+    "expected_text",
+    "visible_text",
+})
+_OBSERVABLE_SELECTOR_KEYS = ("selector", "target_selector", "testid_selector")
+_OBSERVABLE_ROLE_KEYS = ("role",)
+_OBSERVABLE_NAME_KEYS = ("name", "accessible_name")
+_OBSERVABLE_LABEL_KEYS = ("label",)
+_OBSERVABLE_TEXT_KEYS = ("text", "expected_text", "visible_text", "name", "accessible_name")
 
 
 @dataclass
@@ -57,6 +77,7 @@ class _DOMObservableState:
     signatures: tuple[str, ...]
     scope_found: bool
     scope_label: str
+    locator_label: str = "<missing locator>"
 
 
 def run_ui_journey_executor(
@@ -625,7 +646,7 @@ def _assert_dom_observable(
         ui_effect = str(observable.get("ui_effect") or "").strip()
         text = _extract_assertable_text(ui_effect)
     exact = _exact_match(observable)
-    if selector or text:
+    if _has_dom_observable_locator(observable, text=text):
         deadline = time.monotonic() + (timeout_ms / 1000)
         last_state = _dom_observable_state(page, observable, text=text)
         while time.monotonic() < deadline:
@@ -642,6 +663,11 @@ def _assert_dom_observable(
             return f"text {text!r} not visible inside {last_state.scope_label}"
         if selector and last_state.count == 0:
             return f"selector not visible inside {last_state.scope_label}: {selector}"
+        if last_state.count == 0:
+            return (
+                f"locator not visible inside {last_state.scope_label}: "
+                f"{last_state.locator_label}"
+            )
         if require_delta:
             return f"no new scoped observable appeared inside {last_state.scope_label}"
 
@@ -857,6 +883,48 @@ def _generic_locator(
     return None, "<missing locator>"
 
 
+def _observable_locator(
+    page: Any,
+    spec: dict[str, Any],
+    *,
+    text: str | None = None,
+    first: bool = False,
+) -> tuple[Any | None, str]:
+    selector = _explicit_selector(spec, selector_keys=_OBSERVABLE_SELECTOR_KEYS)
+    if selector:
+        locator = page.locator(selector)
+        return (locator.first if first else locator), selector
+    role = _first_text(spec, _OBSERVABLE_ROLE_KEYS)
+    name = _first_text(spec, _OBSERVABLE_NAME_KEYS)
+    exact = _exact_match(spec)
+    if role:
+        kwargs: dict[str, Any] = {"exact": exact}
+        if name:
+            kwargs["name"] = name
+        locator = page.get_by_role(role, **kwargs)
+        label = f"role={role!r} name={name!r}" if name else f"role={role!r}"
+        return (locator.first if first else locator), label
+    label = _first_text(spec, _OBSERVABLE_LABEL_KEYS)
+    if label:
+        locator = page.get_by_label(label, exact=exact)
+        return (locator.first if first else locator), f"label={label!r}"
+    visible_text = str(text or "").strip() or _first_text(spec, _OBSERVABLE_TEXT_KEYS)
+    if visible_text:
+        locator = page.get_by_text(visible_text, exact=exact)
+        return (locator.first if first else locator), f"text={visible_text!r}"
+    return None, "<missing locator>"
+
+
+def _has_dom_observable_locator(spec: dict[str, Any], *, text: str) -> bool:
+    return bool(
+        _explicit_selector(spec, selector_keys=_OBSERVABLE_SELECTOR_KEYS)
+        or _first_text(spec, _OBSERVABLE_ROLE_KEYS)
+        or _first_text(spec, _OBSERVABLE_NAME_KEYS)
+        or _first_text(spec, _OBSERVABLE_LABEL_KEYS)
+        or text
+    )
+
+
 def _explicit_selector(
     spec: dict[str, Any],
     *,
@@ -935,7 +1003,6 @@ def _dom_observable_state(
     *,
     text: str | None = None,
 ) -> _DOMObservableState:
-    selector = _explicit_selector(observable)
     scope_selector = _scope_selector(observable)
     expected_text = str(
         text
@@ -948,9 +1015,26 @@ def _dom_observable_state(
     if not expected_text:
         expected_text = _extract_assertable_text(str(observable.get("ui_effect") or ""))
     exact = _exact_match(observable)
-    scope_label = scope_selector or selector or "page"
-    raw = page.evaluate(
-        """({selector, scopeSelector, text, exact}) => {
+    scope_label = scope_selector or "page"
+    root, _root_label = _scope_root(page, observable)
+    if root is None:
+        return _DOMObservableState(
+            count=0,
+            signatures=(),
+            scope_found=False,
+            scope_label=scope_label,
+        )
+    locator, locator_label = _observable_locator(root, observable, text=expected_text)
+    if locator is None:
+        return _DOMObservableState(
+            count=0,
+            signatures=(),
+            scope_found=True,
+            scope_label=scope_label,
+            locator_label=locator_label,
+        )
+    raw = locator.evaluate_all(
+        """(elements, {text, exact}) => {
           const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
           const matchesText = (value) => {
             if (!text) return true;
@@ -964,48 +1048,47 @@ def _dom_observable_state(
             const rect = el.getBoundingClientRect();
             return rect.width > 0 && rect.height > 0;
           };
-          const root = scopeSelector ? document.querySelector(scopeSelector) : document.body;
-          if (!root) return { count: 0, signatures: [], scopeFound: false };
-          let nodes = [];
-          if (selector) {
-            nodes = Array.from(root.querySelectorAll(selector));
-            if (root.matches && root.matches(selector)) nodes.unshift(root);
-          } else if (text) {
-            nodes = Array.from(root.querySelectorAll('*')).filter((el) => {
-              if (!visible(el) || !matchesText(el.innerText || el.textContent || '')) return false;
-              return !Array.from(el.children).some((child) => (
-                visible(child) && matchesText(child.innerText || child.textContent || '')
-              ));
-            });
-          } else {
-            nodes = [root];
-          }
-          const signatures = nodes
-            .filter((el) => visible(el) && matchesText(el.innerText || el.textContent || ''))
+          const textFor = (el) => (
+            el.innerText || el.textContent || el.getAttribute('aria-label') ||
+            el.getAttribute('title') || el.getAttribute('alt') || el.value || ''
+          );
+          const signatures = elements
+            .filter((el) => visible(el) && matchesText(textFor(el)))
             .map((el) => {
-              const attrs = ['id', 'class', 'role', 'aria-label', 'data-testid']
+              const attrs = [
+                  'id', 'class', 'role', 'aria-label', 'aria-labelledby',
+                  'aria-describedby', 'data-testid', 'name', 'type'
+                ]
                 .map((name) => `${name}=${el.getAttribute(name) || ''}`)
                 .join('|');
-              return `${el.tagName}|${attrs}|${normalize(el.innerText || el.textContent || '')}|${String(el.outerHTML || '').slice(0, 500)}`;
+              const value = 'value' in el ? String(el.value || '') : '';
+              const checked = 'checked' in el ? String(Boolean(el.checked)) : '';
+              const disabled = 'disabled' in el ? String(Boolean(el.disabled)) : '';
+              return `${el.tagName}|${attrs}|value=${value}|checked=${checked}|disabled=${disabled}|${normalize(textFor(el))}|${String(el.outerHTML || '').slice(0, 500)}`;
             });
-          return { count: signatures.length, signatures, scopeFound: true };
+          return { count: signatures.length, signatures };
         }""",
         {
-            "selector": selector,
-            "scopeSelector": scope_selector,
             "text": expected_text,
             "exact": exact,
         },
     )
     if not isinstance(raw, dict):
-        return _DOMObservableState(count=0, signatures=(), scope_found=False, scope_label=scope_label)
+        return _DOMObservableState(
+            count=0,
+            signatures=(),
+            scope_found=False,
+            scope_label=scope_label,
+            locator_label=locator_label,
+        )
     raw_signatures = raw.get("signatures")
     signatures = raw_signatures if isinstance(raw_signatures, list) else []
     return _DOMObservableState(
         count=int(raw.get("count") or 0),
         signatures=tuple(str(item) for item in signatures),
-        scope_found=bool(raw.get("scopeFound")),
+        scope_found=True,
         scope_label=scope_label,
+        locator_label=locator_label,
     )
 
 

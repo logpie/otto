@@ -6,6 +6,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from otto import journey_contracts, journey_ui_executor
 from otto.journey_ui_executor import _git_diff_dirty
 from otto.v5_clean_verify import verify_from_clean_oracle
 
@@ -216,6 +219,67 @@ PREEXISTING_NETWORK_ONLY_HTML = '''<!doctype html>
   </body>
 </html>'''
 
+PREEXISTING_ACCESSIBLE_OBSERVABLE_HTML = '''<!doctype html>
+<html>
+  <body>
+    <main>
+      <h1>Your workspaces</h1>
+      <label>Workspace name <input aria-label="Workspace name" value=""></label>
+      <label>Workspace slug <input aria-label="Workspace slug" value=""></label>
+      <button>Create workspace</button>
+      <section id="workspace-list">
+        <div role="status" aria-label="Saved">Saved</div>
+        <div>Saved</div>
+        <label>Saved <input value=""></label>
+      </section>
+    </main>
+    <script>
+      document.querySelector("button").addEventListener("click", async () => {{
+        await fetch("/api/workspaces", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{name: "Acme Workspace", slug: "acme-workspace"}})
+        }});
+      }});
+    </script>
+  </body>
+</html>'''
+
+NEW_ACCESSIBLE_OBSERVABLE_HTML = '''<!doctype html>
+<html>
+  <body>
+    <main>
+      <h1>Your workspaces</h1>
+      <label>Workspace name <input aria-label="Workspace name" value=""></label>
+      <label>Workspace slug <input aria-label="Workspace slug" value=""></label>
+      <button>Create workspace</button>
+      <section id="workspace-list">
+        <div role="status" aria-label="Ready">Ready</div>
+      </section>
+    </main>
+    <script>
+      document.querySelector("button").addEventListener("click", async () => {{
+        await fetch("/api/workspaces", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{name: "Acme Workspace", slug: "acme-workspace"}})
+        }});
+        const list = document.getElementById("workspace-list");
+        const status = document.createElement("div");
+        status.setAttribute("role", "status");
+        status.setAttribute("aria-label", "Saved");
+        status.textContent = "Saved";
+        const named = document.createElement("div");
+        named.textContent = "Saved";
+        const label = document.createElement("label");
+        label.textContent = "Saved ";
+        label.appendChild(document.createElement("input"));
+        list.append(status, named, label);
+      }});
+    </script>
+  </body>
+</html>'''
+
 FUZZY_INCIDENTAL_COPY_HTML = '''<!doctype html>
 <html>
   <body>
@@ -273,6 +337,8 @@ class Handler(BaseHTTPRequestHandler):
             html = {{
                 "working": WORKING_HTML,
                 "preexisting_network_only": PREEXISTING_NETWORK_ONLY_HTML,
+                "preexisting_accessible_observable": PREEXISTING_ACCESSIBLE_OBSERVABLE_HTML,
+                "new_accessible_observable": NEW_ACCESSIBLE_OBSERVABLE_HTML,
                 "fuzzy_incidental_copy": FUZZY_INCIDENTAL_COPY_HTML,
                 "dead_button": DEAD_BUTTON_HTML,
                 "skeleton": SKELETON_HTML,
@@ -333,6 +399,40 @@ def _run_ui_probe(
         if Path(path).name == "journey-verdicts.json"
     )
     return result.passed, json.loads(verdict_path.read_text(encoding="utf-8"))
+
+
+def _accessible_observable_journey(locator: dict[str, str]) -> dict[str, Any]:
+    journey = _journey(accessible_only=True, scoped_observable=True)
+    action_observable = {
+        "kind": "network_and_ui_effect",
+        "primary_action_id": "workspaces.create",
+        "description": "Saving shows an accessible confirmation in the workspace list.",
+        "method": "POST",
+        "path": "/api/workspaces",
+        "status": 201,
+        "ui_effect": "Saved appears in the workspace list.",
+        "container_selector": "#workspace-list",
+        **locator,
+    }
+    final_assertion = {
+        "kind": "persisted_data_visible",
+        "primary_action_id": "workspaces.create",
+        "description": "The accessible confirmation remains visible in the workspace list.",
+        "container_selector": "#workspace-list",
+        **locator,
+    }
+    action = journey["pass_model"]["actions"][0]
+    action["success_observables"] = [action_observable]
+    journey["pass_model"]["success_observables"] = [final_assertion]
+    journey["pass_model"]["final_dom_assertions"] = [final_assertion]
+    return journey
+
+
+def test_ui_validator_and_executor_observable_locator_sets_agree() -> None:
+    assert (
+        journey_contracts.UI_ASSERTION_KEYS
+        == journey_ui_executor.ENFORCED_UI_OBSERVABLE_LOCATOR_KEYS
+    )
 
 
 def test_ui_probe_fails_persistent_skeleton_without_claiming_http_failure(tmp_path: Path) -> None:
@@ -406,6 +506,83 @@ def test_accessible_ui_probe_requires_new_scoped_observable_after_action(tmp_pat
     verdict = verdict_payload["journey_verdicts"][0]
     assert verdict["passed"] is False
     assert "no new scoped observable" in verdict["detail"]
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        {"role": "status"},
+        {"name": "Saved"},
+        {"label": "Saved"},
+    ],
+)
+def test_accessible_locator_only_action_observable_requires_delta(
+    tmp_path: Path,
+    locator: dict[str, str],
+) -> None:
+    project = tmp_path / "preexisting-accessible-observable"
+    _write_fixture_project(project, mode="preexisting_accessible_observable", port=_free_port())
+
+    passed, verdict_payload = _run_ui_probe(
+        project,
+        tmp_path / "journey-artifacts",
+        journey=_accessible_observable_journey(locator),
+    )
+
+    assert passed is False
+    verdict = verdict_payload["journey_verdicts"][0]
+    assert verdict["passed"] is False
+    assert "no new scoped observable" in verdict["detail"]
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        {"role": "status", "name": "Saved"},
+        {"accessible_name": "Saved"},
+        {"label": "Saved"},
+    ],
+)
+def test_accessible_locator_only_action_observable_passes_new_scoped_element(
+    tmp_path: Path,
+    locator: dict[str, str],
+) -> None:
+    project = tmp_path / "new-accessible-observable"
+    _write_fixture_project(project, mode="new_accessible_observable", port=_free_port())
+
+    passed, verdict_payload = _run_ui_probe(
+        project,
+        tmp_path / "journey-artifacts",
+        journey=_accessible_observable_journey(locator),
+    )
+
+    assert passed is True
+    assert verdict_payload["journey_verdicts"][0]["passed"] is True
+
+
+def test_final_accessible_dom_assertion_is_presence_not_delta(tmp_path: Path) -> None:
+    project = tmp_path / "final-presence-accessible-observable"
+    _write_fixture_project(project, mode="new_accessible_observable", port=_free_port())
+    journey = _accessible_observable_journey({"role": "status", "name": "Saved"})
+    journey["pass_model"]["final_dom_assertions"] = [
+        {
+            "kind": "persisted_data_visible",
+            "primary_action_id": "workspaces.create",
+            "description": "The pre-existing ready status remains visible.",
+            "container_selector": "#workspace-list",
+            "role": "status",
+            "name": "Ready",
+        }
+    ]
+
+    passed, verdict_payload = _run_ui_probe(
+        project,
+        tmp_path / "journey-artifacts",
+        journey=journey,
+    )
+
+    assert passed is True
+    assert verdict_payload["journey_verdicts"][0]["passed"] is True
 
 
 def test_accessible_ui_probe_uses_exact_text_not_fuzzy_incidental_copy(tmp_path: Path) -> None:
