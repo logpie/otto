@@ -66,6 +66,17 @@ Architect task guidance:
 - Create the minimal runnable scaffold and concise `CHARTER.md`.
 - CHARTER should contain operational facts, shared contracts, and one
   `## Information Architecture Contract` JSON block when this is a webapp.
+- Webapp scaffolds MUST isolate route/API/screen registration. A feature leaf
+  must add its own backend router/controller/module file or frontend
+  feature-route module; it must not edit a shared central route registry.
+  Use auto-discovery, manifest auto-compose, plugin loading, or the
+  stack-equivalent extension point so new feature registration is file-local.
+- In the Information Architecture Contract JSON, include
+  `registration_isolation`: a machine-readable object with `policy`,
+  `shared_registry_files`, and `leaf_extension_globs`. Shared registry files
+  must be scaffold-owned loader/composer files with `leaf_edit: false`; leaf
+  tasks add files matching the extension globs instead of editing those
+  registries.
 - Keep prose short. Do not restate JSON in paragraphs.
 - Create `decisions.md`.
 - Verify the scaffold with the smallest build/typecheck command that proves it

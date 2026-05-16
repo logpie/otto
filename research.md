@@ -2,6 +2,48 @@
 
 _written_at: 2026-05-15T00:00:00Z
 
+## Architect route-registration isolation pass 2 (2026-05-16)
+
+Scope: prevent the JV2 class where an architect scaffold creates one central
+route registry and every vertical leaf must edit that same file. Pass 1's
+integration union guard catches silent route drops after merge; this pass must
+fail the architect contract before leaves dispatch into deterministic conflicts.
+
+Relevant current paths:
+
+- `otto/prompts/lead.md` has the architect/scaffold instructions. It already
+  requires `CHARTER.md` and a webapp `## Information Architecture Contract`,
+  but does not yet require isolated registration extension points.
+- `otto/v5_capability_inventory.py` owns parsing/validating the CHARTER IA
+  JSON and runner coherence findings. This is the right place for a
+  machine-readable route-registration isolation clause and generic structural
+  detector helpers.
+- `otto/v5_runner.py` runs architect scaffold verification after the architect
+  task reaches `pass`, before feature leaves dispatch. Structural contract
+  invalidity currently re-enters the architect through `clear_verdict_for_retry`
+  and bounded `MAX_ARCHITECT_RETRIES`; terminal merge blocks use
+  `_record_task_merge_blocked_reason(..., structured_reason=...)`.
+- `tests/test_shared_route_registration_repro.py` is Pass 1's late union guard
+  regression. The new repro should be earlier and faster: root emits one
+  architect plus two route leaves; the architect pass is deterministic and the
+  runner blocks before the leaves run.
+
+Design constraints:
+
+- Detection must be structural and stack-generic. Do not special-case
+  `backend/main.py` or `frontend/src/App.tsx`; treat any file matched by more
+  than one route-like leaf's owned paths as suspicious when the file looks like
+  a registry/route composition surface by content, path, or CHARTER contract.
+- The CHARTER IA contract needs a parseable `registration_isolation` object:
+  policy, shared registry files, and leaf extension globs. Feature leaves should
+  add files under those extension globs, not edit the shared registry file.
+- Back-compat: this check should run only for a new architect-produced
+  decomposition with multiple route-like leaves. Existing brownfield or legacy
+  monolithic projects without an active architect gate are not retroactively
+  failed by coherence scanning alone.
+- Repair routing should reuse the existing architect retry/exhaustion and
+  structured reason machinery. No new verdict channel.
+
 ## Current State
 
 - `otto/v5_preflight_repair.py` owns `RepairPacket`, the clean-oracle repair loop, packet journaling, composite gate evaluation, and baseline capture.

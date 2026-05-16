@@ -2591,6 +2591,82 @@ def _emit_scaffold_oracle_issues(
     return blocking_messages
 
 
+def _architect_contract_feedback_reason(feedback: dict[str, Any]) -> str:
+    message = str(feedback.get("message") or feedback.get("kind") or "architect contract invalid")
+    try:
+        structured = json.dumps(feedback, indent=2, sort_keys=True)
+    except TypeError:
+        structured = repr(feedback)
+    if len(structured) > 4000:
+        structured = structured[:4000] + "\n...<truncated>"
+    return (
+        "The architect-produced scaffold/contract is structurally unsafe for "
+        "the planned leaf decomposition. Re-enter the architect and regenerate "
+        "the scaffold/CHARTER before dispatching leaves.\n\n"
+        f"{message}\n\nStructured reason:\n{structured}"
+    )
+
+
+def _reenter_or_block_architect_contract(
+    *,
+    project_dir: Path,
+    architect_tid: str,
+    child_results: dict[str, LeadResult],
+    completed: set[str],
+    feedback: dict[str, Any],
+    origin: str,
+    on_event: Any = None,
+) -> bool:
+    current_retries = get_retry_count(project_dir, architect_tid)
+    reason = _architect_contract_feedback_reason(feedback)
+    if current_retries < MAX_ARCHITECT_RETRIES:
+        new_count = clear_verdict_for_retry(project_dir, architect_tid, reason)
+        completed.discard(architect_tid)
+        child_results.pop(architect_tid, None)
+        logger.warning(
+            "architect %s contract gate failed (attempt %d/%d): re-dispatching",
+            architect_tid,
+            new_count,
+            MAX_ARCHITECT_RETRIES,
+        )
+        _emit(on_event, {
+            "event": "architect_retry",
+            "task_id": architect_tid,
+            "retry_count": new_count,
+            "max_retries": MAX_ARCHITECT_RETRIES,
+            "reason_tail": str(feedback.get("message") or reason)[:200],
+            "structured_reason": feedback,
+        })
+        return True
+
+    result = child_results.get(architect_tid) or LeadResult(
+        task_id=architect_tid,
+        verdict="merge_blocked",
+    )
+    completed.discard(architect_tid)
+    _record_task_merge_blocked_reason(
+        project_dir=project_dir,
+        task_id=architect_tid,
+        result=result,
+        reason=reason,
+        origin=origin,
+        structured_reason=feedback,
+    )
+    child_results[architect_tid] = result
+    logger.error(
+        "architect %s contract gate failed after %d retries; marking merge_blocked",
+        architect_tid,
+        MAX_ARCHITECT_RETRIES,
+    )
+    _emit(on_event, {
+        "event": "architect_retry_exhausted",
+        "task_id": architect_tid,
+        "retry_count": current_retries,
+        "structured_reason": feedback,
+    })
+    return True
+
+
 async def _run_scaffold_repair_packet(
     *,
     project_dir: Path,
@@ -2877,6 +2953,35 @@ async def _process_children(
                     scaffold_repair_packet=repair.packet_path,
                     scaffold_repair_summary=repair.summary,
                 )
+
+            try:
+                from otto.v5_capability_inventory import check_route_registration_isolation
+
+                route_isolation_feedback = check_route_registration_isolation(
+                    project_dir,
+                    graph=read_graph(project_dir),
+                    architect_task_id=architect_tid,
+                )
+            except Exception as exc:  # noqa: BLE001
+                route_isolation_feedback = None
+                logger.warning("route registration isolation check failed: %s", exc)
+            if route_isolation_feedback is not None:
+                _emit(on_event, {
+                    "event": "architect_contract_invalid",
+                    "task_id": architect_tid,
+                    "reason": route_isolation_feedback.get("kind"),
+                    "structured_reason": route_isolation_feedback,
+                })
+                retry_architect = _reenter_or_block_architect_contract(
+                    project_dir=project_dir,
+                    architect_tid=architect_tid,
+                    child_results=child_results,
+                    completed=completed,
+                    feedback=route_isolation_feedback,
+                    origin="architect_contract",
+                    on_event=on_event,
+                )
+                break
 
             # Architect passed AND scaffold preflight is clean.
             # Run shared toolchain preflight in the architect

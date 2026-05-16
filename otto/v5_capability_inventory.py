@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -567,6 +568,68 @@ _KNOWN_SURFACE_KINDS = frozenset({
     "global",
 })
 CHARTER_PROSE_TARGET_LINES = 300
+_REGISTRATION_ISOLATION_POLICIES = frozenset({
+    "file_local_auto_discovery",
+    "manifest_auto_compose",
+    "plugin_auto_discovery",
+    "none_needed",
+})
+_ROUTE_REGISTRATION_TERMS = frozenset({
+    "api",
+    "blueprint",
+    "controller",
+    "endpoint",
+    "navigation",
+    "page",
+    "route",
+    "router",
+    "screen",
+    "url",
+    "view",
+})
+_REGISTRY_PATH_RE = re.compile(
+    r"(^|/)(api|app|controller|controllers|endpoint|endpoints|index|main|"
+    r"manifest|nav|navigation|route|router|routes|url|urls|view|views)"
+    r"([./_-]|$)",
+    flags=re.IGNORECASE,
+)
+_CODE_FILE_SUFFIXES = frozenset({
+    ".cjs",
+    ".go",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".py",
+    ".rb",
+    ".rs",
+    ".ts",
+    ".tsx",
+})
+_REGISTRY_CONTENT_ROUTE_TOKENS = (
+    "route",
+    "router",
+    "endpoint",
+    "blueprint",
+    "urlpatterns",
+    "<route",
+    "createbrowserrouter",
+    "include_router",
+    "register_blueprint",
+    "app.get",
+    "app.post",
+)
+_REGISTRY_CONTENT_COMPOSE_TOKENS = (
+    "register",
+    "include",
+    "mount",
+    "compose",
+    "manifest",
+    "children",
+    "urlpatterns",
+    "routes",
+    "router",
+)
+_MAX_REGISTRY_FILE_BYTES = 200_000
 
 
 def _extract_operating_notes_block(charter_text: str) -> str | None:
@@ -616,6 +679,113 @@ def parse_information_architecture_contract(source: str | Path) -> dict[str, Any
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _registration_isolation_payload(ia: dict[str, Any]) -> dict[str, Any] | None:
+    raw = ia.get("registration_isolation")
+    return raw if isinstance(raw, dict) else None
+
+
+def _declared_shared_registry_paths(ia: dict[str, Any] | None) -> set[str]:
+    if not isinstance(ia, dict):
+        return set()
+    isolation = _registration_isolation_payload(ia)
+    if isolation is None:
+        return set()
+    out: set[str] = set()
+    entries = isolation.get("shared_registry_files")
+    if not isinstance(entries, list):
+        return out
+    for entry in entries:
+        if isinstance(entry, str):
+            path = entry.strip()
+        elif isinstance(entry, dict):
+            path = str(entry.get("path") or "").strip()
+        else:
+            continue
+        if path:
+            out.add(path.lstrip("./"))
+    return out
+
+
+def _validate_registration_isolation_contract(
+    ia: dict[str, Any],
+    *,
+    require: bool = False,
+) -> list[CoherenceFinding]:
+    isolation = _registration_isolation_payload(ia)
+    if isolation is None:
+        if require:
+            return [CoherenceFinding(
+                kind="route_registration_isolation_contract_missing",
+                reference="registration_isolation",
+                detail=(
+                    "multi-leaf route decomposition requires CHARTER.IA "
+                    "registration_isolation"
+                ),
+            )]
+        return []
+
+    findings: list[CoherenceFinding] = []
+    policy = str(isolation.get("policy") or "").strip()
+    if policy not in _REGISTRATION_ISOLATION_POLICIES:
+        findings.append(CoherenceFinding(
+            kind="route_registration_isolation_contract_invalid",
+            reference="registration_isolation.policy",
+            detail=(
+                "registration_isolation.policy must be one of "
+                + ", ".join(sorted(_REGISTRATION_ISOLATION_POLICIES))
+            ),
+        ))
+
+    leaf_globs = isolation.get("leaf_extension_globs")
+    if policy != "none_needed":
+        if not isinstance(leaf_globs, list) or not any(
+            isinstance(item, str) and item.strip() for item in leaf_globs
+        ):
+            findings.append(CoherenceFinding(
+                kind="route_registration_isolation_contract_invalid",
+                reference="registration_isolation.leaf_extension_globs",
+                detail=(
+                    "registration_isolation.leaf_extension_globs must list "
+                    "where feature leaves add route modules"
+                ),
+            ))
+
+    registries = isolation.get("shared_registry_files")
+    if registries is not None and not isinstance(registries, list):
+        findings.append(CoherenceFinding(
+            kind="route_registration_isolation_contract_invalid",
+            reference="registration_isolation.shared_registry_files",
+            detail="registration_isolation.shared_registry_files must be a list",
+        ))
+    elif isinstance(registries, list):
+        for index, entry in enumerate(registries):
+            if isinstance(entry, str):
+                if entry.strip():
+                    continue
+                path = ""
+                leaf_edit = False
+            elif isinstance(entry, dict):
+                path = str(entry.get("path") or "").strip()
+                leaf_edit = entry.get("leaf_edit") is True
+            else:
+                path = ""
+                leaf_edit = False
+            if not path:
+                findings.append(CoherenceFinding(
+                    kind="route_registration_isolation_contract_invalid",
+                    reference=f"registration_isolation.shared_registry_files[{index}].path",
+                    detail="shared registry entries must include a path",
+                ))
+            if leaf_edit:
+                findings.append(CoherenceFinding(
+                    kind="route_registration_isolation_contract_invalid",
+                    reference=f"registration_isolation.shared_registry_files[{index}].leaf_edit",
+                    detail="shared registry files must set leaf_edit false",
+                ))
+
+    return findings
 
 
 def _charter_line_counts(charter_text: str) -> dict[str, int]:
@@ -884,7 +1054,209 @@ def validate_information_architecture_contract(
                 ),
             ))
 
+    findings.extend(_validate_registration_isolation_contract(ia, require=False))
     return findings
+
+
+def _text_has_route_registration_term(text: str) -> bool:
+    lowered = text.lower()
+    return any(re.search(rf"\b{re.escape(term)}s?\b", lowered) for term in _ROUTE_REGISTRATION_TERMS)
+
+
+def _task_is_architect(task: dict[str, Any]) -> bool:
+    return str(task.get("intent") or "").lstrip().lower().startswith("architect")
+
+
+def _task_is_route_registration_leaf(task: dict[str, Any]) -> bool:
+    text = " ".join(
+        [
+            str(task.get("intent") or ""),
+            " ".join(str(item) for item in (task.get("owned_paths") or [])),
+            " ".join(str(item) for item in (task.get("action_ids") or [])),
+        ]
+    )
+    return _text_has_route_registration_term(text)
+
+
+def _is_noise_file(path: Path) -> bool:
+    return any(part in _NOISE_DIRS for part in path.parts)
+
+
+def _owned_pattern_files(project_dir: Path, pattern: str) -> set[str]:
+    pattern = pattern.strip().strip("`").lstrip("./")
+    if not pattern or "<" in pattern or "{" in pattern:
+        return set()
+    out: set[str] = set()
+    has_glob = any(ch in pattern for ch in "*?[")
+    if has_glob:
+        try:
+            matches = list(project_dir.glob(pattern))
+        except ValueError:
+            matches = []
+        for match in matches:
+            if match.is_file() and not _is_noise_file(match):
+                out.add(match.relative_to(project_dir).as_posix())
+        return out
+
+    candidate = project_dir / pattern
+    if candidate.is_file() and not _is_noise_file(candidate):
+        return {candidate.relative_to(project_dir).as_posix()}
+    if candidate.is_dir() and not _is_noise_file(candidate):
+        for match in candidate.rglob("*"):
+            if match.is_file() and not _is_noise_file(match):
+                out.add(match.relative_to(project_dir).as_posix())
+                if len(out) >= 500:
+                    break
+        return out
+    if Path(pattern).suffix:
+        return {pattern}
+    return set()
+
+
+def _owned_file_map(
+    project_dir: Path,
+    leaves: dict[str, dict[str, Any]],
+) -> tuple[dict[str, set[str]], dict[str, dict[str, list[str]]]]:
+    by_file: dict[str, set[str]] = {}
+    patterns_by_file: dict[str, dict[str, list[str]]] = {}
+    for task_id, task in leaves.items():
+        for raw_pattern in task.get("owned_paths") or []:
+            pattern = str(raw_pattern).strip()
+            if not pattern:
+                continue
+            for rel_path in _owned_pattern_files(project_dir, pattern):
+                by_file.setdefault(rel_path, set()).add(task_id)
+                patterns_by_file.setdefault(rel_path, {}).setdefault(task_id, []).append(pattern)
+    return by_file, patterns_by_file
+
+
+def _read_registry_candidate_text(project_dir: Path, rel_path: str) -> str:
+    path = project_dir / rel_path
+    try:
+        if not path.is_file() or path.stat().st_size > _MAX_REGISTRY_FILE_BYTES:
+            return ""
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
+def _registry_candidate_evidence(
+    project_dir: Path,
+    rel_path: str,
+    *,
+    declared_registry_paths: set[str],
+    route_like_leaf_count: int,
+) -> list[str]:
+    evidence: list[str] = []
+    if rel_path in declared_registry_paths:
+        evidence.append("declared in CHARTER.IA registration_isolation.shared_registry_files")
+    if _REGISTRY_PATH_RE.search(rel_path):
+        evidence.append("path has route/registry naming")
+    text = _read_registry_candidate_text(project_dir, rel_path).lower()
+    if text:
+        has_route_token = any(token in text for token in _REGISTRY_CONTENT_ROUTE_TOKENS)
+        has_compose_token = any(token in text for token in _REGISTRY_CONTENT_COMPOSE_TOKENS)
+        if has_route_token and has_compose_token:
+            evidence.append("content has route registration/composition tokens")
+    if (
+        not evidence
+        and route_like_leaf_count >= 2
+        and Path(rel_path).suffix.lower() in _CODE_FILE_SUFFIXES
+    ):
+        evidence.append("multiple route-like leaves own the same code file")
+    return evidence
+
+
+def check_route_registration_isolation(
+    project_dir: Path,
+    *,
+    graph: dict[str, Any],
+    architect_task_id: str,
+    parent_task_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return a structured blocker when route registration is not isolated.
+
+    This is intentionally stack-generic: it looks at the architect's CHARTER IA
+    contract plus the planned leaf owned-path sets. The failure mode is a
+    multi-leaf route decomposition where feature leaves would edit the same
+    registry/composition file.
+    """
+    tasks_raw = graph.get("tasks") if isinstance(graph, dict) else None
+    if not isinstance(tasks_raw, dict):
+        return None
+    architect_task = tasks_raw.get(architect_task_id)
+    if not isinstance(architect_task, dict):
+        return None
+    parent_id = parent_task_id or str(architect_task.get("parent_task_id") or "")
+    if not parent_id:
+        return None
+
+    route_leaves: dict[str, dict[str, Any]] = {}
+    for task_id, task in tasks_raw.items():
+        if task_id == architect_task_id or not isinstance(task, dict):
+            continue
+        if str(task.get("parent_task_id") or "") != parent_id:
+            continue
+        if _task_is_architect(task) or not _task_is_route_registration_leaf(task):
+            continue
+        route_leaves[str(task_id)] = task
+    if len(route_leaves) < 2:
+        return None
+
+    ia = parse_information_architecture_contract(project_dir / "CHARTER.md") or {}
+    contract_findings = _validate_registration_isolation_contract(ia, require=True)
+    declared_registry_paths = _declared_shared_registry_paths(ia)
+    by_file, patterns_by_file = _owned_file_map(project_dir, route_leaves)
+    shared_files: list[dict[str, Any]] = []
+    for rel_path, task_ids in sorted(by_file.items()):
+        if len(task_ids) < 2:
+            continue
+        evidence = _registry_candidate_evidence(
+            project_dir,
+            rel_path,
+            declared_registry_paths=declared_registry_paths,
+            route_like_leaf_count=len(route_leaves),
+        )
+        if not evidence:
+            continue
+        shared_files.append({
+            "path": rel_path,
+            "task_ids": sorted(task_ids),
+            "owned_patterns": {
+                task_id: patterns_by_file.get(rel_path, {}).get(task_id, [])
+                for task_id in sorted(task_ids)
+            },
+            "evidence": evidence,
+        })
+
+    if not shared_files and not contract_findings:
+        return None
+
+    contract_payload = [
+        {"kind": f.kind, "reference": f.reference, "detail": f.detail}
+        for f in contract_findings
+    ]
+    if shared_files:
+        message = (
+            "architect route registration is not isolated: multiple route leaves "
+            "own the same registry/composition file"
+        )
+    else:
+        message = (
+            "architect route registration isolation contract is missing or invalid "
+            "for a multi-leaf route decomposition"
+        )
+    return {
+        "kind": "shared_registry_not_isolated",
+        "step_id": "architect_route_registration_isolation",
+        "message": message,
+        "architect_task_id": architect_task_id,
+        "parent_task_id": parent_id,
+        "leaf_task_ids": sorted(route_leaves),
+        "shared_files": shared_files,
+        "contract_findings": contract_payload,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
 
 
 def _looks_like_path(ref: str, inv: CapabilityInventory) -> bool:
