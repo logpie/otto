@@ -696,13 +696,17 @@ def parse_information_architecture_contract(source: str | Path) -> dict[str, Any
     return payload if isinstance(payload, dict) else None
 
 
-def _read_charter_source(source: str | Path) -> str | None:
+def _read_charter_source(source: str | Path) -> tuple[str | None, CoherenceFinding | None]:
     if isinstance(source, Path):
         try:
-            return source.read_text(encoding="utf-8")
-        except OSError:
-            return None
-    return source
+            return source.read_text(encoding="utf-8"), None
+        except OSError as exc:
+            return None, CoherenceFinding(
+                kind="foundation_contracts_charter_unreadable",
+                reference=str(source),
+                detail=f"could not read CHARTER.md: {exc}",
+            )
+    return source, None
 
 
 def _foundation_contracts_payload(charter_text: str) -> Any:
@@ -735,7 +739,9 @@ def parse_foundation_contracts(
     keep the ownership contract visually separate while using the same parser
     module as the IA contract.
     """
-    text = _read_charter_source(source)
+    text, read_finding = _read_charter_source(source)
+    if read_finding is not None:
+        return [], [read_finding]
     if text is None:
         return [], []
 

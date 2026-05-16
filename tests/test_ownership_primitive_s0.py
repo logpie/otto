@@ -163,6 +163,31 @@ def test_duplicate_submit_subtask_corrects_foundation_to_feature_role(tmp_path: 
     assert task["task_role"] == "feature"
 
 
+def test_duplicate_foundation_submit_with_omitted_task_role_preserves_foundation(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    first = submit_subtask_for_lead(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        task_id="root",
+        intent="Build auth",
+        owned_paths=["backend/auth.py"],
+        task_role="foundation",
+    )
+    second = submit_subtask_for_lead(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        task_id="root",
+        intent="Build auth",
+        owned_paths=["backend/auth.py"],
+    )
+
+    assert second == {"task_id": first["task_id"], "duplicate": True, "metadata_updated": False}
+    task = get_task(tmp_path, str(first["task_id"])) or {}
+    assert task["task_role"] == "foundation"
+
+
 def test_ready_entry_reflects_corrected_duplicate_metadata(tmp_path: Path) -> None:
     session_dir = tmp_path / "session"
     session_dir.mkdir()
@@ -286,6 +311,37 @@ def test_ia_form_foundation_contracts_parse(tmp_path: Path) -> None:
 def test_empty_foundation_contracts_clear_stale_parent_contracts(tmp_path: Path) -> None:
     stale = [{"path": "frontend/src/lib/ws.ts", "owner_task_id": "architect", "check": "semantic"}]
     (tmp_path / "CHARTER.md").write_text(_charter([]), encoding="utf-8")
+    record_task(tmp_path, task_id="parent", intent="parent", foundation_contracts=stale)
+
+    parsed, findings = persist_foundation_contracts_from_charter(
+        tmp_path,
+        parent_task_id="parent",
+    )
+
+    assert findings == []
+    assert parsed == []
+    assert (get_task(tmp_path, "parent") or {})["foundation_contracts"] == []
+
+
+def test_missing_charter_does_not_clear_stale_parent_foundation_contracts(tmp_path: Path) -> None:
+    stale = [{"path": "frontend/src/lib/ws.ts", "owner_task_id": "architect", "check": "semantic"}]
+    record_task(tmp_path, task_id="parent", intent="parent", foundation_contracts=stale)
+
+    parsed, findings = persist_foundation_contracts_from_charter(
+        tmp_path,
+        parent_task_id="parent",
+    )
+
+    assert parsed == []
+    assert any(f.kind == "foundation_contracts_charter_unreadable" for f in findings)
+    assert (get_task(tmp_path, "parent") or {})["foundation_contracts"] == stale
+
+
+def test_present_charter_with_removed_foundation_contracts_clears_stale_parent_contracts(
+    tmp_path: Path,
+) -> None:
+    stale = [{"path": "frontend/src/lib/ws.ts", "owner_task_id": "architect", "check": "semantic"}]
+    (tmp_path / "CHARTER.md").write_text("# CHARTER\n\nNo contracts.\n", encoding="utf-8")
     record_task(tmp_path, task_id="parent", intent="parent", foundation_contracts=stale)
 
     parsed, findings = persist_foundation_contracts_from_charter(

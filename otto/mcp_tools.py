@@ -159,8 +159,10 @@ def _coerce_id_list(raw: Any) -> list[str]:
     return cleaned
 
 
-def _coerce_task_role(raw: Any) -> str:
-    role = str(raw or "feature").strip()
+def _coerce_task_role(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    role = str(raw).strip()
     return role if role in TASK_ROLES else "feature"
 
 
@@ -220,7 +222,7 @@ def submit_subtask_for_lead(
     depends_on: list[str] | None = None,
     owned_paths: list[str] | None = None,
     action_ids: list[str] | None = None,
-    task_role: str = "feature",
+    task_role: str | None = None,
     foundation_contracts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Record one emitted subtask, preserving corrected S0 ownership metadata."""
@@ -248,10 +250,11 @@ def submit_subtask_for_lead(
                 and entry.get("parent_task_id") == task_id
                 and _intent_hash(task_id, entry.get("intent") or "") == idem_key
             ):
-                existing_role = _coerce_task_role(entry.get("task_role"))
+                existing_role = _coerce_task_role(entry.get("task_role")) or "feature"
                 existing_owned_paths = list(entry.get("owned_paths") or [])
+                role_changed = role is not None and existing_role != role
                 changed = (
-                    existing_role != role
+                    role_changed
                     or existing_owned_paths != requested_owned_paths
                 )
                 if changed and _terminal_verdict(entry.get("verdict")):
@@ -264,7 +267,7 @@ def submit_subtask_for_lead(
                             "owned_paths": existing_owned_paths,
                         },
                         "requested": {
-                            "task_role": role,
+                            "task_role": role if role is not None else existing_role,
                             "owned_paths": requested_owned_paths,
                         },
                     }
@@ -291,7 +294,7 @@ def submit_subtask_for_lead(
             depends_on=depends_on,
             owned_paths=owned_paths,
             action_ids=action_ids,
-            task_role=role,
+            task_role=role or "feature",
             parent_integration_branch=None,
         )
         append_pending_entry(path, entry)
@@ -345,15 +348,17 @@ def create_otto_mcp_server(
             "Lead's task_id is automatically recorded as parent_task_id; you do "
             "NOT pass it. If a child must run after another, pass depends_on=[task_id, ...]. "
             "When known, pass owned_paths=[...] and action_ids=[...] so Otto can "
-            "safely scope child context. Use task_role='foundation' for the "
-            "architect/scaffold child and task_role='feature' for ordinary leaves."
+            "safely scope child context. Omit task_role when unchanged; use "
+            "task_role='foundation' for the architect/scaffold child and an "
+            "explicit task_role='feature' only when correcting a child back to "
+            "ordinary feature ownership."
         ),
         {
             "intent": str,
             "depends_on": list[str],
             "owned_paths": list[str],
             "action_ids": list[str],
-            "task_role": str,
+            "task_role": str | None,
             "foundation_contracts": list[dict[str, Any]],
         },
     )
