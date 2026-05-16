@@ -1334,3 +1334,34 @@ exactly one runner executes a leaf's merge-only retry at a time;
 crash/restart always resolves to pass or honest merge_blocked within
 bounded attempts; no double-merge, no deadlock, no silent strand.
 Proceed to S3.
+
+---
+
+## Ownership-first redesign S4 (split detection-only smoke from leaf repair loop) — Impl Gate (2026-05-16)
+
+The fix for the user's ORIGINAL pain: the 1799s leaf repair-agent timeout that hung the iTracker capstone.
+
+### Round 1 — Codex (REVISE)
+- [CRITICAL] S4 broken on the REAL path: CleanOracleIssue.paths dropped by preflight_issues_from_clean_oracle/PreflightIssue/serialization → classifier saw pathless → empty-bound amendment + cap-check/increment key mismatch → 1799s stuck-cycle re-emerged via S2 tasks (tests masked with pathful fakes) — fixed (d91cece58): PreflightIssue.paths field threaded end-to-end + clean_oracle_result fallback; pathless → honest integration_smoke_unrouteable; single normalized repair_path cap key.
+- [IMPORTANT] in-scope leaf smoke-repair fallback entered UNRESTRICTED full-oracle loop — fixed: allowed_paths=owned + scope_policy + commit-hook allowlist before foundation gate.
+
+### Round 2 — Codex (REVISE)
+- [CRITICAL] py_compile set issue.paths = ALL compiled files (command input, not causal) → leaf-owned syntax error looked out-of-scope → misrouted in-scope bug — fixed (2adf5cad1): causal-path parsing at the producer; router binds ALL causal paths or honest unrouteable (no first-sorted guess); py_compile confirmed only non-causal producer; amendment gate multi-bound-path support stays tight.
+- R1 pathless/cap + in-scope-scoping confirmed CLOSED.
+
+### Round 3 — Codex — APPROVED
+- Causal py_compile parsing robust across shapes; broad input never drives routing; audit holds (py_compile only non-causal producer); multi-path binding tight (rejects outside bound set; unrouteable if cannot bind all); S4-R1 + S0/S1/S2 protections intact; tests exercise the real producer.
+- [NOTE tracked] _py_compile_causal_paths converts abs-path-outside-cwd → basename (edge: synthetic basename for unexpected internal traceback). Non-blocking; hardening = skip non-cwd-relative abs paths.
+
+S4 Implementation Gate: 2 review rounds + 1 confirmation → APPROVED with
+1 tracked NOTE. Commits: fa5c481c5 (S4) → d91cece58 (R1) → 2adf5cad1
+(R2). Scenes #1/#2/#5 GREEN; #3/#4 RED (S5/S3 not yet done); 44 S0-S2+S4
+ownership units GREEN; broad suite only the known pre-existing
+test_v5_phase2 git-worktree-rot + committed test_v5_architect_retry
+check_scaffold_compiles-AttributeError rot (both pre-session, e2329e9a7;
+entangled with the user's 4 uncommitted route-isolation dirty files —
+deliberately NOT committed); ruff clean. The original 1799s leaf
+repair-hang is now structurally impossible (detection-only smoke;
+out-of-scope→S2-routed runnable task; pathless/indeterminate→honest
+terminal; in-scope→owned-path-scoped). Remaining: S3, S5, global verify,
+capstone acceptance.
