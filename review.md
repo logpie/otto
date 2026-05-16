@@ -1179,3 +1179,48 @@ repeatedly emits "Let me write the spec JSON now" across elapsed 278s→773s
 correctly converts that catastrophic crash into an honest bounded terminal
 but does NOT make the agent converge. Compile-agent convergence on very
 large intents is a separate open issue (prompt/agent design).
+
+---
+
+## Audit-Repair Over-Classification (#3) — Implementation Gate (2026-05-16)
+
+Reviewed: e551565a3 → 1415419f7. Root cause bisected to 146f2a889
+("agentic-native hardening pass 3 — over-classification"): removed
+audit_loop's blocked/no-evidence exclusion → repair_gate defaulted every
+non-passing verdict to REPAIR_NOW → no-evidence/"not evaluated" features
+perpetuated repair+audit rounds (test_layer2: 4 audits vs 2). User
+directive: kill the recurring classification class, not patch #4.
+
+### Round 1 — Codex
+- [CRITICAL] audit-timeout recovery flattened recovered `failed` →
+  evidence-less `blocked` → new evidence-driven gate returned NO_REPAIR
+  → genuine failure silently unrepaired (false-pass) — fixed by Codex
+  (1415419f7): shared typed contract; recovered failed/partial →
+  actionable; strength fields carried into Layer-2 payload.
+- [IMPORTANT] stale-verdict oscillation for evidence-backed failures
+  omitted by a PASSED re-audit — fixed: _fill_missing_attempted_oracle
+  _state makes omitted attempted ids count as no-progress (signature
+  only; no verdict synthesis) so the loop halts.
+- [NOTE] evidence signal was an ad-hoc allow-list (relocated taxonomy /
+  drift root) — fixed: new otto/repair_evidence.py single typed
+  RepairEvidence contract consumed by parse + recovery + runner payload
+  + gate.
+
+### Round 2 — Codex re-reviewed fixes
+- APPROVED. No CRITICAL/IMPORTANT.
+- [NOTE] _audit_output_format() producer schema still manually lists
+  only evidence_refs, not generated from the shared contract — "can't
+  desync" holds downstream of produced JSON only. Non-blocking; future
+  cleanup tracked.
+
+Production de-classified to evidence-driven (failed/partial = explicit
+signal; ambiguous needs actionable evidence); no verdict synthesis, no
+detail/test-string special-casing; oracle test_layer2_… byte-unchanged;
+2 regression tests added. Verified: oracle PASS; 194/194 focused;
+430/430 broad audit|repair|runner|audit_loop; ruff clean.
+
+Implementation Gate: 1 round + 1 confirmation → APPROVED.
+Commits: e551565a3 → 1415419f7. Triage trail: brownfield fixtures
+(stale Group.title, 0fa0a81bc) + this (146f2a889 regression). The 4
+tests/test_v5_*.py route-isolation dirty files remain pre-existing /
+out-of-scope (untouched, uncommitted).
