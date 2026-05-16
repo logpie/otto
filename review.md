@@ -1036,3 +1036,69 @@ Plan Gate: 4 rounds (11+7+3 findings) → APPROVED. Implementation Gate: 3 round
 - APPROVED. No new CRITICAL/IMPORTANT. Action-effect delta covers all validator-accepted locator forms; agreement test meaningful; final-persistence presence preserved; range clean.
 
 Plan Gate: 4 rounds (7+5+1) → APPROVED. Implementation Gate: 4 rounds (8+3+1) → APPROVED.
+
+---
+
+## Concurrency+Recursion Critical-Seam Fixes — Implementation Gate (2026-05-16)
+
+Reviewed: 6796a9058 (spec-state event_id flock + moving-target union repair),
+hardened across rounds. Repros banked in 401e78f6c
+(tests/test_concurrency_recursion_seam_repros.py): #1 depth-3 dual-subtree
+propagation GREEN (regression); #2 5-way concurrent merge RED→fixed; #3
+spec-state event_id race RED→fixed.
+
+### Round 1 — Codex
+- [CRITICAL] Conflict-path stale retry could terminal merge_blocked with
+  structured_reason=None (fell into generic block) — fixed by Codex (f92b55ff9):
+  unified record_terminal() always records non-None structured reason.
+- [CRITICAL] Three stale-target re-entry calls unguarded → escape →
+  catastrophic — fixed by Codex: _repair_child_stale_target_gate_once
+  builds feedback first, try/excepts the bounded re-entry.
+- [IMPORTANT] Stale-target success after conflict repair skipped merged-target
+  smoke oracle — fixed by Codex (run_smoke_preflight in shared helper).
+- [IMPORTANT] Follow-up union failure recorded stale_feedback as top-level,
+  burying integration_union_incomplete — fixed by Codex (followup_feedback
+  top-level, stale nested).
+- [REFACTOR] Three diverging near-duplicate stale-target blocks — collapsed
+  into one shared _repair_stale_target_and_retry_merge helper.
+
+### Round 2 — Codex re-reviewed fixes
+- [IMPORTANT] Union recheck (_record_and_check_integration_union) still
+  unguarded in helper + site-2 → escape → unstructured — fixed by Codex
+  (3779aca79): wrapped → integration_union_guard_error structured terminal.
+- [NOTE→fixed] Empty pre_merge_ref returned blind success — fixed: structured
+  *_pre_merge_ref_unresolved terminal before any downstream union check.
+
+### Round 3 — Codex re-reviewed fixes
+- [IMPORTANT] Original inline conflict-repair smoke call still unguarded
+  (escape / generic unstructured block) — fixed by Codex (9d82e48f8):
+  _child_merge_conflict_smoke_failed_feedback + unified recorder + return.
+- [IMPORTANT] Terminal recorder _record_structured_merge_failed could itself
+  throw via task-graph IO — fixed by Codex: now no-throw (staged in-memory →
+  best-effort durable with recording_error → best-effort emit); unified as
+  the single terminal recorder.
+
+### Round 4 — Codex re-reviewed fixes
+- [IMPORTANT] REGRESSION from round 3: _repair_child_upward_merge_gate_once
+  recorded terminally itself AND callers recorded → duplicate
+  merge_blocked + double merge_failed per child — fixed by Codex (b7ed0366a):
+  caller-owned terminal ownership; helper report-only again.
+- [IMPORTANT] Deeper repair-helper awaits after commit_worktree still
+  unguarded → escape — fixed by Codex: every direct await try/excepted via
+  _child_repair_helper_crashed_feedback + unified recorder + return; final
+  child_merge_path_incomplete guard before sole _emit "merged".
+
+### Round 5 — Codex final confirmation
+- APPROVED. All 5 invariant claims confirmed (exactly-one terminal; no
+  post-commit escape; "merged" unreachable after terminal; no-throw
+  recorder; bounded/single-channel unchanged). NOTE: structured-feedback
+  builder count is a maintainability follow-up, non-blocking.
+
+Independent verification (Claude): tests/test_concurrency_recursion_seam_repros
++ test_critical_seam_repros + test_shared_route_registration_repro 9/9;
+spec_state+v5_runner+merge_child 20/20; ruff clean.
+
+Plan Gate: n/a (fix dispatched from RED repro evidence, not a written plan).
+Implementation Gate: 4 review rounds + 1 confirmation (8 findings) → APPROVED.
+Commits: 401e78f6c (repros) · 6796a9058 → f92b55ff9 → 3779aca79 → 9d82e48f8
+→ b7ed0366a (fix series).
