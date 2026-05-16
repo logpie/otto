@@ -1266,3 +1266,38 @@ GREEN; 5 scene repros still RED (S0 flips none — correct); ruff clean.
 4 test_v5_phase2 failures confirmed PRE-EXISTING (git-worktree
 test-harness rot, identical at 8dece7c93 before S0; one of the 4
 uncommitted route-isolation files; out of scope). Proceed to S1.
+
+---
+
+## Ownership-first redesign S1 (isolation gate + scheduler + write-invariant) — Impl Gate (2026-05-16)
+
+### Round 1 — Codex (REVISE)
+- [CRITICAL] scheduler allowed feature dispatch when contracts absent — fixed.
+- [CRITICAL] terminal-blocked foundation silently stranded features — fixed.
+- [CRITICAL] isolation gate missed the NESTED owned-path capstone shape
+  (foundation backend/, feature backend/routers/auth.py) — fixed; scene
+  #1 strengthened to nested shape (verified RED on old db5b8196c).
+- [IMPORTANT] _task_entry_allows_upward_merge ignored durable blocked — fixed.
+- [IMPORTANT] over-broad any-contract_amendment write allow — removed
+  (S2 reintroduces bound allow); integration-of-record deferred.
+- 8 commit hooks enumerated+gated; no S2-S5 leak — confirmed.
+
+### Round 2 — Codex (REVISE)
+- [CRITICAL] foundation passed-without-contracts dead-end (silent hold,
+  test masked via external injection) — fixed: re-enter architect
+  bounded → honest terminal; test rewritten to real transition.
+- [CRITICAL] terminal foundation only terminalized ready features, not
+  pending depends_on ones — fixed: scan ALL unmerged feature siblings.
+- Nested-tree fix + IMPORTANT-4/5 confirmed correct.
+
+### Round 3 — Codex — APPROVED
+- Bounded re-enter (existing cap), all dependents terminalized on
+  exhaustion, valid-contracts path unaffected, branches compose
+  (missing-after-pass vs terminal-blocked mutually exclusive),
+  pure-feature unaffected, tests assert real transitions. No new issues.
+
+S1 Implementation Gate: 2 review rounds + 1 confirmation → APPROVED.
+Commits: db5b8196c (S1) → cfabf1fbf (R1) → 78535d150 (R2). Scene #1
+GREEN (nested capstone shape); #2-#5 RED; 22 S0+S1 units GREEN; broad
+suite only the 4 known pre-existing test_v5_phase2 git-worktree-rot
+failures; ruff clean. Proceed to S2.
