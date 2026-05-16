@@ -81,7 +81,11 @@ from otto.queue.task_graph import (
     tree_total_cost,
     update_task_metadata,
 )
-from otto.spec_compile_flat import compile_flat_spec, FlatSpec
+from otto.spec_compile_flat import (
+    FlatSpec,
+    SpecContractRepairExhaustedError,
+    compile_flat_spec,
+)
 from otto.v5_branching import MergeWorktreeDirtyError
 
 logger = logging.getLogger("otto.v5_runner")
@@ -1639,6 +1643,11 @@ async def run_v5_pipeline(
                 "journey_count": len(spec.behavior_journeys),
                 "lint_warnings": len(spec.lint_warnings),
             })
+        except SpecContractRepairExhaustedError as exc:
+            logger.warning("flat spec pass-model repair exhausted: %s", exc)
+            result.verdict = "merge_blocked"
+            result.failure_reason = f"spec_contract_repair_exhausted: {exc}"
+            return result
         except Exception as exc:  # noqa: BLE001
             logger.exception("flat spec compile failed")
             result.verdict = "catastrophic"

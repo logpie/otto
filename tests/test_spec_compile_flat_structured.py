@@ -12,6 +12,7 @@ from otto.spec_compile_flat import (
     FlatSpec,
     INTENT_CLAIMS_MAX,
     SCHEMA_VERSION,
+    SpecContractRepairExhaustedError,
     StructuredSpecValidationError,
     _PROMPT_TEMPLATE,
     _cleanup_root_spec_artifacts,
@@ -134,6 +135,120 @@ def _valid_spec() -> FlatSpec:
             }
         ],
     )
+
+
+def _itracker_comment_mention_payload(pass_model: dict[str, object]) -> dict[str, Any]:
+    payload = asdict(_valid_spec())
+    payload["product_overview"]["one_liner"] = "Issue tracker with mention inbox notifications."
+    payload["core_entities"][0] = {
+        "id": "comment",
+        "name": "Comment",
+        "fields": [
+            {
+                "id": "comment.body",
+                "name": "body",
+                "type": "string",
+                "intent_claim_ids": ["claim.issue_create"],
+            }
+        ],
+        "states": ["draft", "posted"],
+        "primary_actions": [
+            {
+                "id": "comment.mention",
+                "verb": "send",
+                "success_observable": "Mentioned user receives an inbox notification tied to the issue comment.",
+                "error_observable": "Inline error explains why the mention cannot be sent.",
+                "intent_claim_ids": ["claim.issue_create"],
+            }
+        ],
+    }
+    payload["behavior_journeys"][0].update({
+        "id": "comment_mention_inbox",
+        "description": (
+            "A teammate comments with @maria on Fix login and Maria sees the "
+            "mention in her inbox."
+        ),
+        "covers_primary_actions": ["comment.mention"],
+        "start_state": "authenticated_seeded_workspace",
+        "entry_route": "/",
+        "verification_level": "ui",
+        "pass_model": pass_model,
+    })
+    return payload
+
+
+def _weak_comment_mention_pass_model() -> dict[str, object]:
+    tautological = {
+        "kind": "text_visible",
+        "description": "Comment text appears.",
+        "text": "@maria can you review Fix login?",
+    }
+    return {
+        "start_state": "authenticated_seeded_workspace",
+        "setup": [],
+        "actions": [
+            {
+                "id": "comment.mention",
+                "state_changing": True,
+                "role": "button",
+                "name": "Post comment",
+                "covers_primary_actions": ["comment.mention"],
+                "success_observables": [tautological],
+                "network_expectations": [],
+            }
+        ],
+        "success_observables": [tautological],
+        "ready_policy": {"route": "/", "wait_for": "interactive"},
+        "settle_policy": {"after_action": "dom_or_network_effect", "timeout_ms": 5000},
+        "network_expectations": [],
+        "final_dom_assertions": [tautological],
+    }
+
+
+def _strong_comment_mention_pass_model() -> dict[str, object]:
+    observable = {
+        "kind": "persisted_data_visible",
+        "primary_action_id": "comment.mention",
+        "description": (
+            "After posting a comment that mentions Maria, Maria's inbox shows "
+            "a Fix login notification from that comment."
+        ),
+        "text": "Fix login",
+    }
+    return {
+        "start_state": "authenticated_seeded_workspace",
+        "setup": [],
+        "actions": [
+            {
+                "id": "comment.mention",
+                "state_changing": True,
+                "role": "button",
+                "name": "Post comment",
+                "covers_primary_actions": ["comment.mention"],
+                "success_observables": [observable],
+                "network_expectations": [],
+            }
+        ],
+        "success_observables": [observable],
+        "ready_policy": {"route": "/", "wait_for": "interactive"},
+        "settle_policy": {"after_action": "dom_or_network_effect", "timeout_ms": 5000},
+        "network_expectations": [],
+        "final_dom_assertions": [observable],
+    }
+
+
+def _strict_union_type_paths(schema: Any, path: str = "$") -> list[str]:
+    paths: list[str] = []
+    if isinstance(schema, dict):
+        raw_type = schema.get("type")
+        if isinstance(raw_type, list):
+            paths.append(path)
+        for key, value in schema.items():
+            paths.extend(_strict_union_type_paths(value, f"{path}.{key}"))
+    elif isinstance(schema, list):
+        for index, item in enumerate(schema):
+            paths.extend(_strict_union_type_paths(item, f"{path}[{index}]"))
+    return paths
 
 
 def test_valid_structured_flat_spec_passes() -> None:
@@ -261,6 +376,146 @@ async def test_compile_flat_spec_missing_webapp_entry_route_is_hard_error(
             intent="build an issue tracker",
             config={"spec_compile_no_cache": True},
         )
+
+
+@pytest.mark.asyncio
+async def test_compile_flat_spec_repairs_inadequate_itracker_pass_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_options(_project_dir: Path, _config: dict[str, object], *, agent_type: str | None = None):
+        assert agent_type == "spec"
+        return SimpleNamespace(
+            max_turns=1,
+            provider="claude",
+            model="claude-sonnet-test",
+        )
+
+    weak_payload = _itracker_comment_mention_payload(_weak_comment_mention_pass_model())
+    repaired_payload = _itracker_comment_mention_payload(_strong_comment_mention_pass_model())
+    repaired_payload["product_overview"]["one_liner"] = "This unrelated repair drift must be ignored."
+    prompts: list[str] = []
+
+    async def fake_run_compile(
+        prompt: str,
+        _options: object,
+        log_dir: Path,
+        _project_dir: Path,
+    ) -> str:
+        prompts.append(prompt)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "messages.jsonl").write_text("", encoding="utf-8")
+        return json.dumps(weak_payload if len(prompts) == 1 else repaired_payload)
+
+    monkeypatch.setattr("otto.spec_compile_flat.make_agent_options", fake_options)
+    monkeypatch.setattr("otto.spec_compile_flat._run_compile", fake_run_compile)
+
+    session_dir = tmp_path / "otto_logs" / "sessions" / "s1"
+    spec = await compile_flat_spec(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        intent="build an issue tracker with comment mentions and an inbox",
+        config={"spec_compile_no_cache": True},
+        max_retries=0,
+    )
+
+    assert len(prompts) == 2
+    assert "comment_mention_inbox" in prompts[1]
+    assert "state-changing action lacks a non-tautological post-action observable" in prompts[1]
+    assert spec.product_overview["one_liner"] == weak_payload["product_overview"]["one_liner"]
+    action_observable = spec.behavior_journeys[0]["pass_model"]["actions"][0]["success_observables"][0]
+    assert action_observable["primary_action_id"] == "comment.mention"
+    assert action_observable["kind"] == "persisted_data_visible"
+    metrics = json.loads((session_dir / "compile_metrics.json").read_text(encoding="utf-8"))
+    assert metrics["contract_repair_attempts"] == 1
+
+
+@pytest.mark.asyncio
+async def test_compile_flat_spec_exhausts_weak_itracker_pass_model_without_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_options(_project_dir: Path, _config: dict[str, object], *, agent_type: str | None = None):
+        assert agent_type == "spec"
+        return SimpleNamespace(
+            max_turns=1,
+            provider="claude",
+            model="claude-sonnet-test",
+        )
+
+    weak_payload = _itracker_comment_mention_payload(_weak_comment_mention_pass_model())
+    prompts: list[str] = []
+
+    async def fake_run_compile(
+        prompt: str,
+        _options: object,
+        log_dir: Path,
+        _project_dir: Path,
+    ) -> str:
+        prompts.append(prompt)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "messages.jsonl").write_text("", encoding="utf-8")
+        return json.dumps(weak_payload)
+
+    monkeypatch.setattr("otto.spec_compile_flat.make_agent_options", fake_options)
+    monkeypatch.setattr("otto.spec_compile_flat._run_compile", fake_run_compile)
+
+    session_dir = tmp_path / "otto_logs" / "sessions" / "s1"
+    with pytest.raises(SpecContractRepairExhaustedError) as excinfo:
+        await compile_flat_spec(
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            intent="build an issue tracker with comment mentions and an inbox",
+            config={"spec_compile_no_cache": True},
+            max_retries=0,
+        )
+
+    assert len(prompts) == 3
+    assert excinfo.value.code == "verification_contract_invalid"
+    assert "comment_mention_inbox" in excinfo.value.path
+    assert "state-changing action lacks a non-tautological post-action observable" in str(excinfo.value)
+    assert not (session_dir / "spec" / "spec.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_flat_spec_output_schema_avoids_ajv_strict_union_type_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options_seen: list[SimpleNamespace] = []
+
+    def fake_options(_project_dir: Path, _config: dict[str, object], *, agent_type: str | None = None):
+        assert agent_type == "spec"
+        options = SimpleNamespace(
+            max_turns=1,
+            provider="claude",
+            model="claude-sonnet-test",
+        )
+        options_seen.append(options)
+        return options
+
+    async def fake_run_compile(
+        _prompt: str,
+        _options: object,
+        log_dir: Path,
+        _project_dir: Path,
+    ) -> str:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "messages.jsonl").write_text("", encoding="utf-8")
+        return json.dumps(asdict(_valid_spec()))
+
+    monkeypatch.setattr("otto.spec_compile_flat.make_agent_options", fake_options)
+    monkeypatch.setattr("otto.spec_compile_flat._run_compile", fake_run_compile)
+
+    await compile_flat_spec(
+        project_dir=tmp_path,
+        session_dir=tmp_path / "otto_logs" / "sessions" / "s1",
+        intent="build an issue tracker",
+        config={"spec_compile_no_cache": True},
+    )
+
+    schema = options_seen[0].output_format["schema"]
+    assert _strict_union_type_paths(schema) == []
 
 
 def test_intent_claims_over_cap_warns_without_strict_failure() -> None:

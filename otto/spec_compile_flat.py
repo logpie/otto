@@ -25,6 +25,7 @@ import json
 import logging
 import re
 import shutil
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,10 +62,29 @@ ROOT_SPEC_ARTIFACT_FILENAMES = frozenset({
     "otto-spec.json",
     "otto_spec.json",
 })
+PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS = 2
+PASS_MODEL_CONTRACT_REPAIR_CODES = frozenset({
+    "verification_contract_invalid",
+    "verification_contract_missing",
+})
 
 
 class StructuredSpecValidationError(ValueError):
     """Raised when a newly compiled structured flat spec violates hard rules."""
+
+
+class SpecContractRepairExhaustedError(StructuredSpecValidationError):
+    """Raised when bounded pass-model contract repair cannot produce a valid spec."""
+
+    def __init__(self, exc: VerificationContractError, *, attempts: int) -> None:
+        self.code = exc.code
+        self.path = exc.path
+        self.message = exc.message
+        self.attempts = attempts
+        super().__init__(
+            f"{exc.code} at {exc.path}: {exc.message} "
+            f"(pass-model contract repair exhausted after {attempts} attempts)"
+        )
 
 
 @dataclass
@@ -83,6 +103,13 @@ class FlatSpec:
     quality_constraints: list[dict[str, Any]] = field(default_factory=list)
     behavior_journeys: list[dict[str, Any]] = field(default_factory=list)
     lint_warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _PassModelRepairRequest:
+    payload: dict[str, Any]
+    error: VerificationContractError
+    target: str
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +551,8 @@ Use this shape. Keep it compact; empty arrays are fine for supporting fields whe
 Guidance:
 - Behavior journeys are representative user-language samples and must include typed executable verification fields.
 - Webapp UI journeys use `verification_level: "ui"` and a pass_model with accessible locators: role/name for controls, label/name for inputs, and text/role/name/label assertions for resulting UI. Avoid CSS selectors and data-testids unless no accessible locator exists.
+- Every state-changing UI pass_model action must include `success_observables` with a non-tautological post-action observable tied to one of that journey's covered primary actions or to a concrete entity/effect. Example: after `comment.mention`, assert that the mentioned user's inbox contains the comment/issue title; do not merely assert "comment text appears" or "route loaded".
+- The action-level observable, top-level `success_observables`, and `final_dom_assertions` should all point at the same post-action entity/effect so the runner can prove the button actually changed user-visible state.
 - API/CLI/library/service journeys use `verification_level: "api"`, the adapter `probe_kind`, and a strong pass_model: http_api needs response payload assertions/extracted state; cli_command needs stdout/stderr or filesystem effects; library_call needs expect_return or expect_raises; service_health needs health plus payload assertion.
 - Do not use route-loaded, HTTP-200, body-present, skeleton, or generic text as the only success observable.
 - Use at most 5 representative critical flows; avoid DOM APIs.
@@ -540,6 +569,168 @@ YOUR PREVIOUS OUTPUT WAS NOT USABLE JSON FOR OTTO:
 
 Re-emit one JSON object. Keep journeys in user-language; prefer accessible role/name/label/text locators over DOM selectors.
 """
+
+
+_PROMPT_CONTRACT_REPAIR_SUFFIX = """
+
+YOUR PREVIOUS OUTPUT FAILED OTTO'S PASS-MODEL ADEQUACY VALIDATOR:
+- code: {code}
+- path: {path}
+- reason: {message}
+
+Regenerate ONLY the offending `pass_model` for behavior journey `{target}`.
+Keep the same top-level JSON object and keep all other journeys, claims, entities,
+routes, and product fields unchanged. The repaired pass_model must satisfy this
+hard rule: every state-changing action must include at least one
+`success_observables[]` entry that is a non-tautological post-action observable
+tied to a covered primary action or entity effect. Use an executable DOM assertion
+such as text/role/name/label for the created, updated, deleted, sent, exported,
+or notified entity. Do not use route-loaded, HTTP-200, body-present, skeleton, or
+generic text as the only success observable.
+
+Previous JSON to repair:
+```json
+{previous_json}
+```
+"""
+
+
+def _json_schema_any_of(*types: str) -> dict[str, Any]:
+    return {"anyOf": [{"type": kind} for kind in types]}
+
+
+def _contract_error_is_pass_model_repairable(exc: VerificationContractError) -> bool:
+    return exc.code in PASS_MODEL_CONTRACT_REPAIR_CODES and ".pass_model" in exc.path
+
+
+def _contract_error_target(exc: VerificationContractError) -> str:
+    match = re.search(r"behavior_journeys\[([^\]]+)\]", exc.path)
+    return match.group(1) if match else ""
+
+
+def _find_journey_by_target(journeys: list[Any], target: str) -> dict[str, Any] | None:
+    for journey in journeys:
+        if isinstance(journey, dict) and str(journey.get("id") or "") == target:
+            return journey
+    try:
+        index = int(target)
+    except ValueError:
+        return None
+    if 0 <= index < len(journeys) and isinstance(journeys[index], dict):
+        return journeys[index]
+    return None
+
+
+def _merge_repaired_pass_model(
+    base_payload: dict[str, Any],
+    repair_payload: dict[str, Any],
+    *,
+    target: str,
+) -> dict[str, Any] | None:
+    base = deepcopy(base_payload)
+    base_journeys = base.get("behavior_journeys")
+    repair_journeys = repair_payload.get("behavior_journeys")
+    if not isinstance(base_journeys, list) or not isinstance(repair_journeys, list):
+        return None
+    base_journey = _find_journey_by_target(base_journeys, target)
+    repair_journey = _find_journey_by_target(repair_journeys, target)
+    if not isinstance(base_journey, dict) or not isinstance(repair_journey, dict):
+        return None
+    repaired_model = repair_journey.get("pass_model")
+    if not isinstance(repaired_model, dict):
+        return None
+    base_journey["pass_model"] = deepcopy(repaired_model)
+    return base
+
+
+def _preview_from_compiler_payload(
+    parsed: dict[str, Any],
+    *,
+    intent: str,
+    intent_hash: str,
+    project_kind_hint: str | None,
+) -> FlatSpec:
+    journeys_raw = parsed.get("behavior_journeys")
+    if not isinstance(journeys_raw, list):
+        raise TypeError("output 'behavior_journeys' is not a list")
+    return FlatSpec(
+        intent=intent,
+        intent_hash=intent_hash,
+        project_kind=str(parsed.get("project_kind") or project_kind_hint or "webapp"),
+        product_overview=_as_dict(parsed.get("product_overview")),
+        intent_claims=[dict(j) for j in _as_list(parsed.get("intent_claims")) if isinstance(j, dict)],
+        core_entities=[dict(j) for j in _as_list(parsed.get("core_entities")) if isinstance(j, dict)],
+        cold_start_states=[
+            dict(j) for j in _as_list(parsed.get("cold_start_states")) if isinstance(j, dict)
+        ],
+        permissions=[dict(j) for j in _as_list(parsed.get("permissions")) if isinstance(j, dict)],
+        quality_constraints=[
+            dict(j) for j in _as_list(parsed.get("quality_constraints")) if isinstance(j, dict)
+        ],
+        behavior_journeys=[
+            {
+                "id": str(j.get("id") or ""),
+                "description": str(j.get("description") or ""),
+                "covers_primary_actions": [
+                    str(a) for a in _as_list(j.get("covers_primary_actions"))
+                ],
+                "start_state": str(j.get("start_state") or ""),
+                "entry_route": str(j.get("entry_route") or ""),
+                **({"api_only": bool(j.get("api_only"))} if "api_only" in j else {}),
+                **({"pass_model": dict(j["pass_model"])} if isinstance(j.get("pass_model"), dict) else {}),
+                **(
+                    {"verification_level": str(j.get("verification_level") or "")}
+                    if "verification_level" in j
+                    else {}
+                ),
+                **({"probe_kind": str(j.get("probe_kind") or "")} if "probe_kind" in j else {}),
+            }
+            for j in journeys_raw
+            if isinstance(j, dict)
+        ],
+    )
+
+
+def _flat_spec_from_normalized_payload(
+    normalized_preview: dict[str, Any],
+    *,
+    intent: str,
+    intent_hash: str,
+) -> FlatSpec:
+    return FlatSpec(
+        schema_version=SCHEMA_VERSION,
+        intent=str(normalized_preview.get("intent") or intent),
+        intent_hash=str(normalized_preview.get("intent_hash") or intent_hash),
+        project_kind=str(normalized_preview.get("project_kind") or "webapp"),
+        product_overview=_as_dict(normalized_preview.get("product_overview")),
+        intent_claims=[dict(j) for j in _as_list(normalized_preview.get("intent_claims")) if isinstance(j, dict)],
+        core_entities=[dict(j) for j in _as_list(normalized_preview.get("core_entities")) if isinstance(j, dict)],
+        cold_start_states=[
+            dict(j) for j in _as_list(normalized_preview.get("cold_start_states")) if isinstance(j, dict)
+        ],
+        permissions=[dict(j) for j in _as_list(normalized_preview.get("permissions")) if isinstance(j, dict)],
+        quality_constraints=[
+            dict(j) for j in _as_list(normalized_preview.get("quality_constraints")) if isinstance(j, dict)
+        ],
+        behavior_journeys=[
+            dict(j) for j in _as_list(normalized_preview.get("behavior_journeys")) if isinstance(j, dict)
+        ],
+    )
+
+
+def _render_contract_repair_prompt(
+    request: _PassModelRepairRequest,
+    initial_prompt_text: str,
+) -> str:
+    return initial_prompt_text + (
+        _PROMPT_CONTRACT_REPAIR_SUFFIX.format(
+            code=request.error.code,
+            path=request.error.path,
+            message=request.error.message,
+            target=request.target,
+            previous_json=json.dumps(request.payload, indent=2, sort_keys=True),
+        )
+    )
 
 
 async def compile_flat_spec(
@@ -671,7 +862,7 @@ async def compile_flat_spec(
                             "properties": {
                                 "id": {"type": "string"},
                                 "text": {"type": "string"},
-                                "source_line": {"type": ["integer", "null"]},
+                                "source_line": _json_schema_any_of("integer", "null"),
                             },
                             "required": ["id", "text", "source_line"],
                         },
@@ -756,7 +947,13 @@ async def compile_flat_spec(
                                     "type": "object",
                                     "properties": {
                                         **{
-                                            key: {"type": ["array", "object", "string", "number", "boolean"]}
+                                            key: _json_schema_any_of(
+                                                "array",
+                                                "object",
+                                                "string",
+                                                "number",
+                                                "boolean",
+                                            )
                                             for key in PASS_MODEL_KEYS
                                         },
                                         "steps": {"type": "array", "items": {"type": "object"}},
@@ -858,8 +1055,11 @@ async def compile_flat_spec(
             _cleanup_root_spec_artifacts(project_dir)
             return spec
 
-    # Single-turn compile with retry only for unusable JSON shape.
+    # Single-turn compile with retry for unusable JSON shape and a bounded
+    # pass-model repair path for validator feedback.
     last_warnings: list[str] = []
+    last_contract_error: VerificationContractError | None = None
+    repair_request: _PassModelRepairRequest | None = None
     parsed: dict[str, Any] | None = None
     preview = FlatSpec(intent=intent, intent_hash=intent_h)
     prompt_text = initial_prompt_text
@@ -867,21 +1067,40 @@ async def compile_flat_spec(
     spec: FlatSpec = preview
     accepted = False
     attempts_run = 0
+    shape_attempts_run = 0
+    contract_repair_attempts = 0
     prompt_bytes_total = 0
     output_bytes_total = 0
     total_tokens = 0
     output_tokens = 0
     first_token_ts: str | None = None
-    for attempt in range(1, max_retries + 2):  # initial + max_retries
-        attempts_run = attempt
-        if attempt == 1:
-            prompt_text = initial_prompt_text
+    max_total_attempts = max_retries + 1 + PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS
+    while attempts_run < max_total_attempts:
+        attempts_run += 1
+        active_repair_request = repair_request
+        repair_request = None
+
+        if active_repair_request is not None:
+            contract_repair_attempts += 1
+            prompt_text = _render_contract_repair_prompt(active_repair_request, initial_prompt_text)
+            prompt_name = f"compile-agent-contract-repair-{contract_repair_attempts:02d}"
         else:
-            prompt_text = initial_prompt_text + _PROMPT_RETRY_SUFFIX.format(
-                warnings="\n".join(f"  - {w}" for w in last_warnings)
+            shape_attempts_run += 1
+            if shape_attempts_run > max_retries + 1:
+                break
+            if shape_attempts_run == 1:
+                prompt_text = initial_prompt_text
+            else:
+                prompt_text = initial_prompt_text + _PROMPT_RETRY_SUFFIX.format(
+                    warnings="\n".join(f"  - {w}" for w in last_warnings)
+                )
+            prompt_name = (
+                "compile-agent"
+                if shape_attempts_run == 1
+                else f"compile-agent-retry-{shape_attempts_run:02d}"
             )
 
-        prompt_subdir = spec_dir / ("compile-agent" if attempt == 1 else f"compile-agent-retry-{attempt:02d}")
+        prompt_subdir = spec_dir / prompt_name
         prompt_subdir.mkdir(parents=True, exist_ok=True)
         prompt_entry = save_rendered_prompt(
             prompts_dir=session_dir / "prompts",
@@ -901,54 +1120,60 @@ async def compile_flat_spec(
         try:
             parsed = json.loads(result_text)
         except json.JSONDecodeError as exc:
-            logger.warning("compile_flat_spec attempt %d: invalid JSON (%s); retrying", attempt, exc)
+            logger.warning("compile_flat_spec attempt %d: invalid JSON (%s); retrying", attempts_run, exc)
             last_warnings = [f"output was not valid JSON: {exc}"]
+            if active_repair_request is not None:
+                last_contract_error = active_repair_request.error
+                if contract_repair_attempts < PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS:
+                    repair_request = active_repair_request
+                    continue
+                break
             continue
 
         # Build a FlatSpec preview to lint.
         if not isinstance(parsed, dict):
             last_warnings = [f"output was not a JSON object (got {type(parsed).__name__})"]
+            if active_repair_request is not None:
+                last_contract_error = active_repair_request.error
+                if contract_repair_attempts < PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS:
+                    repair_request = active_repair_request
+                    continue
+                break
             continue
         journeys_raw = parsed.get("behavior_journeys")
         if not isinstance(journeys_raw, list):
             last_warnings = ["output 'behavior_journeys' is not a list"]
+            if active_repair_request is not None:
+                last_contract_error = active_repair_request.error
+                if contract_repair_attempts < PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS:
+                    repair_request = active_repair_request
+                    continue
+                break
             continue
 
-        preview = FlatSpec(
+        if active_repair_request is not None:
+            repaired = _merge_repaired_pass_model(
+                active_repair_request.payload,
+                parsed,
+                target=active_repair_request.target,
+            )
+            if repaired is None:
+                last_contract_error = active_repair_request.error
+                last_warnings = [
+                    "contract repair output did not include a pass_model for "
+                    f"behavior_journey {active_repair_request.target!r}"
+                ]
+                if contract_repair_attempts < PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS:
+                    repair_request = active_repair_request
+                    continue
+                break
+            parsed = repaired
+
+        preview = _preview_from_compiler_payload(
+            parsed,
             intent=intent,
             intent_hash=intent_h,
-            project_kind=str(parsed.get("project_kind") or project_kind_hint or "webapp"),
-            product_overview=_as_dict(parsed.get("product_overview")),
-            intent_claims=[dict(j) for j in _as_list(parsed.get("intent_claims")) if isinstance(j, dict)],
-            core_entities=[dict(j) for j in _as_list(parsed.get("core_entities")) if isinstance(j, dict)],
-            cold_start_states=[
-                dict(j) for j in _as_list(parsed.get("cold_start_states")) if isinstance(j, dict)
-            ],
-            permissions=[dict(j) for j in _as_list(parsed.get("permissions")) if isinstance(j, dict)],
-            quality_constraints=[
-                dict(j) for j in _as_list(parsed.get("quality_constraints")) if isinstance(j, dict)
-            ],
-            behavior_journeys=[
-                {
-                    "id": str(j.get("id") or ""),
-                    "description": str(j.get("description") or ""),
-                    "covers_primary_actions": [
-                        str(a) for a in _as_list(j.get("covers_primary_actions"))
-                    ],
-                    "start_state": str(j.get("start_state") or ""),
-                    "entry_route": str(j.get("entry_route") or ""),
-                    **({"api_only": bool(j.get("api_only"))} if "api_only" in j else {}),
-                    **({"pass_model": dict(j["pass_model"])} if isinstance(j.get("pass_model"), dict) else {}),
-                    **(
-                        {"verification_level": str(j.get("verification_level") or "")}
-                        if "verification_level" in j
-                        else {}
-                    ),
-                    **({"probe_kind": str(j.get("probe_kind") or "")} if "probe_kind" in j else {}),
-                }
-                for j in journeys_raw
-                if isinstance(j, dict)
-            ],
+            project_kind_hint=project_kind_hint,
         )
         try:
             normalized_preview = normalize_journey_contracts(
@@ -956,26 +1181,38 @@ async def compile_flat_spec(
                 current_schema_version=SCHEMA_VERSION,
             )
         except VerificationContractError as exc:
+            if (
+                _contract_error_is_pass_model_repairable(exc)
+                and contract_repair_attempts < PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS
+            ):
+                last_contract_error = exc
+                target = _contract_error_target(exc)
+                repair_request = _PassModelRepairRequest(
+                    payload=parsed,
+                    error=exc,
+                    target=target,
+                )
+                last_warnings = [str(exc)]
+                logger.warning(
+                    "compile_flat_spec attempt %d: pass_model contract error at %s; "
+                    "requesting bounded spec repair %d/%d",
+                    attempts_run,
+                    exc.path,
+                    contract_repair_attempts + 1,
+                    PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS,
+                )
+                continue
             _cleanup_root_spec_artifacts(project_dir)
+            if _contract_error_is_pass_model_repairable(exc):
+                raise SpecContractRepairExhaustedError(
+                    exc,
+                    attempts=contract_repair_attempts,
+                ) from exc
             raise StructuredSpecValidationError(str(exc)) from exc
-        preview = FlatSpec(
-            schema_version=SCHEMA_VERSION,
-            intent=str(normalized_preview.get("intent") or intent),
-            intent_hash=str(normalized_preview.get("intent_hash") or intent_h),
-            project_kind=str(normalized_preview.get("project_kind") or "webapp"),
-            product_overview=_as_dict(normalized_preview.get("product_overview")),
-            intent_claims=[dict(j) for j in _as_list(normalized_preview.get("intent_claims")) if isinstance(j, dict)],
-            core_entities=[dict(j) for j in _as_list(normalized_preview.get("core_entities")) if isinstance(j, dict)],
-            cold_start_states=[
-                dict(j) for j in _as_list(normalized_preview.get("cold_start_states")) if isinstance(j, dict)
-            ],
-            permissions=[dict(j) for j in _as_list(normalized_preview.get("permissions")) if isinstance(j, dict)],
-            quality_constraints=[
-                dict(j) for j in _as_list(normalized_preview.get("quality_constraints")) if isinstance(j, dict)
-            ],
-            behavior_journeys=[
-                dict(j) for j in _as_list(normalized_preview.get("behavior_journeys")) if isinstance(j, dict)
-            ],
+        preview = _flat_spec_from_normalized_payload(
+            normalized_preview,
+            intent=intent,
+            intent_hash=intent_h,
         )
         warnings = lint_spec(preview)
         warnings.extend(validate_structured_spec(preview, strict=True))
@@ -983,7 +1220,7 @@ async def compile_flat_spec(
         if warnings:
             logger.warning(
                 "compile_flat_spec attempt %d: accepted with %d advisory warnings",
-                attempt,
+                attempts_run,
                 len(warnings),
             )
         spec = preview
@@ -991,9 +1228,17 @@ async def compile_flat_spec(
         break
     if not accepted:
         _cleanup_root_spec_artifacts(project_dir)
+        if (
+            last_contract_error is not None
+            and contract_repair_attempts >= PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS
+        ):
+            raise SpecContractRepairExhaustedError(
+                last_contract_error,
+                attempts=contract_repair_attempts,
+            ) from last_contract_error
         message = (
             "compile_flat_spec: valid JSON shape not produced after "
-            f"{max_retries + 1} attempts; refusing empty fallback"
+            f"{attempts_run} attempts; refusing empty fallback"
         )
         logger.error("%s: %s", message, "; ".join(last_warnings))
         raise StructuredSpecValidationError(message)
@@ -1021,6 +1266,7 @@ async def compile_flat_spec(
             "total_tokens": total_tokens,
             "output_tokens": output_tokens,
             "validation_retries": max(attempts_run - 1, 0),
+            "contract_repair_attempts": contract_repair_attempts,
             "provider": provider,
             "model": model,
             "cache_hit": False,
