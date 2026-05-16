@@ -12,7 +12,13 @@ from otto import v5_branching, v5_runner
 from otto.lead import LeadResult
 from otto.queue.subtask import take_ready
 from otto.queue.task_graph import get_task, read_graph, record_task, set_verdict, update_task_metadata
-from otto.v5_clean_verify import CleanOracleIssue, CleanOracleResult, CleanOracleStepResult, Scope
+from otto.v5_clean_verify import (
+    CleanOracleIssue,
+    CleanOracleResult,
+    CleanOracleStepResult,
+    Scope,
+    verify_from_clean_oracle,
+)
 from otto.v5_preflight_repair import OracleRepairResult, RepairPacket
 from otto.v5_runner import ROOT_TASK_ID
 
@@ -141,6 +147,36 @@ def _clean_oracle_result(
         project_dir=repo,
         temp_dir=None,
     )
+
+
+def _py_compile_payload(repo: Path, *, bad_path: str) -> dict[str, Any]:
+    (repo / "pyproject.toml").write_text("[project]\nname = \"smoke-scope-repro\"\n", encoding="utf-8")
+    files = {
+        "pkg/feature/view.py": "VALUE = 1\n",
+        "pkg/foundation.py": "VALUE = 2\n",
+        "pkg/other.py": "VALUE = 3\n",
+    }
+    files[bad_path] = "def broken(:\n    pass\n"
+    for rel, content in files.items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    result = verify_from_clean_oracle(repo, scope="scaffold", timeout_s=30, journey_scope="leaf")
+    assert result.passed is False
+    assert result.issues
+    assert result.issues[0].kind == "py_compile_failed"
+    return {
+        "passed": False,
+        "issues": [
+            {
+                "kind": "clean_deploy_start_failed",
+                "severity": "block",
+                "message": result.issues[0].message,
+                "paths": list(result.issues[0].paths),
+            }
+        ],
+        "clean_oracle_result": result.to_jsonable(),
+    }
 
 
 def _repair_tasks(repo: Path) -> list[tuple[str, dict[str, Any]]]:
@@ -470,6 +506,136 @@ def test_pathless_smoke_failure_terminalizes_without_empty_amendment(
     assert structured["kind"] == "integration_smoke_unrouteable"
     assert structured["repair_path"] == ""
     assert result.verdict == "merge_blocked"
+
+
+def test_py_compile_multi_input_leaf_causal_path_stays_in_leaf_scope(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _record_leaf(repo, owned_paths=["pkg/feature/"])
+    payload = _py_compile_payload(repo, bad_path="pkg/feature/view.py")
+    assert v5_runner._smoke_payload_paths(payload) == ["pkg/feature/view.py"]
+
+    result = LeadResult(task_id="leaf", verdict="pass", decomposition="inline", verify_called=True)
+    routed = v5_runner._route_out_of_scope_smoke_failure(
+        project_dir=repo,
+        child_task_id="leaf",
+        child_worktree=repo,
+        child_session_dir=repo / "otto_logs" / "sessions" / "session-leaf",
+        parent_integration_branch="i2p/root/integration",
+        source_branch="main",
+        pre_merge_ref="HEAD",
+        smoke_payload=payload,
+        result=result,
+    )
+
+    assert routed is False
+    assert _repair_tasks(repo) == []
+    assert result.verdict == "pass"
+
+
+def test_py_compile_multi_input_foundation_causal_path_routes_to_owner_with_bound_path(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _record_leaf(repo, owned_paths=["pkg/feature/"])
+    record_task(
+        repo,
+        task_id="foundation",
+        parent_task_id=ROOT_TASK_ID,
+        intent="foundation",
+        integration_branch="i2p/root/integration",
+        owned_paths=["pkg/foundation.py"],
+        task_role="foundation",
+    )
+    update_task_metadata(
+        repo,
+        ROOT_TASK_ID,
+        foundation_contracts=[
+            {
+                "path": "pkg/foundation.py",
+                "owner_task_id": "foundation",
+                "check": "py_compile",
+            }
+        ],
+    )
+    payload = _py_compile_payload(repo, bad_path="pkg/foundation.py")
+    assert v5_runner._smoke_payload_paths(payload) == ["pkg/foundation.py"]
+
+    result = LeadResult(task_id="leaf", verdict="pass", decomposition="inline", verify_called=True)
+    routed = v5_runner._route_out_of_scope_smoke_failure(
+        project_dir=repo,
+        child_task_id="leaf",
+        child_worktree=repo,
+        child_session_dir=repo / "otto_logs" / "sessions" / "session-leaf",
+        parent_integration_branch="i2p/root/integration",
+        source_branch="main",
+        pre_merge_ref="HEAD",
+        smoke_payload=payload,
+        result=result,
+    )
+
+    assert routed is True
+    repair_tasks = [
+        (task_id, task)
+        for task_id, task in (read_graph(repo).get("tasks") or {}).items()
+        if task.get("repair_route") == "foundation_contract_amendment"
+        and task.get("task_role") == "contract_amendment"
+    ]
+    assert len(repair_tasks) == 1
+    _repair_task_id, repair_task = repair_tasks[0]
+    assert repair_task["owned_paths"] == ["pkg/foundation.py"]
+    assert repair_task["contract_amendment"]["contract_paths"] == ["pkg/foundation.py"]
+    assert repair_task["contract_amendment"]["owner_task_id"] == "foundation"
+
+
+def test_py_compile_indeterminate_causal_path_terminalizes_unrouteable(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _record_leaf(repo, owned_paths=["pkg/feature/"])
+    payload = {
+        "passed": False,
+        "issues": [
+            {
+                "kind": "clean_deploy_start_failed",
+                "severity": "block",
+                "message": "py_compile failed but did not identify a file",
+                "paths": [],
+            }
+        ],
+        "clean_oracle_result": _clean_oracle_result(
+            repo,
+            passed=False,
+            paths=[],
+            kind="py_compile_failed",
+            message="py_compile failed but did not identify a file",
+        ).to_jsonable(),
+    }
+
+    result = LeadResult(task_id="leaf", verdict="pass", decomposition="inline", verify_called=True)
+    routed = v5_runner._route_out_of_scope_smoke_failure(
+        project_dir=repo,
+        child_task_id="leaf",
+        child_worktree=repo,
+        child_session_dir=repo / "otto_logs" / "sessions" / "session-leaf",
+        parent_integration_branch="i2p/root/integration",
+        source_branch="main",
+        pre_merge_ref="HEAD",
+        smoke_payload=payload,
+        result=result,
+    )
+
+    assert routed is True
+    assert _repair_tasks(repo) == []
+    leaf = get_task(repo, "leaf") or {}
+    assert leaf["verdict"] == "merge_blocked"
+    structured = leaf["merge_blocked_structured_reason"]
+    assert structured["kind"] == "integration_smoke_unrouteable"
+    assert structured["repair_path"] == ""
 
 
 @pytest.mark.asyncio

@@ -749,6 +749,30 @@ def _issue_from_step(
     )
 
 
+def _py_compile_causal_paths(step: CleanOracleStepResult, *, cwd: Path) -> list[str]:
+    """Extract the actual file(s) py_compile reported as failing."""
+    text = "\n".join(part for part in [step.stderr_tail, step.stdout_tail, step.reason] if part)
+    paths: list[str] = []
+    patterns = [
+        r'File "([^"]+\.py)"',
+        r"\(([^()\n]+\.py),\s*line\s+\d+\)",
+        r"((?:[A-Za-z]:)?[^:\n]+\.py):\d+",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            raw = match.group(1).strip()
+            path = Path(raw)
+            if path.is_absolute():
+                try:
+                    raw = path.relative_to(cwd).as_posix()
+                except ValueError:
+                    raw = path.name
+            normalized = raw.replace("\\", "/").lstrip("./")
+            if normalized:
+                paths.append(normalized)
+    return sorted(dict.fromkeys(paths))
+
+
 def _run_oracle_command(
     *,
     step_id: str,
@@ -1277,7 +1301,7 @@ def verify_from_clean_oracle(
             )
             steps.append(compile_step)
             if compile_issue is not None:
-                compile_issue.paths = rel_files
+                compile_issue.paths = _py_compile_causal_paths(compile_step, cwd=pyp.parent)
                 issues.append(compile_issue)
 
         if scope in ("subtree", "full"):

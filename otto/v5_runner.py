@@ -536,6 +536,15 @@ def _foundation_contract_write_feedback(
     bound_contract_path = _normalize_contract_path(
         str(bound_amendment.get("contract_path") or task.get("contract_amendment_path") or "")
     )
+    bound_contract_paths = [
+        _normalize_contract_path(str(path))
+        for path in (
+            bound_amendment.get("contract_paths")
+            or task.get("contract_amendment_paths")
+            or ([bound_contract_path] if bound_contract_path else [])
+        )
+        if _normalize_contract_path(str(path))
+    ]
     bound_owner_id = str(
         bound_amendment.get("owner_task_id") or task.get("contract_amendment_owner_task_id") or ""
     ).strip()
@@ -544,11 +553,13 @@ def _foundation_contract_write_feedback(
         outside_bound = [
             path
             for path in normalized_changes
-            if not bound_contract_path or not _path_overlaps(path, bound_contract_path)
+            if not bound_contract_paths
+            or not any(_path_overlaps(path, bound_path) for bound_path in bound_contract_paths)
         ]
         if outside_bound:
             violations.append({
                 "contract_path": bound_contract_path,
+                "contract_paths": bound_contract_paths,
                 "owner_task_id": bound_owner_id,
                 "changed_paths": outside_bound,
             })
@@ -578,7 +589,7 @@ def _foundation_contract_write_feedback(
         if (
             overlapping
             and role == "contract_amendment"
-            and bound_contract_path == contract_path
+            and contract_path in bound_contract_paths
             and bound_owner_id == owner_id
         ):
             continue
@@ -943,6 +954,24 @@ def _smoke_payload_within_task_scope(
     )
 
 
+def _smoke_repair_paths_for_contract(
+    *,
+    issue_paths: list[str],
+    contract: dict[str, Any] | None,
+) -> list[str]:
+    if contract is None:
+        return list(issue_paths)
+    contract_path = _normalize_contract_path(str(contract.get("path") or ""))
+    if not contract_path:
+        return []
+    if not all(
+        _path_overlaps(path, contract_path) or _path_overlaps(contract_path, path)
+        for path in issue_paths
+    ):
+        return []
+    return list(issue_paths)
+
+
 def _smoke_repair_unrouteable_feedback(
     *,
     child_task_id: str,
@@ -981,6 +1010,7 @@ def _smoke_repair_feedback(
     pre_merge_ref: str,
     smoke_payload: dict[str, Any],
     repair_path: str,
+    repair_paths: list[str],
     owner_id: str,
     repair_route: str,
     event_name: str,
@@ -1006,6 +1036,7 @@ def _smoke_repair_feedback(
         "pre_merge_ref": pre_merge_ref,
         "paths": _smoke_payload_paths(smoke_payload),
         "repair_path": repair_path,
+        "repair_paths": repair_paths,
         "owner_task_id": owner_id,
         "smoke_payload": smoke_payload,
         "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1024,7 +1055,7 @@ def _schedule_smoke_repair_needed(
     pre_merge_ref: str,
     smoke_payload: dict[str, Any],
     contract: dict[str, Any] | None,
-    repair_path: str,
+    repair_paths: list[str],
     attempt_key: str,
     on_event: Any = None,
 ) -> str:
@@ -1032,6 +1063,10 @@ def _schedule_smoke_repair_needed(
     is_foundation = contract is not None
     repair_route = "foundation_contract_amendment" if is_foundation else "integration_smoke_repair"
     event_name = "foundation_repair_needed" if is_foundation else "integration_repair_needed"
+    repair_paths = sorted(dict.fromkeys(
+        path for path in (_normalize_contract_path(str(path)) for path in repair_paths) if path
+    ))
+    repair_path = repair_paths[0] if len(repair_paths) == 1 else ", ".join(repair_paths)
     attempt_count = _increment_contract_amendment_attempt(
         project_dir,
         child_task_id,
@@ -1048,7 +1083,7 @@ def _schedule_smoke_repair_needed(
         parent_task_id=parent_task_id,
         parent_session_dir=child_session_dir,
         intent=intent,
-        owned_paths=[repair_path] if repair_path else [],
+        owned_paths=repair_paths,
         task_role="contract_amendment",
         parent_integration_branch=parent_integration_branch,
     )
@@ -1058,7 +1093,7 @@ def _schedule_smoke_repair_needed(
         parent_task_id=parent_task_id,
         intent=intent,
         integration_branch=parent_integration_branch,
-        owned_paths=[repair_path] if repair_path else [],
+        owned_paths=repair_paths,
         task_role="contract_amendment",
     )
     feedback = _smoke_repair_feedback(
@@ -1069,6 +1104,7 @@ def _schedule_smoke_repair_needed(
         pre_merge_ref=pre_merge_ref,
         smoke_payload=smoke_payload,
         repair_path=repair_path,
+        repair_paths=repair_paths,
         owner_id=owner_id,
         repair_route=repair_route,
         event_name=event_name,
@@ -1078,6 +1114,7 @@ def _schedule_smoke_repair_needed(
         amendment_id,
         contract_amendment={
             "contract_path": repair_path,
+            "contract_paths": repair_paths,
             "owner_task_id": owner_id,
             "blocked_task_id": child_task_id,
             "source_branch": source_branch,
@@ -1087,6 +1124,7 @@ def _schedule_smoke_repair_needed(
             "repair_route": repair_route,
         },
         contract_amendment_path=repair_path,
+        contract_amendment_paths=repair_paths,
         contract_amendment_owner_task_id=owner_id,
         repair_route=repair_route,
         smoke_repair_payload=smoke_payload,
@@ -1155,10 +1193,8 @@ def _route_out_of_scope_smoke_failure(
         feedback=feedback,
     )
     issue_paths = _smoke_payload_paths(smoke_payload)
-    repair_path = _normalize_contract_path(
-        str((contract or {}).get("path") or ((issue_paths or [""])[0]))
-    )
-    if not repair_path:
+    repair_paths = _smoke_repair_paths_for_contract(issue_paths=issue_paths, contract=contract)
+    if not repair_paths:
         unrouteable = _smoke_repair_unrouteable_feedback(
             child_task_id=child_task_id,
             parent_task_id=parent_task_id,
@@ -1178,9 +1214,10 @@ def _route_out_of_scope_smoke_failure(
             on_event=on_event,
         )
         return True
-    attempt_key = repair_path
+    attempt_key = "|".join(repair_paths)
     current_attempts = _contract_amendment_attempt_count(child, attempt_key)
     if current_attempts >= MAX_CONTRACT_AMENDMENT_ATTEMPTS:
+        repair_path = repair_paths[0] if len(repair_paths) == 1 else ", ".join(repair_paths)
         exhausted = _contract_amendment_exhausted_feedback(
             child_task_id=child_task_id,
             parent_task_id=parent_task_id,
@@ -1220,7 +1257,7 @@ def _route_out_of_scope_smoke_failure(
         pre_merge_ref=pre_merge_ref,
         smoke_payload=smoke_payload,
         contract=contract,
-        repair_path=repair_path,
+        repair_paths=repair_paths,
         attempt_key=attempt_key,
         on_event=on_event,
     )
