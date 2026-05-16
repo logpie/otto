@@ -107,6 +107,7 @@ ROOT_TASK_ID = "root"
 # prepended to its intent. This is the cap on those retries (architect
 # is allowed 1 original attempt + ``MAX_ARCHITECT_RETRIES`` re-runs).
 MAX_ARCHITECT_RETRIES = 2
+MAX_CONTRACT_AMENDMENT_ATTEMPTS = 2
 
 
 class _DispatchLease:
@@ -521,8 +522,6 @@ def _foundation_contract_write_feedback(
     graph = read_graph(project_dir)
     tasks = graph.get("tasks") or {}
     contracts = _foundation_contracts_for_parent(project_dir, parent_id, tasks)
-    if not contracts:
-        return None
     task = get_task(project_dir, acting_task_id) or {}
     role = str(task.get("task_role") or "feature")
     bound_amendment = task.get("contract_amendment")
@@ -535,6 +534,33 @@ def _foundation_contract_write_feedback(
         bound_amendment.get("owner_task_id") or task.get("contract_amendment_owner_task_id") or ""
     ).strip()
     violations: list[dict[str, Any]] = []
+    if role == "contract_amendment":
+        outside_bound = [
+            path
+            for path in normalized_changes
+            if not bound_contract_path or not _path_overlaps(path, bound_contract_path)
+        ]
+        if outside_bound:
+            violations.append({
+                "contract_path": bound_contract_path,
+                "owner_task_id": bound_owner_id,
+                "changed_paths": outside_bound,
+            })
+    if not contracts:
+        if not violations:
+            return None
+        return {
+            "kind": "foundation_contract_write_blocked",
+            "step_id": "foundation_contract_write_gate",
+            "message": "contract amendment attempted to write outside its bound contract path",
+            "task_id": acting_task_id,
+            "task_role": role,
+            "parent_task_id": parent_id,
+            "parent_integration_branch": parent_integration_branch,
+            "operation": operation,
+            "violations": violations,
+            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
     for contract in contracts:
         contract_path = _normalize_contract_path(str(contract.get("path") or ""))
         owner_id = str(contract.get("owner_task_id") or "").strip()
@@ -661,6 +687,81 @@ def _enqueue_existing_task_for_merge_retry(
     append_pending_entry(v5_pending_path(project_dir), entry)
 
 
+def _contract_amendment_attempt_key(contract_path: str) -> str:
+    return _normalize_contract_path(contract_path)
+
+
+def _contract_amendment_attempt_count(task: dict[str, Any], contract_path: str) -> int:
+    attempts = task.get("contract_amendment_attempts")
+    if not isinstance(attempts, dict):
+        return 0
+    key = _contract_amendment_attempt_key(contract_path)
+    try:
+        return int(attempts.get(key, 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _increment_contract_amendment_attempt(
+    project_dir: Path,
+    child_task_id: str,
+    contract_path: str,
+) -> int:
+    leaf = get_task(project_dir, child_task_id) or {}
+    attempts = leaf.get("contract_amendment_attempts")
+    if not isinstance(attempts, dict):
+        attempts = {}
+    attempts = dict(attempts)
+    key = _contract_amendment_attempt_key(contract_path)
+    try:
+        current = int(attempts.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        current = 0
+    next_count = current + 1
+    attempts[key] = next_count
+    update_task_metadata(
+        project_dir,
+        child_task_id,
+        contract_amendment_attempts=attempts,
+        contract_amendment_last_attempt_contract=key,
+        contract_amendment_last_attempt_count=next_count,
+    )
+    return next_count
+
+
+def _contract_amendment_exhausted_feedback(
+    *,
+    child_task_id: str,
+    parent_task_id: str,
+    parent_integration_branch: str,
+    source_branch: str,
+    pre_merge_ref: str,
+    contract_path: str,
+    owner_id: str,
+    union_feedback: dict[str, Any],
+    attempt_count: int,
+) -> dict[str, Any]:
+    return {
+        "kind": "contract_amendment_attempts_exhausted",
+        "step_id": "foundation_contract_amendment",
+        "message": (
+            "foundation contract amendment remained ineffective after "
+            f"{attempt_count} attempt(s); refusing another amendment retry"
+        ),
+        "task_id": child_task_id,
+        "parent_task_id": parent_task_id,
+        "parent_integration_branch": parent_integration_branch,
+        "source_branch": source_branch,
+        "pre_merge_ref": pre_merge_ref,
+        "contract_path": contract_path,
+        "owner_task_id": owner_id,
+        "attempt_count": attempt_count,
+        "max_attempts": MAX_CONTRACT_AMENDMENT_ATTEMPTS,
+        "previous_feedback": union_feedback,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
 def _schedule_foundation_contract_amendment(
     *,
     project_dir: Path,
@@ -677,6 +778,11 @@ def _schedule_foundation_contract_amendment(
 ) -> str:
     contract_path = _normalize_contract_path(str(contract.get("path") or ""))
     owner_id = str(contract.get("owner_task_id") or "").strip()
+    attempt_count = _increment_contract_amendment_attempt(
+        project_dir,
+        child_task_id,
+        contract_path,
+    )
     intent = (
         "Repair foundation contract amendment for "
         f"`{contract_path}` after child `{child_task_id}` exposed an integration "
@@ -710,6 +816,8 @@ def _schedule_foundation_contract_amendment(
             "blocked_task_id": child_task_id,
             "source_branch": source_branch,
             "pre_merge_ref": pre_merge_ref,
+            "attempt_count": attempt_count,
+            "max_attempts": MAX_CONTRACT_AMENDMENT_ATTEMPTS,
         },
         contract_amendment_path=contract_path,
         contract_amendment_owner_task_id=owner_id,
@@ -736,6 +844,8 @@ def _schedule_foundation_contract_amendment(
         "contract_path": contract_path,
         "owner_task_id": owner_id,
         "parent_task_id": parent_task_id,
+        "attempt_count": attempt_count,
+        "max_attempts": MAX_CONTRACT_AMENDMENT_ATTEMPTS,
         "structured_reason": union_feedback,
     })
     return amendment_id
@@ -836,6 +946,41 @@ def _settle_contract_amendment_dependents(
         "blocked_task_ids": blocked,
         "structured_reason": structured_reason,
     })
+
+
+def _persist_successful_contract_amendment_retry(
+    *,
+    project_dir: Path,
+    task_id: str,
+    verdict: str,
+    cost_usd: float,
+    on_event: Any = None,
+) -> bool:
+    latest = get_task(project_dir, task_id) or {}
+    if latest.get("blocked_pending_contract_amendment") or latest.get("blocked_on_task_id"):
+        return False
+    if latest.get("contract_amendment_retry_merge"):
+        return False
+    if str(latest.get("verdict") or "") in {"merge_blocked", "catastrophic"}:
+        return False
+    if latest.get("merge_blocked_structured_reason") or latest.get("merge_blocked_reason"):
+        return False
+    terminal_verdict = verdict if verdict in {"pass", "partial", "unverified"} else "pass"
+    set_verdict(project_dir, task_id, terminal_verdict, cost_usd=cost_usd)
+    update_task_metadata(
+        project_dir,
+        task_id,
+        contract_amendment_retry_restored_at=time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(),
+        ),
+    )
+    _emit(on_event, {
+        "event": "contract_amendment_leaf_retry_verdict_restored",
+        "task_id": task_id,
+        "verdict": terminal_verdict,
+    })
+    return True
 
 
 def _git_diff_full(worktree: Path, *, max_chars: int = 60000) -> str:
@@ -4264,6 +4409,21 @@ async def _process_children(
                         await dispatch_lease.release(tid)
                     logger.exception("child task wrapper crashed: %s", tid)
                     set_verdict(project_dir, tid, "catastrophic")
+                    crash_result = LeadResult(
+                        task_id=tid,
+                        verdict="catastrophic",
+                        decomposition="inline",
+                        failure_reason=str(exc),
+                    )
+                    child_results[tid] = crash_result
+                    _settle_contract_amendment_dependents(
+                        project_dir=project_dir,
+                        amendment_id=tid,
+                        amendment_result=crash_result,
+                        completed=completed,
+                        child_results=child_results,
+                        on_event=on_event,
+                    )
                     completed.add(tid)
                     _emit(on_event, {
                         "event": "child_crash",
@@ -4443,6 +4603,13 @@ async def _run_child(
                 parent_integration_branch=parent_integration_branch,
                 result=retry_result,
                 config=config,
+                on_event=on_event,
+            )
+            _persist_successful_contract_amendment_retry(
+                project_dir=project_dir,
+                task_id=tid,
+                verdict=retry_result.verdict,
+                cost_usd=retry_result.cost_usd,
                 on_event=on_event,
             )
         return retry_result
@@ -5632,6 +5799,35 @@ async def _merge_child_branch(
             feedback=union_feedback,
         )
         if amendment_contract is not None:
+            contract_path = _normalize_contract_path(str(amendment_contract.get("path") or ""))
+            owner_id = str(amendment_contract.get("owner_task_id") or "").strip()
+            current_attempts = _contract_amendment_attempt_count(
+                get_task(project_dir, child_task_id) or {},
+                contract_path,
+            )
+            if current_attempts >= MAX_CONTRACT_AMENDMENT_ATTEMPTS:
+                feedback = _contract_amendment_exhausted_feedback(
+                    child_task_id=child_task_id,
+                    parent_task_id=parent_task_id,
+                    parent_integration_branch=parent_integration_branch,
+                    source_branch=source_branch,
+                    pre_merge_ref=pre_merge_ref,
+                    contract_path=contract_path,
+                    owner_id=owner_id,
+                    union_feedback=union_feedback,
+                    attempt_count=current_attempts,
+                )
+                _record_structured_merge_failed(
+                    project_dir=project_dir,
+                    task_id=child_task_id,
+                    result=result,
+                    reason=str(feedback["message"]),
+                    origin="contract_amendment",
+                    phase="foundation_contract_amendment",
+                    structured_reason=feedback,
+                    on_event=on_event,
+                )
+                return
             _schedule_foundation_contract_amendment(
                 project_dir=project_dir,
                 child_task_id=child_task_id,
