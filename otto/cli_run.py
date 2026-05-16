@@ -24,7 +24,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
 
@@ -72,6 +72,7 @@ from otto.resume import (
 )
 from otto.runner import RunResult, run_pipeline
 from otto.spec_compile import (
+    BROWNFIELD_MODES,
     PROJECT_KINDS,
     Spec,
     SpecValidationError,
@@ -84,6 +85,18 @@ from otto.spec_state import emit
 from otto.theme import error_console
 
 logger = logging.getLogger("otto.cli_run")
+
+BrownfieldMode = Literal["baseline", "target"]
+
+
+def _validate_brownfield_mode(brownfield_mode: str) -> BrownfieldMode:
+    if brownfield_mode == "baseline":
+        return "baseline"
+    if brownfield_mode == "target":
+        return "target"
+    raise ValueError(
+        f"brownfield_mode must be one of {BROWNFIELD_MODES}; got {brownfield_mode!r}"
+    )
 
 
 def _positive_budget_option(
@@ -863,6 +876,8 @@ def orchestrate_run(
             )
             sys.exit(2)
     resume_plan: ResumePlan | None = None
+    session_id: str | None = None
+    session_dir: Path | None = None
     if resume:
         # Resume path: the paused session is the spec source. We
         # bypass compile entirely (re-using spec.json from the prior
@@ -996,10 +1011,10 @@ def orchestrate_run(
         # the lock and exit early with the spec path. Keep that behaviour
         # by handling compile here and short-circuiting before run_pipeline.
         if no_build:
+            session_id = _new_session_id(project_dir)
+            session_dir = _paths.session_dir(project_dir, session_id)
             try:
                 with _paths.project_lock(project_dir, "run", break_lock=break_lock):
-                    session_id = _new_session_id(project_dir)
-                    session_dir = _paths.session_dir(project_dir, session_id)
                     console.print(
                         f"  [bold]otto run[/bold] — session {session_id}\n"
                     )
@@ -1037,10 +1052,10 @@ def orchestrate_run(
     # console output), then delegate the rest of the chain to
     # ``runner.run_pipeline`` via the ``spec=`` short-circuit.
     if not compiled_inline:
+        session_id = _new_session_id(project_dir)
+        session_dir = _paths.session_dir(project_dir, session_id)
         try:
             with _paths.project_lock(project_dir, "run", break_lock=break_lock):
-                session_id = _new_session_id(project_dir)
-                session_dir = _paths.session_dir(project_dir, session_id)
                 console.print(f"  [bold]otto run[/bold] — session {session_id}\n")
                 run_budget = RunBudget.start_from(config)
                 _mark_queue_child_ready_best_effort(
@@ -1076,6 +1091,9 @@ def orchestrate_run(
             record_compile_failure_terminal(session_dir, exc)
             error_console.print(f"[error]Spec compile failed:[/error]\n{exc}")
             sys.exit(1)
+
+    if session_id is None or session_dir is None:
+        raise RuntimeError("internal error: run session was not initialized")
 
     mark_queue_child_ready(
         project_dir,
@@ -1324,12 +1342,15 @@ def _brownfield_compile_locked(
 
     Returns ``(session_dir, spec)``.
     """
+    validated_brownfield_mode = _validate_brownfield_mode(brownfield_mode)
+    session_id = _new_session_id(project_dir)
+    session_dir = _paths.session_dir(project_dir, session_id)
     try:
         with _paths.project_lock(project_dir, lock_label, break_lock=break_lock):
-            session_id = _new_session_id(project_dir)
-            session_dir = _paths.session_dir(project_dir, session_id)
             console.print(f"  [bold]{cli_heading}[/bold] — session {session_id}\n")
-            mode_label = "target" if brownfield_mode == "target" else "baseline"
+            mode_label = (
+                "target" if validated_brownfield_mode == "target" else "baseline"
+            )
             console.print(
                 f"  [bold]Compile phase[/bold] — brownfield {mode_label} spec"
             )
@@ -1346,7 +1367,7 @@ def _brownfield_compile_locked(
                         project_kind=project_kind,
                         budget=run_budget,
                         brownfield=True,
-                        brownfield_mode=brownfield_mode,
+                        brownfield_mode=validated_brownfield_mode,
                     )
                 )
                 raise_compile_budget_exhausted_if_needed(
