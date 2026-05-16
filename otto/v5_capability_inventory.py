@@ -828,7 +828,7 @@ def persist_foundation_contracts_from_charter(
 ) -> tuple[list[dict[str, Any]], list[CoherenceFinding]]:
     """Parse CHARTER foundation contracts and store them on the parent task."""
     contracts, findings = parse_foundation_contracts(project_dir / "CHARTER.md")
-    if contracts and not findings:
+    if not findings:
         from otto.queue.task_graph import update_task_metadata
 
         update_task_metadata(project_dir, parent_task_id, foundation_contracts=contracts)

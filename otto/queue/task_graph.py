@@ -144,7 +144,7 @@ def record_task(
     depends_on: list[str] | None = None,
     owned_paths: list[str] | None = None,
     action_ids: list[str] | None = None,
-    task_role: TaskRole = "feature",
+    task_role: TaskRole | None = None,
     foundation_contracts: list[dict[str, Any]] | None = None,
     decomposition: Decomposition = "unknown",
 ) -> None:
@@ -154,15 +154,23 @@ def record_task(
     rather than overwriting with the arg's default. This matters when the
     same task is registered twice — once by ``submit_subtask`` (which knows
     the parent) and again by the child's own ``run_lead`` (which does not).
+    Passing ``task_role=None`` means "role omitted"; preserve an existing role
+    or use the construction default. Passing an explicit role, including
+    ``feature``, sets the role authoritatively.
     """
     with _locked_graph(project_dir) as (_path, graph):
         existing_raw = graph["tasks"].get(task_id, {})
         existing: dict[str, Any] = existing_raw if isinstance(existing_raw, dict) else {}
         entry: dict[str, Any] = dict(existing)
-        role = task_role if task_role in TASK_ROLES else "feature"
         existing_role = entry.get("task_role")
-        if isinstance(existing_role, str) and existing_role in TASK_ROLES and task_role == "feature":
-            role = existing_role
+        if task_role is None:
+            role = (
+                existing_role
+                if isinstance(existing_role, str) and existing_role in TASK_ROLES
+                else "feature"
+            )
+        else:
+            role = task_role if task_role in TASK_ROLES else "feature"
         entry.update({
             "parent_task_id": parent_task_id if parent_task_id is not None
                               else existing.get("parent_task_id"),

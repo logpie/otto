@@ -231,77 +231,85 @@ def submit_subtask_for_lead(
     role = _coerce_task_role(task_role)
     idem_key = _intent_hash(task_id, intent)
     from otto.queue.task_graph import read_graph, record_task, set_decomposition, update_task_metadata
+    from otto.queue.subtask import (
+        _locked_append,
+        _pending_entry,
+        append_pending_entry,
+        v5_pending_path,
+    )
 
-    graph = read_graph(project_dir)
-    for tid, entry in graph.get("tasks", {}).items():
-        if (
-            isinstance(entry, dict)
-            and entry.get("parent_task_id") == task_id
-            and _intent_hash(task_id, entry.get("intent") or "") == idem_key
-        ):
-            existing_role = _coerce_task_role(entry.get("task_role"))
-            existing_owned_paths = list(entry.get("owned_paths") or [])
-            requested_owned_paths = list(owned_paths or [])
-            changed = (
-                existing_role != role
-                or existing_owned_paths != requested_owned_paths
-            )
-            if changed and _terminal_verdict(entry.get("verdict")):
-                return {
-                    "error": "submit_subtask: duplicate task has stale finalized ownership metadata",
-                    "kind": "stale_duplicate_scope_refusal",
-                    "task_id": tid,
-                    "existing": {
-                        "task_role": existing_role,
-                        "owned_paths": existing_owned_paths,
-                    },
-                    "requested": {
-                        "task_role": role,
-                        "owned_paths": requested_owned_paths,
-                    },
-                }
-            if changed:
-                record_task(
-                    project_dir,
-                    task_id=tid,
-                    intent=intent,
-                    parent_task_id=task_id,
-                    depends_on=depends_on,
-                    owned_paths=requested_owned_paths,
-                    action_ids=action_ids,
-                    task_role=role,  # type: ignore[arg-type]
+    requested_owned_paths = list(owned_paths or [])
+    path = v5_pending_path(project_dir)
+    with _locked_append(path):
+        graph = read_graph(project_dir)
+        for tid, entry in graph.get("tasks", {}).items():
+            if (
+                isinstance(entry, dict)
+                and entry.get("parent_task_id") == task_id
+                and _intent_hash(task_id, entry.get("intent") or "") == idem_key
+            ):
+                existing_role = _coerce_task_role(entry.get("task_role"))
+                existing_owned_paths = list(entry.get("owned_paths") or [])
+                changed = (
+                    existing_role != role
+                    or existing_owned_paths != requested_owned_paths
                 )
-            if foundation_contracts:
-                update_task_metadata(project_dir, task_id, foundation_contracts=foundation_contracts)
-            return {"task_id": tid, "duplicate": True, "metadata_updated": changed}
+                if changed and _terminal_verdict(entry.get("verdict")):
+                    return {
+                        "error": "submit_subtask: duplicate task has stale finalized ownership metadata",
+                        "kind": "stale_duplicate_scope_refusal",
+                        "task_id": tid,
+                        "existing": {
+                            "task_role": existing_role,
+                            "owned_paths": existing_owned_paths,
+                        },
+                        "requested": {
+                            "task_role": role,
+                            "owned_paths": requested_owned_paths,
+                        },
+                    }
+                if changed:
+                    record_task(
+                        project_dir,
+                        task_id=tid,
+                        intent=intent,
+                        parent_task_id=task_id,
+                        depends_on=depends_on,
+                        owned_paths=requested_owned_paths,
+                        action_ids=action_ids,
+                        task_role=cast(Any, role),
+                    )
+                if foundation_contracts:
+                    update_task_metadata(project_dir, task_id, foundation_contracts=foundation_contracts)
+                return {"task_id": tid, "duplicate": True, "metadata_updated": changed}
 
-    from otto.queue.subtask import enqueue_subtask
-
-    child_task_id = enqueue_subtask(
-        project_dir=project_dir,
-        parent_task_id=task_id,
-        parent_session_dir=session_dir,
-        intent=intent,
-        depends_on=depends_on,
-        owned_paths=owned_paths,
-        action_ids=action_ids,
-        task_role=role,
-        parent_integration_branch=None,
-    )
-    record_task(
-        project_dir,
-        task_id=child_task_id,
-        intent=intent,
-        parent_task_id=task_id,
-        depends_on=depends_on,
-        owned_paths=owned_paths,
-        action_ids=action_ids,
-        task_role=role,  # type: ignore[arg-type]
-    )
-    if foundation_contracts:
-        update_task_metadata(project_dir, task_id, foundation_contracts=foundation_contracts)
-    set_decomposition(project_dir, task_id, "emit")
-    return {"task_id": child_task_id, "duplicate": False}
+        entry = _pending_entry(
+            project_dir=project_dir,
+            parent_task_id=task_id,
+            parent_session_dir=session_dir,
+            intent=intent,
+            depends_on=depends_on,
+            owned_paths=owned_paths,
+            action_ids=action_ids,
+            task_role=role,
+            parent_integration_branch=None,
+        )
+        append_pending_entry(path, entry)
+        child_task_id = str(entry["task_id"])
+        record_task(
+            project_dir,
+            task_id=child_task_id,
+            intent=intent,
+            parent_task_id=task_id,
+            depends_on=depends_on,
+            owned_paths=owned_paths,
+            action_ids=action_ids,
+            task_role=cast(Any, role),
+        )
+        if foundation_contracts:
+            update_task_metadata(project_dir, task_id, foundation_contracts=foundation_contracts)
+        set_decomposition(project_dir, task_id, "emit")
+        return {"task_id": child_task_id, "duplicate": False}
 
 
 def create_otto_mcp_server(

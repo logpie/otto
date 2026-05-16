@@ -69,6 +69,49 @@ def _locked_append(path: Path):
             os.close(lock_fd)
 
 
+def _pending_entry(
+    *,
+    project_dir: Path,
+    parent_task_id: str,
+    parent_session_dir: Path,
+    intent: str,
+    depends_on: list[str] | None = None,
+    owned_paths: list[str] | None = None,
+    action_ids: list[str] | None = None,
+    task_role: str = "feature",
+    parent_integration_branch: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    child_task_id = task_id or _generate_task_id(intent)
+    if parent_integration_branch:
+        integration_branch = parent_integration_branch
+    else:
+        from otto.v5_branching import integration_branch_name as _integ_name
+        integration_branch = _integ_name(parent_task_id)
+    return {
+        "schema_version": 1,
+        "task_id": child_task_id,
+        "parent_task_id": parent_task_id,
+        "parent_session_dir": str(parent_session_dir),
+        "intent": intent,
+        "depends_on": list(depends_on or []),
+        "owned_paths": list(owned_paths or []),
+        "action_ids": list(action_ids or []),
+        "task_role": task_role,
+        "integration_branch": integration_branch,
+        "review_state": "approved",  # autopilot default; Phase 3 may set "pending_review"
+        "enqueued_at": _now_iso(),
+    }
+
+
+def append_pending_entry(path: Path, entry: dict[str, Any]) -> None:
+    """Append one pending entry. Caller may hold ``_locked_append(path)``."""
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def enqueue_subtask(
     *,
     project_dir: Path,
@@ -90,34 +133,22 @@ def enqueue_subtask(
     if not intent:
         raise ValueError("enqueue_subtask: 'intent' is required and must be non-empty.")
 
-    task_id = _generate_task_id(intent)
-    if parent_integration_branch:
-        integration_branch = parent_integration_branch
-    else:
-        from otto.v5_branching import integration_branch_name as _integ_name
-        integration_branch = _integ_name(parent_task_id)
-    entry: dict[str, Any] = {
-        "schema_version": 1,
-        "task_id": task_id,
-        "parent_task_id": parent_task_id,
-        "parent_session_dir": str(parent_session_dir),
-        "intent": intent,
-        "depends_on": list(depends_on or []),
-        "owned_paths": list(owned_paths or []),
-        "action_ids": list(action_ids or []),
-        "task_role": task_role,
-        "integration_branch": integration_branch,
-        "review_state": "approved",  # autopilot default; Phase 3 may set "pending_review"
-        "enqueued_at": _now_iso(),
-    }
+    entry = _pending_entry(
+        project_dir=project_dir,
+        parent_task_id=parent_task_id,
+        parent_session_dir=parent_session_dir,
+        intent=intent,
+        depends_on=depends_on,
+        owned_paths=owned_paths,
+        action_ids=action_ids,
+        task_role=task_role,
+        parent_integration_branch=parent_integration_branch,
+    )
 
     path = v5_pending_path(project_dir)
     with _locked_append(path):
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-    return task_id
+        append_pending_entry(path, entry)
+    return str(entry["task_id"])
 
 
 def read_pending(project_dir: Path) -> list[dict[str, Any]]:
@@ -137,6 +168,28 @@ def read_pending(project_dir: Path) -> list[dict[str, Any]]:
         if isinstance(entry, dict):
             out.append(entry)
     return out
+
+
+def _reconcile_pending_entry_with_graph(
+    entry: dict[str, Any],
+    graph_tasks: dict[str, Any],
+) -> dict[str, Any]:
+    """Overlay dispatch-critical metadata from task_graph onto pending JSONL.
+
+    ``v5_pending.jsonl`` is append-only history; task_graph is authoritative
+    for duplicate metadata corrections made after the original enqueue.
+    """
+    tid = entry.get("task_id")
+    graph_entry = graph_tasks.get(tid) if isinstance(tid, str) else None
+    if not isinstance(graph_entry, dict):
+        return entry
+    reconciled = dict(entry)
+    if isinstance(graph_entry.get("owned_paths"), list):
+        reconciled["owned_paths"] = list(graph_entry.get("owned_paths") or [])
+    role = graph_entry.get("task_role")
+    if isinstance(role, str):
+        reconciled["task_role"] = role
+    return reconciled
 
 
 _TERMINAL_FOR_REDISPATCH_VERDICTS = frozenset({
@@ -223,6 +276,14 @@ def take_ready(
     )
 
     pending = read_pending(project_dir)
+    try:
+        from otto.queue.task_graph import read_graph
+
+        graph_tasks = read_graph(project_dir).get("tasks") or {}
+        if not isinstance(graph_tasks, dict):
+            graph_tasks = {}
+    except Exception:  # noqa: BLE001 — best-effort
+        graph_tasks = {}
     ready: list[dict[str, Any]] = []
     for entry in pending:
         tid = entry.get("task_id")
@@ -232,5 +293,5 @@ def take_ready(
             continue
         deps = entry.get("depends_on") or []
         if all(d in completed_all for d in deps):
-            ready.append(entry)
+            ready.append(_reconcile_pending_entry_with_graph(entry, graph_tasks))
     return ready

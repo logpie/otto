@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from otto.mcp_tools import submit_subtask_for_lead
-from otto.queue.task_graph import get_task, read_graph, record_task, update_task_metadata
+from otto.queue.subtask import read_pending, take_ready
+from otto.queue.task_graph import get_task, read_graph, record_task, set_verdict, update_task_metadata
 from otto.v5_capability_inventory import (
     parse_foundation_contracts,
     persist_foundation_contracts_from_charter,
@@ -35,6 +37,30 @@ def _charter(contracts: list[dict[str, object]]) -> str:
         "## Foundation Contracts\n\n"
         "```json\n"
         + json.dumps(contracts, indent=2)
+        + "\n```\n"
+    )
+
+
+def _ia_charter(contracts: object) -> str:
+    ia = {
+        "foundation_contracts": contracts,
+        "registration_isolation": {
+            "policy": "file_local_auto_discovery",
+            "shared_registry_files": [
+                {
+                    "path": "frontend/src/App.tsx",
+                    "discovers": "frontend/src/features/*/routes.tsx",
+                    "leaf_edit": False,
+                }
+            ],
+            "leaf_extension_globs": ["frontend/src/features/*/routes.tsx"],
+        },
+    }
+    return (
+        "# CHARTER\n\n"
+        "## Information Architecture Contract\n\n"
+        "```json\n"
+        + json.dumps(ia, indent=2)
         + "\n```\n"
     )
 
@@ -111,6 +137,122 @@ def test_duplicate_submit_subtask_updates_changed_role_and_owned_paths(tmp_path:
     assert task["owned_paths"] == ["backend/auth.py", "frontend/src/features/auth/"]
 
 
+def test_duplicate_submit_subtask_corrects_foundation_to_feature_role(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    first = submit_subtask_for_lead(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        task_id="root",
+        intent="Build auth",
+        owned_paths=["backend/auth.py"],
+        task_role="foundation",
+    )
+    second = submit_subtask_for_lead(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        task_id="root",
+        intent="Build auth",
+        owned_paths=["backend/auth.py"],
+        task_role="feature",
+    )
+
+    assert second == {"task_id": first["task_id"], "duplicate": True, "metadata_updated": True}
+    task = get_task(tmp_path, str(first["task_id"])) or {}
+    assert task["task_role"] == "feature"
+
+
+def test_ready_entry_reflects_corrected_duplicate_metadata(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    first = submit_subtask_for_lead(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        task_id="root",
+        intent="Build auth",
+        owned_paths=["backend/auth.py"],
+        task_role="foundation",
+    )
+    submit_subtask_for_lead(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        task_id="root",
+        intent="Build auth",
+        owned_paths=["frontend/src/features/auth/"],
+        task_role="feature",
+    )
+
+    raw_pending = read_pending(tmp_path)
+    assert raw_pending[0]["task_id"] == first["task_id"]
+    assert raw_pending[0]["task_role"] == "foundation"
+    assert raw_pending[0]["owned_paths"] == ["backend/auth.py"]
+
+    ready = take_ready(tmp_path, completed_task_ids=set(), in_flight_task_ids=set())
+
+    assert len(ready) == 1
+    assert ready[0]["task_id"] == first["task_id"]
+    assert ready[0]["task_role"] == "feature"
+    assert ready[0]["owned_paths"] == ["frontend/src/features/auth/"]
+
+
+def test_finalized_duplicate_with_changed_scope_is_structured_refused(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    first = submit_subtask_for_lead(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        task_id="root",
+        intent="Build auth",
+        owned_paths=["backend/auth.py"],
+        task_role="foundation",
+    )
+    set_verdict(tmp_path, str(first["task_id"]), "pass")
+
+    second = submit_subtask_for_lead(
+        project_dir=tmp_path,
+        session_dir=session_dir,
+        task_id="root",
+        intent="Build auth",
+        owned_paths=["frontend/src/features/auth/"],
+        task_role="feature",
+    )
+
+    assert second["kind"] == "stale_duplicate_scope_refusal"
+    task = get_task(tmp_path, str(first["task_id"])) or {}
+    assert task["task_role"] == "foundation"
+    assert task["owned_paths"] == ["backend/auth.py"]
+
+
+def test_concurrent_duplicate_submit_does_not_double_create(tmp_path: Path) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    def submit() -> dict[str, object]:
+        return submit_subtask_for_lead(
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            task_id="root",
+            intent="Build auth",
+            owned_paths=["backend/auth.py"],
+            task_role="feature",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _i: submit(), range(24)))
+
+    task_ids = {result["task_id"] for result in results}
+    assert len(task_ids) == 1
+    graph_tasks = [
+        task for task in read_graph(tmp_path)["tasks"].values()
+        if task.get("parent_task_id") == "root"
+    ]
+    assert len(graph_tasks) == 1
+    assert len(read_pending(tmp_path)) == 1
+
+
 def test_charter_foundation_contracts_persist_on_decomposition_parent(tmp_path: Path) -> None:
     contracts = [{"path": "frontend/src/lib/ws.ts", "owner_task_id": "architect", "check": "semantic"}]
     (tmp_path / "CHARTER.md").write_text(_charter(contracts), encoding="utf-8")
@@ -129,6 +271,58 @@ def test_charter_foundation_contracts_persist_on_decomposition_parent(tmp_path: 
     architect = get_task(tmp_path, "architect") or {}
     assert parent["foundation_contracts"] == contracts
     assert architect["foundation_contracts"] == []
+
+
+def test_ia_form_foundation_contracts_parse(tmp_path: Path) -> None:
+    contracts = [{"path": "frontend/src/lib/ws.ts", "owner_task_id": "architect", "check": "semantic"}]
+    (tmp_path / "CHARTER.md").write_text(_ia_charter(contracts), encoding="utf-8")
+
+    parsed, findings = parse_foundation_contracts(tmp_path / "CHARTER.md")
+
+    assert findings == []
+    assert parsed == contracts
+
+
+def test_empty_foundation_contracts_clear_stale_parent_contracts(tmp_path: Path) -> None:
+    stale = [{"path": "frontend/src/lib/ws.ts", "owner_task_id": "architect", "check": "semantic"}]
+    (tmp_path / "CHARTER.md").write_text(_charter([]), encoding="utf-8")
+    record_task(tmp_path, task_id="parent", intent="parent", foundation_contracts=stale)
+
+    parsed, findings = persist_foundation_contracts_from_charter(
+        tmp_path,
+        parent_task_id="parent",
+    )
+
+    assert findings == []
+    assert parsed == []
+    assert (get_task(tmp_path, "parent") or {})["foundation_contracts"] == []
+
+
+def test_malformed_foundation_contracts_do_not_clear_stale_parent_contracts(tmp_path: Path) -> None:
+    stale = [{"path": "frontend/src/lib/ws.ts", "owner_task_id": "architect", "check": "semantic"}]
+    (tmp_path / "CHARTER.md").write_text(
+        "# CHARTER\n\n## Foundation Contracts\n\n```json\nnot-json\n```\n",
+        encoding="utf-8",
+    )
+    record_task(tmp_path, task_id="parent", intent="parent", foundation_contracts=stale)
+
+    parsed, findings = persist_foundation_contracts_from_charter(
+        tmp_path,
+        parent_task_id="parent",
+    )
+
+    assert parsed == []
+    assert findings
+    assert (get_task(tmp_path, "parent") or {})["foundation_contracts"] == stale
+
+
+def test_missing_foundation_contracts_parse_empty_without_crash(tmp_path: Path) -> None:
+    (tmp_path / "CHARTER.md").write_text("# CHARTER\n\nNo contracts.\n", encoding="utf-8")
+
+    parsed, findings = parse_foundation_contracts(tmp_path / "CHARTER.md")
+
+    assert parsed == []
+    assert findings == []
 
 
 def test_registry_path_declared_semantic_is_rejected(tmp_path: Path) -> None:
