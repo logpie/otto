@@ -25,7 +25,8 @@ def _free_port() -> int:
 class _StatefulApiHandler(BaseHTTPRequestHandler):
     items: dict[str, dict[str, Any]] = {}
 
-    def log_message(self, _format: str, *_args: object) -> None:
+    def log_message(self, format: str, *_args: object) -> None:
+        del format
         return
 
     def _json(self, status: int, payload: dict[str, Any]) -> None:
@@ -170,6 +171,58 @@ def test_api_journey_fails_closed_on_malformed_or_unsupported_lowering(tmp_path:
     assert all(verdict["source"] == "api_executor" for verdict in verdicts)
 
 
+def test_api_executors_fail_closed_on_informational_pass_models(tmp_path: Path) -> None:
+    (tmp_path / "calc.py").write_text("def add(a, b): return a + b\n", encoding="utf-8")
+    weak_journeys = [
+        {
+            "id": "http_status_only",
+            "verification_level": "api",
+            "probe_kind": "http_api",
+            "pass_model": {"steps": [{"method": "GET", "path": "/health", "expect_status": 200}]},
+        },
+        {
+            "id": "cli_exit_only",
+            "verification_level": "api",
+            "probe_kind": "cli_command",
+            "pass_model": {"command": ["python3", "-c", "print('ok')"], "expect_exit_code": 0},
+        },
+        {
+            "id": "library_no_exception_only",
+            "verification_level": "api",
+            "probe_kind": "library_call",
+            "pass_model": {"module": "calc", "function": "add", "args": [1, 2]},
+        },
+        {
+            "id": "service_status_only",
+            "verification_level": "api",
+            "probe_kind": "service_health",
+            "pass_model": {
+                "start_command": ["python3", "-m", "http.server", "0"],
+                "health_url": "http://127.0.0.1:1/health",
+                "expect_status": 200,
+            },
+        },
+    ]
+
+    run = run_api_journey_executor(
+        journeys=weak_journeys,
+        project_dir=tmp_path,
+        artifact_dir=tmp_path / "artifacts",
+        base_url="http://127.0.0.1:1",
+        timeout_s=1,
+    )
+
+    verdicts = resolve_journey_verdicts(
+        journeys=weak_journeys,
+        execution_scope="leaf",
+        executor_results=run.executor_results,
+        registered_executor_levels={"api"},
+    )
+    assert [verdict["passed"] for verdict in verdicts] == [False, False, False, False]
+    assert {verdict["status"] for verdict in verdicts} == {"unverified"}
+    assert all("requires" in verdict["detail"] for verdict in verdicts)
+
+
 def test_cli_and_library_api_journeys_pass_without_http_base_url(tmp_path: Path) -> None:
     (tmp_path / "tool.py").write_text(
         "from pathlib import Path\n"
@@ -299,6 +352,7 @@ def test_leaf_verify_filters_api_journeys_by_owned_primary_actions(tmp_path: Pat
                         "id": "add_flow",
                         "description": "Add numbers.",
                         "covers_primary_actions": ["calc.add"],
+                        "verification_level": "api",
                         "probe_kind": "library_call",
                         "pass_model": {
                             "module": "calc",
@@ -311,6 +365,7 @@ def test_leaf_verify_filters_api_journeys_by_owned_primary_actions(tmp_path: Pat
                         "id": "sub_flow",
                         "description": "Subtract numbers.",
                         "covers_primary_actions": ["calc.sub"],
+                        "verification_level": "api",
                         "probe_kind": "library_call",
                         "pass_model": {
                             "module": "calc",

@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from otto.queue.task_graph import read_graph
-from otto.spec_compile_flat import FlatSpec
+from otto.spec_compile_flat import FlatSpec, SCHEMA_VERSION
 from otto.v5_runner import run_v5_pipeline
 from otto.v5_verification_plan import RunnerVerificationOutcome, validate_lead_verdict
 
@@ -107,6 +107,7 @@ def _spec() -> dict[str, Any]:
 def _spec_dataclass() -> FlatSpec:
     spec = _spec()
     return FlatSpec(
+        schema_version=int(spec["schema_version"]),
         intent=str(spec["intent"]),
         project_kind=str(spec["project_kind"]),
         product_overview=spec["product_overview"],
@@ -165,9 +166,17 @@ def _verdict(**overrides: Any) -> dict[str, Any]:
         "intent_coverage": {"built": ["issue create"], "partial": [], "skipped": []},
         "summary": "passed",
         "evidence": [],
+        "test_command": "pytest -q",
     }
     payload.update(overrides)
     return payload
+
+
+def _write_executor_results(session: Path, results: list[dict[str, Any]]) -> None:
+    _write(
+        session / "journeys" / "post_agent" / "journey-verdicts.json",
+        json.dumps({"executor_results": results}),
+    )
 
 
 def _checks_by_kind(plan: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -280,6 +289,18 @@ def test_integration_node_runs_full_matrix_when_leaf_scope_skips(tmp_path: Path)
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
     _write_contract(tmp_path, session, ia=_ia(route_path="/missing-route"))
+    _write_executor_results(
+        session,
+        [
+            {
+                "id": "create_issue",
+                "status": "pass",
+                "source": "ui_executor",
+                "proof_usable": True,
+                "detail": "DOM effect observed",
+            }
+        ],
+    )
 
     outcome = validate_lead_verdict(
         project_dir=tmp_path,
@@ -397,16 +418,26 @@ async def test_deprecation_telemetry_keeps_bug_b1_pass_and_structured_gates_stil
     failing_journey_session = tmp_path / "failing-journey" / "session"
     failing_journey_project.mkdir(parents=True)
     _passing_project(failing_journey_project, failing_journey_session)
-    failing_journey_verdict = _verdict(
-        journeys=[{"id": "create_issue", "passed": False, "detail": "product test failed"}],
-        test_output="FAILED tests/test_issue.py::test_create_issue",
+    _write_executor_results(
+        failing_journey_session,
+        [
+            {
+                "id": "create_issue",
+                "status": "fail",
+                "source": "ui_executor",
+                "proof_usable": True,
+                "detail": "product test failed",
+            }
+        ],
     )
     failing_journey = validate_lead_verdict(
         project_dir=failing_journey_project,
         worktree_dir=failing_journey_project,
         session_dir=failing_journey_session,
-        agent_verdict=failing_journey_verdict,
+        agent_verdict=_verdict(test_output="FAILED tests/test_issue.py::test_create_issue"),
         initial_verdict="pass",
+        node_kind="integration",
+        execution_scope="root_integration",
     )
     observed["genuine_product_failure_still_gates"] = (
         failing_journey.final_verdict == "partial"
@@ -767,7 +798,7 @@ def test_shared_schema_change_without_decision_no_longer_downgrades(tmp_path: Pa
     assert "decisions_broadcast" not in _checks_by_kind(outcome.verification_plan)
 
 
-def test_missing_passed_journey_downgrades_pass(tmp_path: Path) -> None:
+def test_agent_missing_passed_journey_no_longer_downgrades_leaf_pass(tmp_path: Path) -> None:
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
 
@@ -779,8 +810,123 @@ def test_missing_passed_journey_downgrades_pass(tmp_path: Path) -> None:
         initial_verdict="pass",
     )
 
+    assert outcome.final_verdict == "pass"
+    assert outcome.journey_failures == []
+    assert outcome.verification_plan["journey_verdicts"][0]["status"] == "defer"
+
+
+def test_controller_journey_verdicts_flow_through_sink(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    _passing_project(tmp_path, session)
+    _write_executor_results(
+        session,
+        [
+            {
+                "id": "create_issue",
+                "status": "pass",
+                "source": "ui_executor",
+                "proof_usable": True,
+                "detail": "DOM effect observed",
+            }
+        ],
+    )
+
+    outcome = validate_lead_verdict(
+        project_dir=tmp_path,
+        worktree_dir=tmp_path,
+        session_dir=session,
+        agent_verdict=_verdict(),
+        initial_verdict="pass",
+        node_kind="integration",
+        execution_scope="root_integration",
+    )
+
+    assert outcome.final_verdict == "pass"
+    assert outcome.verification_plan["journey_verdicts"] == [
+        {
+            "id": "create_issue",
+            "passed": True,
+            "detail": "DOM effect observed",
+            "source": "ui_executor",
+            "proof": True,
+            "status": "pass",
+        }
+    ]
+
+
+def test_missing_ui_pass_model_routes_to_spec_contract_repair(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    spec = _spec()
+    spec["schema_version"] = SCHEMA_VERSION
+    spec["behavior_journeys"][0]["verification_level"] = "ui"
+    _write(session / "spec" / "spec.json", json.dumps(spec))
+
+    outcome = validate_lead_verdict(
+        project_dir=tmp_path,
+        worktree_dir=tmp_path,
+        session_dir=session,
+        agent_verdict=_verdict(),
+        initial_verdict="pass",
+    )
+
     assert outcome.final_verdict == "partial"
-    assert outcome.journey_failures == ["create_issue"]
+    assert outcome.verification_contract_failures[0]["kind"] == "verification_contract_missing"
+    assert any(
+        item.get("repair_domain") == "spec_contract"
+        for item in outcome.runner_checks_summary
+    )
+
+
+def test_weak_ui_pass_model_routes_to_spec_contract_repair(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    spec = _spec()
+    spec["schema_version"] = SCHEMA_VERSION
+    spec["behavior_journeys"][0]["verification_level"] = "ui"
+    spec["behavior_journeys"][0]["pass_model"] = {
+        "start_state": "unauthenticated",
+        "setup": [],
+        "actions": [
+            {
+                "id": "issue.create",
+                "state_changing": True,
+                "role": "button",
+                "name": "Create issue",
+                "covers_primary_actions": ["issue.create"],
+                "success_observables": [
+                    {
+                        "kind": "network_and_ui_effect",
+                        "primary_action_id": "issue.create",
+                        "description": "Only HTTP 200 and route loaded.",
+                        "method": "GET",
+                        "path": "/workspaces",
+                        "status": 200,
+                        "ui_effect": "Workspace text appears.",
+                    }
+                ],
+            }
+        ],
+        "success_observables": [],
+        "ready_policy": {"route": "/workspaces"},
+        "settle_policy": {"after_action": "network_idle"},
+        "network_expectations": [],
+        "final_dom_assertions": [{"kind": "text_visible", "text": "Workspace"}],
+    }
+    _write(session / "spec" / "spec.json", json.dumps(spec))
+
+    outcome = validate_lead_verdict(
+        project_dir=tmp_path,
+        worktree_dir=tmp_path,
+        session_dir=session,
+        agent_verdict=_verdict(),
+        initial_verdict="pass",
+    )
+
+    assert outcome.final_verdict == "partial"
+    assert outcome.verification_contract_failures[0]["kind"] == "verification_contract_invalid"
+    assert any(
+        item.get("repair_domain") == "spec_contract"
+        for item in outcome.runner_checks_summary
+    )
 
 
 @pytest.mark.asyncio

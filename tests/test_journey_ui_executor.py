@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from otto.journey_ui_executor import _git_diff_dirty
 from otto.v5_clean_verify import verify_from_clean_oracle
 
 
@@ -28,7 +29,7 @@ def _free_port() -> int:
         sock.close()
 
 
-def _journey() -> dict[str, Any]:
+def _journey(*, accessible_only: bool = False, expect_second_network: bool = False) -> dict[str, Any]:
     observable = {
         "kind": "network_and_ui_effect",
         "primary_action_id": "workspaces.create",
@@ -39,10 +40,57 @@ def _journey() -> dict[str, Any]:
         "method": "POST",
         "path": "/api/workspaces",
         "status": 201,
-        "selector": "[data-testid='workspace-card']",
         "text": "Acme Workspace",
         "ui_effect": "Acme Workspace appears in the workspace list.",
     }
+    if not accessible_only:
+        observable["selector"] = "[data-testid='workspace-card']"
+    action: dict[str, Any] = {
+        "id": "workspaces.create",
+        "state_changing": True,
+        "covers_primary_actions": ["workspaces.create"],
+        "network_expectations": [
+            {"method": "POST", "path": "/api/workspaces", "status": 201}
+        ],
+        "success_observables": [observable],
+    }
+    final_assertion = {
+        "kind": "persisted_data_visible",
+        "primary_action_id": "workspaces.create",
+        "description": (
+            "The created workspace card Acme Workspace remains "
+            "visible in the UI."
+        ),
+        "text": "Acme Workspace",
+    }
+    if accessible_only:
+        action.update({
+            "role": "button",
+            "name": "Create workspace",
+            "inputs": [
+                {"label": "Workspace name", "value": "Acme Workspace"},
+                {"label": "Workspace slug", "value": "acme-workspace"},
+            ],
+        })
+    else:
+        action.update({
+            "selector": "[data-testid='create-workspace']",
+            "inputs": [
+                {
+                    "selector": "[data-testid='workspace-name']",
+                    "value": "Acme Workspace",
+                },
+                {
+                    "selector": "[data-testid='workspace-slug']",
+                    "value": "acme-workspace",
+                },
+            ],
+        })
+        final_assertion["selector"] = "[data-testid='workspace-card']"
+    if expect_second_network:
+        action["network_expectations"].append(
+            {"method": "POST", "path": "/api/audit-log", "status": 201}
+        )
     return {
         "id": "new_user_onboard",
         "role": "illustrative",
@@ -56,25 +104,8 @@ def _journey() -> dict[str, Any]:
             "setup": [],
             "actions": [
                 {
-                    "id": "workspaces.create",
-                    "state_changing": True,
-                    "covers_primary_actions": ["workspaces.create"],
-                    "selector": "[data-testid='create-workspace']",
-                    "inputs": [
-                        {
-                            "selector": "[data-testid='workspace-name']",
-                            "value": "Acme Workspace",
-                        },
-                        {
-                            "selector": "[data-testid='workspace-slug']",
-                            "value": "acme-workspace",
-                        },
-                    ],
-                    "network_expectations": [
-                        {"method": "POST", "path": "/api/workspaces", "status": 201}
-                    ],
-                    "success_observables": [observable],
-                }
+                    **action,
+                },
             ],
             "success_observables": [observable],
             "ready_policy": {
@@ -84,18 +115,7 @@ def _journey() -> dict[str, Any]:
             },
             "settle_policy": {"after_action": "dom_or_network_effect", "timeout_ms": 3000},
             "network_expectations": [],
-            "final_dom_assertions": [
-                {
-                    "kind": "persisted_data_visible",
-                    "primary_action_id": "workspaces.create",
-                    "description": (
-                        "The created workspace card Acme Workspace remains "
-                        "visible in the UI."
-                    ),
-                    "selector": "[data-testid='workspace-card']",
-                    "text": "Acme Workspace",
-                }
-            ],
+            "final_dom_assertions": [final_assertion],
         },
     }
 
@@ -138,8 +158,8 @@ WORKING_HTML = '''<!doctype html>
   <body>
     <main>
       <h1>Your workspaces</h1>
-      <input data-testid="workspace-name" value="">
-      <input data-testid="workspace-slug" value="">
+      <label>Workspace name <input data-testid="workspace-name" value=""></label>
+      <label>Workspace slug <input data-testid="workspace-slug" value=""></label>
       <button data-testid="create-workspace">Create workspace</button>
       <section id="workspace-list"></section>
     </main>
@@ -169,8 +189,8 @@ DEAD_BUTTON_HTML = '''<!doctype html>
   <body>
     <main>
       <h1>Your workspaces</h1>
-      <input data-testid="workspace-name" value="">
-      <input data-testid="workspace-slug" value="">
+      <label>Workspace name <input data-testid="workspace-name" value=""></label>
+      <label>Workspace slug <input data-testid="workspace-slug" value=""></label>
       <button data-testid="create-workspace">Create workspace</button>
       <section id="workspace-list"></section>
     </main>
@@ -232,14 +252,19 @@ ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
     _git(project, "commit", "-q", "-m", "fixture")
 
 
-def _run_ui_probe(project: Path, artifact_dir: Path) -> tuple[bool, dict[str, Any]]:
+def _run_ui_probe(
+    project: Path,
+    artifact_dir: Path,
+    *,
+    journey: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
     result = verify_from_clean_oracle(
         project,
         scope="subtree",
         timeout_s=10,
         port_wait_s=2,
         journey_scope="root_integration",
-        behavior_journeys=[_journey()],
+        behavior_journeys=[journey or _journey()],
         journey_artifact_dir=artifact_dir,
     )
     step = next(step for step in result.steps if step.id == "ui_journeys")
@@ -277,7 +302,35 @@ def test_ui_probe_passes_working_onboarding_ui(tmp_path: Path) -> None:
     verdict = verdict_payload["journey_verdicts"][0]
     assert verdict["passed"] is True
     assert verdict["source"] == "ui_executor"
+    assert verdict_payload["source"] == "journey_verdict_sink"
+    assert verdict_payload["executor_results"][0]["source"] == "ui_executor"
     assert _git(project, "diff", "--exit-code").returncode == 0
+
+
+def test_accessible_only_ui_pass_model_passes_working_ui_and_fails_dead_button(tmp_path: Path) -> None:
+    journey = _journey(accessible_only=True)
+    assert "selector" not in json.dumps(journey)
+    working = tmp_path / "accessible-working"
+    dead = tmp_path / "accessible-dead"
+    _write_fixture_project(working, mode="working", port=_free_port())
+    _write_fixture_project(dead, mode="dead_button", port=_free_port())
+
+    working_passed, working_payload = _run_ui_probe(
+        working,
+        tmp_path / "journey-artifacts-working",
+        journey=journey,
+    )
+    dead_passed, dead_payload = _run_ui_probe(
+        dead,
+        tmp_path / "journey-artifacts-dead",
+        journey=journey,
+    )
+
+    assert working_passed is True
+    assert working_payload["journey_verdicts"][0]["passed"] is True
+    assert dead_passed is False
+    assert dead_payload["journey_verdicts"][0]["passed"] is False
+    assert "no observed network/DOM effect" in dead_payload["journey_verdicts"][0]["detail"]
 
 
 def test_ui_probe_fails_dead_button_with_no_network_or_dom_effect(tmp_path: Path) -> None:
@@ -292,3 +345,29 @@ def test_ui_probe_fails_dead_button_with_no_network_or_dom_effect(tmp_path: Path
     assert verdict["source"] == "ui_executor"
     assert "no observed network/DOM effect" in verdict["detail"]
     assert _git(project, "diff", "--exit-code").returncode == 0
+
+
+def test_ui_probe_requires_every_expected_network_response(tmp_path: Path) -> None:
+    project = tmp_path / "missing-second-network"
+    _write_fixture_project(project, mode="working", port=_free_port())
+
+    passed, verdict_payload = _run_ui_probe(
+        project,
+        tmp_path / "journey-artifacts",
+        journey=_journey(accessible_only=True, expect_second_network=True),
+    )
+
+    assert passed is False
+    verdict = verdict_payload["journey_verdicts"][0]
+    assert verdict["passed"] is False
+    assert "POST /api/audit-log status=201" in verdict["detail"]
+
+
+def test_ui_probe_dirty_check_detects_untracked_files(tmp_path: Path) -> None:
+    project = tmp_path / "dirty"
+    _write_fixture_project(project, mode="working", port=_free_port())
+    (project / "generated.txt").write_text("untracked\n", encoding="utf-8")
+
+    dirty = _git_diff_dirty(project)
+
+    assert "?? generated.txt" in dirty

@@ -11,9 +11,9 @@ from otto import __version__ as OTTO_VERSION
 from otto.observability import sha256_text
 from otto.spec_compile_flat import (
     SCHEMA_VERSION,
+    StructuredSpecValidationError,
     _PROMPT_TEMPLATE,
     compile_flat_spec,
-    validate_structured_spec,
 )
 from otto.v5_spec_cache import cache_key_payload, lookup_spec_cache, store_spec_cache
 
@@ -52,7 +52,7 @@ def test_spec_cache_key_misses_when_prompt_or_schema_changes(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_compile_cache_hit_loads_legacy_v2_spec_without_provider_call(
+async def test_compile_cache_hit_rejects_unmigratable_legacy_webapp_spec(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -86,16 +86,10 @@ async def test_compile_cache_hit_loads_legacy_v2_spec_without_provider_call(
     monkeypatch.setattr("otto.spec_compile_flat._run_compile", fail_compile)
 
     session_dir = tmp_path / "otto_logs" / "sessions" / "s-cache-hit"
-    spec = await compile_flat_spec(
-        project_dir=tmp_path,
-        session_dir=session_dir,
-        intent=intent,
-        config={},
-    )
-
-    assert spec.schema_version == 2
-    assert spec.product_overview == {}
-    warnings = validate_structured_spec(spec, strict=False)
-    assert any("product_overview is missing" in w for w in warnings)
-    metrics = json.loads((session_dir / "compile_metrics.json").read_text(encoding="utf-8"))
-    assert metrics["cache_hit"] is True
+    with pytest.raises(StructuredSpecValidationError, match="entry_route"):
+        await compile_flat_spec(
+            project_dir=tmp_path,
+            session_dir=session_dir,
+            intent=intent,
+            config={},
+        )

@@ -152,7 +152,7 @@ async def test_child_verify_repair_uses_packet_journal_and_blocks_unreviewed_par
 
 
 @pytest.mark.asyncio
-async def test_merge_conflict_repair_packet_carries_three_way_context_and_no_legacy_adapter(
+async def test_merge_conflict_repair_packet_carries_three_way_context_and_no_old_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

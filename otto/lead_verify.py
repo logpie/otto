@@ -34,7 +34,7 @@ from typing import Any, Literal
 
 from otto.journey_api_executor import run_api_journey_executor
 from otto.journey_scope_policy import ExecutionScope, applicability_for
-from otto.journey_verdict_sink import resolve_journey_verdicts
+from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdicts
 from otto.observability import iso_timestamp
 from otto.spec_compile_flat import StructuredSpecValidationError, load_flat_spec
 
@@ -147,25 +147,54 @@ async def run_verify_for_lead(
         )
 
     journey_results = resolve_journey_verdicts(
-        journeys=api_journeys,
+        journeys=journeys_in_scope,
         execution_scope=execution_scope,
         executor_results=api_executor_results,
         registered_executor_levels={"ui", "api"},
     )
-    passed = sum(1 for r in journey_results if r["passed"])
-    total = len(journey_results)
-    if not journey_results:
-        verdict: VerifyVerdict = "unverified"
-        summary = "no applicable api journeys for this execution scope"
-    elif passed == total:
+    api_ids = {str(journey.get("id") or "") for journey in api_journeys}
+    api_results = [item for item in journey_results if str(item.get("id") or "") in api_ids]
+    api_failed = failed_journey_ids(api_results)
+    api_passed = sum(1 for item in api_results if item.get("passed") is True)
+    native_status = str(test_outcome.get("status") or "")
+    native_passed = native_status == "pass"
+    native_failed = native_status in {"fail", "timeout", "error"}
+    browser_failed = browser_outcome is not None and browser_outcome.get("status") not in {"pass", "no_tests"}
+    browser_passed = browser_outcome is None or browser_outcome.get("status") == "pass"
+
+    verdict: VerifyVerdict
+    if browser_failed or native_failed or api_failed:
+        verdict = "partial" if (native_passed or api_passed) else "unverified"
+    elif api_results:
+        verdict = "pass" if api_passed == len(api_results) else "unverified"
+    elif native_passed and browser_passed:
         verdict = "pass"
-        summary = f"{total}/{total} api journeys passed"
-    elif passed > 0:
-        verdict = "partial"
-        summary = f"{passed}/{total} api journeys passed; {total - passed} failed"
     else:
         verdict = "unverified"
-        summary = "no api journey passed verification"
+
+    deferred = [
+        str(item.get("id"))
+        for item in journey_results
+        if str(item.get("status") or "").strip().lower() in {"defer", "deferred"}
+    ]
+    skipped = [
+        str(item.get("id"))
+        for item in journey_results
+        if str(item.get("status") or "").strip().lower() in {"skip", "skipped"}
+    ]
+    summary_parts = [f"native tests {test_outcome.get('status')}"]
+    if api_results:
+        summary_parts.append(f"{api_passed}/{len(api_results)} api journeys passed")
+    else:
+        summary_parts.append("no applicable api journeys for this execution scope")
+    if deferred:
+        summary_parts.append(f"deferred ui journeys: {', '.join(deferred)}")
+    if skipped:
+        summary_parts.append(f"skipped journeys: {', '.join(skipped)}")
+    if browser_failed:
+        browser_status = browser_outcome.get("status") if browser_outcome is not None else "unknown"
+        summary_parts.append(f"browser runner {browser_status}")
+    summary = "; ".join(summary_parts)
 
     duration = time.monotonic() - started
     result = {

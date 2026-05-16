@@ -6,11 +6,17 @@ import hashlib
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from otto.journey_executor_common import (
+    artifact_run_name,
+    executor_non_pass_result,
+    executor_result_payload,
+)
 from otto.journey_contracts import VerificationContractError, validate_ui_pass_model
 from otto.observability import iso_timestamp, write_json_atomic, write_text_atomic
 from otto.safe_slug import safe_slug
@@ -58,7 +64,7 @@ def run_ui_journey_executor(
 
     del clean_project_dir  # The browser talks to the temp deployment by URL.
     started = iso_timestamp()
-    run_dir = artifact_dir / _artifact_run_name(started)
+    run_dir = artifact_dir / artifact_run_name(started)
     run_dir.mkdir(parents=True, exist_ok=True)
     artifact_paths: list[Path] = [run_dir]
     executor_results: list[dict[str, Any]] = []
@@ -297,60 +303,51 @@ def _run_action(
     timeout_ms: int,
     timeout_error_type: type[Exception],
 ) -> str:
-    selector = _action_selector(action)
-    if not selector:
-        return f"action {action.get('id') or '<unnamed>'} lacks an executable control selector"
-    locator = page.locator(selector).first
+    locator, control = _action_locator(page, action)
+    if locator is None:
+        return f"action {action.get('id') or '<unnamed>'} lacks an executable control locator"
     if locator.count() == 0:
-        return f"required control absent: {selector}"
+        return f"required control absent: {control}"
     try:
         locator.wait_for(state="visible", timeout=timeout_ms)
     except timeout_error_type:
-        return f"required control not visible: {selector}"
+        return f"required control not visible: {control}"
     try:
         if not bool(locator.is_enabled(timeout=timeout_ms)):
-            return f"required control disabled: {selector}"
+            return f"required control disabled: {control}"
     except TypeError:
         if not bool(locator.is_enabled()):
-            return f"required control disabled: {selector}"
+            return f"required control disabled: {control}"
 
     for fill in _input_specs(action):
-        fill_selector = str(fill.get("selector") or "").strip()
+        field, field_label = _input_locator(page, fill)
         value = str(fill.get("value") or "")
-        if not fill_selector:
-            return f"action input lacks selector for {action.get('id') or '<unnamed>'}"
-        field = page.locator(fill_selector).first
+        if field is None:
+            return f"action input lacks executable locator for {action.get('id') or '<unnamed>'}"
         if field.count() == 0:
-            return f"required input absent: {fill_selector}"
+            return f"required input absent: {field_label}"
         field.fill(value, timeout=timeout_ms)
 
     before_dom = _dom_fingerprint(page)
     before_network_count = len(network_events)
     expectations = _network_expectations_for_action(action, pass_model)
-    observed_expected_network = True
+    missing_network: list[str] = []
     if expectations:
         first = expectations[0]
-        observed_expected_network = False
         try:
             with page.expect_response(
                 lambda response: _response_matches(response, first),
                 timeout=timeout_ms,
             ):
                 locator.click(timeout=timeout_ms)
-            observed_expected_network = True
         except timeout_error_type:
-            pass
+            missing_network.append(_network_expectation_label(first))
     else:
         locator.click(timeout=timeout_ms)
 
     for expected in expectations[1:]:
-        try:
-            page.wait_for_response(
-                lambda response: _response_matches(response, expected),
-                timeout=timeout_ms,
-            )
-        except timeout_error_type:
-            pass
+        if not _wait_for_network_event(page, network_events, expected, timeout_ms=timeout_ms):
+            missing_network.append(_network_expectation_label(expected))
 
     post_observables = _list_of_dicts(action.get("success_observables"))
     if not post_observables:
@@ -366,10 +363,10 @@ def _run_action(
     dom_changed = after_dom != before_dom
     if not network_changed and not dom_changed:
         return (
-            f"click on {selector} produced no observed network/DOM effect"
+            f"click on {control} produced no observed network/DOM effect"
         )
-    if expectations and not observed_expected_network:
-        return f"expected network effect was not observed for {selector}"
+    if missing_network:
+        return f"expected network effects were not observed for {control}: {', '.join(missing_network)}"
     if dom_failure:
         return f"post-action observable failed: {dom_failure}"
     return ""
@@ -432,15 +429,14 @@ def _result_payload(
     proof_usable: bool,
     artifact_paths: list[Path],
 ) -> dict[str, Any]:
-    return {
-        "id": str(journey.get("id") or "<unnamed>").strip() or "<unnamed>",
-        "status": status,
-        "source": UI_EXECUTOR_SOURCE,
-        "proof_usable": proof_usable,
-        "detail": detail,
-        "artifact_paths": [str(path) for path in artifact_paths],
-        "_written_at": iso_timestamp(),
-    }
+    return executor_result_payload(
+        journey,
+        source=UI_EXECUTOR_SOURCE,
+        status=status,
+        detail=detail,
+        proof_usable=proof_usable,
+        artifact_paths=artifact_paths,
+    )
 
 
 def _non_pass_result(
@@ -451,8 +447,9 @@ def _non_pass_result(
     proof_usable: bool,
     artifact_paths: list[Path],
 ) -> dict[str, Any]:
-    return _result_payload(
+    return executor_non_pass_result(
         journey,
+        source=UI_EXECUTOR_SOURCE,
         status=status,
         detail=detail,
         proof_usable=proof_usable,
@@ -564,12 +561,9 @@ def _wait_for_ready(page: Any, pass_model: dict[str, Any], *, timeout_ms: int) -
             "() => document.readyState === 'interactive' || document.readyState === 'complete'",
             timeout=timeout_ms,
         )
-    selector = str(ready_policy.get("selector") or ready_policy.get("wait_for_selector") or "").strip()
-    if selector:
-        page.locator(selector).first.wait_for(state="visible", timeout=timeout_ms)
-    text = str(ready_policy.get("text") or ready_policy.get("wait_for_text") or "").strip()
-    if text:
-        page.get_by_text(text, exact=False).first.wait_for(state="visible", timeout=timeout_ms)
+    locator, _label = _generic_locator(page, ready_policy, text_keys=("text", "wait_for_text"))
+    if locator is not None:
+        locator.wait_for(state="visible", timeout=timeout_ms)
 
 
 def _page_blank_or_stuck(page: Any) -> bool:
@@ -595,12 +589,7 @@ def _page_blank_or_stuck(page: Any) -> bool:
 
 
 def _assert_dom_observable(page: Any, observable: dict[str, Any], *, timeout_ms: int) -> str:
-    selector = str(
-        observable.get("selector")
-        or observable.get("target_selector")
-        or observable.get("testid_selector")
-        or ""
-    ).strip()
+    selector = _explicit_selector(observable)
     text = str(
         observable.get("text")
         or observable.get("expected_text")
@@ -623,6 +612,17 @@ def _assert_dom_observable(page: Any, observable: dict[str, Any], *, timeout_ms:
             if text not in content:
                 return f"text {text!r} not visible inside {selector}"
         return ""
+    locator, label = _generic_locator(
+        page,
+        observable,
+        text_keys=("text", "expected_text", "visible_text", "name", "accessible_name"),
+    )
+    if locator is not None:
+        try:
+            locator.wait_for(state="visible", timeout=timeout_ms)
+            return ""
+        except Exception as exc:  # noqa: BLE001
+            return f"locator not visible: {label}: {type(exc).__name__}: {exc}"
     if text:
         try:
             page.get_by_text(text, exact=False).first.wait_for(state="visible", timeout=timeout_ms)
@@ -648,6 +648,41 @@ def _response_matches(response: Any, expected: dict[str, Any]) -> bool:
         except (TypeError, ValueError):
             return False
     return True
+
+
+def _network_event_matches(event: _NetworkEvent, expected: dict[str, Any]) -> bool:
+    method = str(expected.get("method") or "").upper()
+    path = str(expected.get("path") or "")
+    status = expected.get("status")
+    if method and event.method.upper() != method:
+        return False
+    if path and event.path != path:
+        return False
+    if status not in (None, ""):
+        try:
+            if event.status != int(status):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _wait_for_network_event(
+    page: Any,
+    network_events: list[_NetworkEvent],
+    expected: dict[str, Any],
+    *,
+    timeout_ms: int,
+) -> bool:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        if any(_network_event_matches(event, expected) for event in network_events):
+            return True
+        try:
+            page.wait_for_timeout(50)
+        except Exception:
+            time.sleep(0.05)
+    return any(_network_event_matches(event, expected) for event in network_events)
 
 
 def _network_expectations_for_action(
@@ -682,6 +717,13 @@ def _network_expectations_for_action(
     return deduped
 
 
+def _network_expectation_label(expected: dict[str, Any]) -> str:
+    method = str(expected.get("method") or "*").upper()
+    path = str(expected.get("path") or "*")
+    status = str(expected.get("status") or "*")
+    return f"{method} {path} status={status}"
+
+
 def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -695,15 +737,98 @@ def _input_specs(action: dict[str, Any]) -> list[dict[str, Any]]:
     return _list_of_dicts(raw)
 
 
-def _action_selector(action: dict[str, Any]) -> str:
-    return str(
-        action.get("selector")
-        or action.get("control_selector")
-        or action.get("click_selector")
-        or action.get("button_selector")
-        or action.get("target_selector")
-        or ""
-    ).strip()
+def _action_locator(page: Any, action: dict[str, Any]) -> tuple[Any | None, str]:
+    locator, label = _generic_locator(
+        page,
+        action,
+        selector_keys=(
+            "selector",
+            "control_selector",
+            "click_selector",
+            "button_selector",
+            "target_selector",
+        ),
+        role_keys=("role", "control_role"),
+        name_keys=("name", "accessible_name", "control_name", "button_name"),
+        label_keys=("label", "control_label"),
+        text_keys=("text", "visible_text", "button_text"),
+    )
+    if locator is not None:
+        return locator, label
+    name = str(action.get("name") or action.get("accessible_name") or "").strip()
+    if name:
+        return page.get_by_role("button", name=name).first, f"role=button name={name!r}"
+    return None, "<missing control locator>"
+
+
+def _input_locator(page: Any, spec: dict[str, Any]) -> tuple[Any | None, str]:
+    return _generic_locator(
+        page,
+        spec,
+        selector_keys=("selector", "field_selector", "input_selector", "target_selector"),
+        role_keys=("role", "field_role", "input_role"),
+        name_keys=("name", "accessible_name", "field_name", "input_name"),
+        label_keys=("label", "field_label", "input_label"),
+        text_keys=("placeholder", "text"),
+    )
+
+
+def _generic_locator(
+    page: Any,
+    spec: dict[str, Any],
+    *,
+    selector_keys: tuple[str, ...] = ("selector", "target_selector", "testid_selector"),
+    role_keys: tuple[str, ...] = ("role",),
+    name_keys: tuple[str, ...] = ("name", "accessible_name"),
+    label_keys: tuple[str, ...] = ("label",),
+    text_keys: tuple[str, ...] = ("text", "visible_text", "expected_text"),
+) -> tuple[Any | None, str]:
+    selector = _explicit_selector(spec, selector_keys=selector_keys)
+    if selector:
+        return page.locator(selector).first, selector
+    role = _first_text(spec, role_keys)
+    name = _first_text(spec, name_keys)
+    exact = bool(spec.get("exact") is True)
+    if role:
+        kwargs: dict[str, Any] = {"exact": exact}
+        if name:
+            kwargs["name"] = name
+        return page.get_by_role(role, **kwargs).first, (
+            f"role={role!r} name={name!r}" if name else f"role={role!r}"
+        )
+    label = _first_text(spec, label_keys)
+    if label:
+        return page.get_by_label(label, exact=exact).first, f"label={label!r}"
+    text = _first_text(spec, text_keys)
+    if text:
+        return page.get_by_text(text, exact=exact).first, f"text={text!r}"
+    return None, "<missing locator>"
+
+
+def _explicit_selector(
+    spec: dict[str, Any],
+    *,
+    selector_keys: tuple[str, ...] = ("selector", "target_selector", "testid_selector"),
+) -> str:
+    selector = _first_text(spec, selector_keys)
+    if selector:
+        return selector
+    testid = _first_text(spec, ("testid", "data_testid", "data-testid"))
+    if testid:
+        return f"[data-testid='{_css_attr_value(testid)}']"
+    return ""
+
+
+def _first_text(spec: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = str(spec.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _css_attr_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _ready_route(journey: dict[str, Any], pass_model: dict[str, Any]) -> str:
@@ -728,16 +853,12 @@ def _extract_assertable_text(value: str) -> str:
     return ""
 
 
-def _artifact_run_name(started: str) -> str:
-    return started.replace(":", "").replace("-", "").replace("T", "-").replace("Z", "")
-
-
 def _git_diff_dirty(project_dir: Path) -> str:
     if not (project_dir / ".git").exists():
         return ""
     try:
         proc = subprocess.run(
-            ["git", "diff", "--", "."],
+            ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=str(project_dir),
             capture_output=True,
             text=True,

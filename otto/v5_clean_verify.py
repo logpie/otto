@@ -942,9 +942,8 @@ def _run_ui_journeys_clean_oracle_step(
     verdicts = resolve_journey_verdicts(
         journeys=journeys,
         execution_scope=journey_scope,
-        legacy_results=[],
         executor_results=probe.executor_results,
-        registered_executor_levels={"ui"},
+        registered_executor_levels={"ui", "api"},
     )
     verdict_path = artifact_dir / "journey-verdicts.json"
     verdict_path.parent.mkdir(parents=True, exist_ok=True)

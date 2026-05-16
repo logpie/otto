@@ -11,6 +11,12 @@ from otto.spec_compile_flat import compile_flat_spec, compile_message_metrics_fr
 
 
 def _payload() -> dict[str, Any]:
+    observable = {
+        "kind": "persisted_data_visible",
+        "primary_action_id": "issue.create",
+        "description": "The created issue title appears in the backlog after submit.",
+        "text": "Fix login",
+    }
     return {
         "project_kind": "webapp",
         "product_overview": {
@@ -77,6 +83,27 @@ def _payload() -> dict[str, Any]:
                 "covers_primary_actions": ["issue.create"],
                 "start_state": "unauthenticated",
                 "entry_route": "/",
+                "verification_level": "ui",
+                "pass_model": {
+                    "start_state": "unauthenticated",
+                    "setup": [],
+                    "actions": [
+                        {
+                            "id": "issue.create",
+                            "state_changing": True,
+                            "role": "button",
+                            "name": "Create issue",
+                            "covers_primary_actions": ["issue.create"],
+                            "success_observables": [observable],
+                            "network_expectations": [],
+                        }
+                    ],
+                    "success_observables": [observable],
+                    "ready_policy": {"route": "/", "wait_for": "interactive"},
+                    "settle_policy": {"after_action": "dom_or_network_effect", "timeout_ms": 5000},
+                    "network_expectations": [],
+                    "final_dom_assertions": [observable],
+                },
             }
         ],
     }

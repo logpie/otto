@@ -12,18 +12,20 @@ import urllib.request
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from otto.journey_contracts import VerificationContractError, validate_api_pass_model
+from otto.journey_executor_common import (
+    artifact_run_name,
+    executor_non_pass_result,
+    executor_pass_result,
+    journey_id,
+)
 from otto.observability import iso_timestamp, write_json_atomic, write_text_atomic
 from otto.safe_slug import safe_slug
 
 API_EXECUTOR_SOURCE = "api_executor"
-SUPPORTED_API_PROBE_KINDS = frozenset({
-    "http_api",
-    "cli_command",
-    "library_call",
-    "service_health",
-})
+APIProbeExecutor = Callable[..., dict[str, Any]]
 
 
 @dataclass
@@ -43,7 +45,7 @@ def run_api_journey_executor(
     """Run API-level journeys through typed controller executors."""
 
     started = iso_timestamp()
-    run_dir = artifact_dir / _artifact_run_name(started)
+    run_dir = artifact_dir / artifact_run_name(started)
     run_dir.mkdir(parents=True, exist_ok=True)
     executor_results: list[dict[str, Any]] = []
     artifact_paths: list[Path] = [run_dir]
@@ -87,11 +89,12 @@ def _run_one_journey(
     base_url: str | None,
     timeout_s: int,
 ) -> dict[str, Any]:
-    journey_id = _journey_id(journey)
-    journey_dir = run_dir / safe_slug(journey_id, max_len=48)
+    jid = journey_id(journey)
+    journey_dir = run_dir / safe_slug(jid, max_len=48)
     journey_dir.mkdir(parents=True, exist_ok=True)
     probe_kind = str(journey.get("probe_kind") or "").strip()
-    if probe_kind not in SUPPORTED_API_PROBE_KINDS:
+    executor = PROBE_EXECUTORS.get(probe_kind)
+    if executor is None:
         return _non_pass_result(
             journey,
             status="unverified",
@@ -100,43 +103,23 @@ def _run_one_journey(
             artifact_paths=[],
         )
     pass_model = journey.get("pass_model")
-    if not isinstance(pass_model, dict):
+    try:
+        validate_api_pass_model(journey, path=f"behavior_journeys[{jid}]")
+    except VerificationContractError as exc:
         return _non_pass_result(
             journey,
             status="unverified",
-            detail="api journey missing declarative pass_model",
+            detail=f"{exc.code}: {exc.message}",
             proof_usable=False,
             artifact_paths=[],
         )
-    if probe_kind == "http_api":
-        return _run_http_api_journey(
-            journey=journey,
-            pass_model=pass_model,
-            base_url=base_url,
-            journey_dir=journey_dir,
-            timeout_s=timeout_s,
-        )
-    if probe_kind == "cli_command":
-        return _run_cli_journey(
-            journey=journey,
-            pass_model=pass_model,
-            project_dir=project_dir,
-            journey_dir=journey_dir,
-            timeout_s=timeout_s,
-        )
-    if probe_kind == "library_call":
-        return _run_library_journey(
-            journey=journey,
-            pass_model=pass_model,
-            project_dir=project_dir,
-            journey_dir=journey_dir,
-            timeout_s=timeout_s,
-        )
-    return _run_service_health_journey(
+    assert isinstance(pass_model, dict)
+    return executor(
         journey=journey,
         pass_model=pass_model,
         project_dir=project_dir,
         journey_dir=journey_dir,
+        base_url=base_url,
         timeout_s=timeout_s,
     )
 
@@ -145,10 +128,12 @@ def _run_http_api_journey(
     *,
     journey: dict[str, Any],
     pass_model: dict[str, Any],
+    project_dir: Path,
     base_url: str | None,
     journey_dir: Path,
     timeout_s: int,
 ) -> dict[str, Any]:
+    del project_dir
     if not base_url:
         return _non_pass_result(
             journey,
@@ -289,8 +274,10 @@ def _run_cli_journey(
     pass_model: dict[str, Any],
     project_dir: Path,
     journey_dir: Path,
+    base_url: str | None,
     timeout_s: int,
 ) -> dict[str, Any]:
+    del base_url
     command = _command_list(pass_model.get("command"))
     if command is None:
         return _non_pass_result(
@@ -367,8 +354,10 @@ def _run_library_journey(
     pass_model: dict[str, Any],
     project_dir: Path,
     journey_dir: Path,
+    base_url: str | None,
     timeout_s: int,
 ) -> dict[str, Any]:
+    del base_url
     module = str(pass_model.get("module") or "").strip()
     function = str(pass_model.get("function") or "").strip()
     if not module or not function:
@@ -472,8 +461,10 @@ def _run_service_health_journey(
     pass_model: dict[str, Any],
     project_dir: Path,
     journey_dir: Path,
+    base_url: str | None,
     timeout_s: int,
 ) -> dict[str, Any]:
+    del base_url
     command = _command_list(pass_model.get("start_command") or pass_model.get("command"))
     health_url = str(pass_model.get("health_url") or "").strip()
     if command is None or not health_url:
@@ -500,6 +491,7 @@ def _run_service_health_journey(
         last_error = ""
         expected_status = int(pass_model.get("expect_status") or 200)
         expect_body = str(pass_model.get("expect_body_contains") or "")
+        expect_json = pass_model.get("expect_json")
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 break
@@ -507,14 +499,19 @@ def _run_service_health_journey(
                 with urllib.request.urlopen(health_url, timeout=1) as response:
                     status_code = int(response.status)
                     response_text = response.read().decode("utf-8", errors="replace")
-                if status_code == expected_status and (not expect_body or expect_body in response_text):
+                json_payload, json_error = _parse_json(response_text)
+                body_matches = not expect_body or expect_body in response_text
+                json_matches = True
+                if expect_json is not None:
+                    json_matches = not json_error and not _json_subset_mismatch(json_payload, expect_json)
+                if status_code == expected_status and body_matches and json_matches:
                     log_path = _collect_service_output(proc, journey_dir)
                     return _pass_result(
                         journey,
                         detail=f"service_health satisfied at {health_url}",
                         artifact_paths=[log_path],
                     )
-                last_error = f"status={status_code}, body did not match"
+                last_error = f"status={status_code}, payload did not match"
             except (urllib.error.URLError, TimeoutError) as exc:
                 last_error = str(exc)
             time.sleep(0.1)
@@ -544,6 +541,14 @@ def _run_service_health_journey(
                 output = proc.communicate(timeout=2)[0] or output
             if output:
                 write_text_atomic(journey_dir / "service-output.log", output)
+
+
+PROBE_EXECUTORS: dict[str, APIProbeExecutor] = {
+    "http_api": _run_http_api_journey,
+    "cli_command": _run_cli_journey,
+    "library_call": _run_library_journey,
+    "service_health": _run_service_health_journey,
+}
 
 
 def _collect_service_output(proc: subprocess.Popen[str], journey_dir: Path) -> Path:
@@ -593,14 +598,12 @@ def _pass_result(
     detail: str,
     artifact_paths: list[Path],
 ) -> dict[str, Any]:
-    return {
-        "id": _journey_id(journey),
-        "status": "pass",
-        "source": API_EXECUTOR_SOURCE,
-        "proof_usable": True,
-        "detail": detail,
-        "artifact_paths": [str(path) for path in artifact_paths],
-    }
+    return executor_pass_result(
+        journey,
+        source=API_EXECUTOR_SOURCE,
+        detail=detail,
+        artifact_paths=artifact_paths,
+    )
 
 
 def _non_pass_result(
@@ -611,22 +614,14 @@ def _non_pass_result(
     proof_usable: bool,
     artifact_paths: list[Path],
 ) -> dict[str, Any]:
-    return {
-        "id": _journey_id(journey),
-        "status": status,
-        "source": API_EXECUTOR_SOURCE,
-        "proof_usable": proof_usable,
-        "detail": detail,
-        "artifact_paths": [str(path) for path in artifact_paths],
-    }
-
-
-def _journey_id(journey: dict[str, Any]) -> str:
-    return str(journey.get("id") or "<unnamed>").strip() or "<unnamed>"
-
-
-def _artifact_run_name(started: str) -> str:
-    return started.replace(":", "").replace("-", "").replace("Z", "Z")
+    return executor_non_pass_result(
+        journey,
+        source=API_EXECUTOR_SOURCE,
+        status=status,
+        detail=detail,
+        proof_usable=proof_usable,
+        artifact_paths=artifact_paths,
+    )
 
 
 def _command_list(value: Any) -> list[str] | None:

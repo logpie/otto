@@ -9,6 +9,69 @@ from otto.journey_contracts import (
 from otto.spec_compile_flat import SCHEMA_VERSION
 
 
+def _ui_pass_model() -> dict[str, object]:
+    observable = {
+        "kind": "persisted_data_visible",
+        "primary_action_id": "issue.create",
+        "description": "The created issue title appears in the backlog after submit.",
+        "text": "Fix login",
+    }
+    return {
+        "start_state": "unauthenticated",
+        "setup": [],
+        "actions": [
+            {
+                "id": "issue.create",
+                "state_changing": True,
+                "role": "button",
+                "name": "Create issue",
+                "covers_primary_actions": ["issue.create"],
+                "success_observables": [observable],
+            }
+        ],
+        "success_observables": [observable],
+        "ready_policy": {"route": "/", "wait_for": "interactive"},
+        "settle_policy": {"after_action": "dom_or_network_effect", "timeout_ms": 5000},
+        "network_expectations": [],
+        "final_dom_assertions": [observable],
+    }
+
+
+def _api_pass_model(probe_kind: str) -> dict[str, object]:
+    if probe_kind == "http_api":
+        return {
+            "steps": [
+                {
+                    "method": "GET",
+                    "path": "/items/1",
+                    "expect_status": 200,
+                    "expect_json": {"id": "1", "name": "Item"},
+                }
+            ]
+        }
+    if probe_kind == "cli_command":
+        return {
+            "command": ["python3", "-c", "print('created item')"],
+            "expect_exit_code": 0,
+            "stdout_contains": "created item",
+        }
+    if probe_kind == "library_call":
+        return {
+            "module": "calc",
+            "function": "add",
+            "args": [1, 2],
+            "expect_return": 3,
+        }
+    if probe_kind == "service_health":
+        return {
+            "start_command": ["python3", "service.py"],
+            "health_url": "http://127.0.0.1:8000/health",
+            "expect_status": 200,
+            "expect_body_contains": "healthy",
+        }
+    raise AssertionError(probe_kind)
+
+
 def _webapp_journey(**overrides: object) -> dict[str, object]:
     journey: dict[str, object] = {
         "id": "create_issue",
@@ -43,6 +106,14 @@ def test_fail_closed_assignment_marks_itracker_webapp_journeys_ui() -> None:
     assert all("pass_model" in journey for journey in journeys)
 
 
+def test_old_spec_role_illustrative_is_ignored_but_still_loads() -> None:
+    payload = _payload("webapp", [_webapp_journey(role="illustrative", entry_route="/")])
+
+    normalized = normalize_journey_contracts(payload, current_schema_version=SCHEMA_VERSION)
+
+    assert normalized["behavior_journeys"][0]["verification_level"] == "ui"
+
+
 def test_webapp_missing_entry_route_fails_closed() -> None:
     payload = _payload("webapp", [_webapp_journey(entry_route="")])
 
@@ -56,7 +127,7 @@ def test_webapp_missing_entry_route_fails_closed() -> None:
 def test_webapp_api_only_api_route_assigns_http_api_probe() -> None:
     payload = _payload(
         "webapp",
-        [_webapp_journey(api_only=True, entry_route="/api/issues")],
+        [_webapp_journey(api_only=True, entry_route="/api/issues", pass_model=_api_pass_model("http_api"))],
     )
 
     normalized = normalize_journey_contracts(payload, current_schema_version=SCHEMA_VERSION)
@@ -64,7 +135,7 @@ def test_webapp_api_only_api_route_assigns_http_api_probe() -> None:
     journey = normalized["behavior_journeys"][0]
     assert journey["verification_level"] == "api"
     assert journey["probe_kind"] == "http_api"
-    assert "pass_model" not in journey
+    assert "pass_model" in journey
 
 
 @pytest.mark.parametrize(
@@ -77,7 +148,7 @@ def test_non_webapp_journeys_are_api_with_typed_probe_kind(
 ) -> None:
     payload = _payload(
         project_kind,
-        [{"id": "main", "description": "Run the primary behavior."}],
+        [{"id": "main", "description": "Run the primary behavior.", "pass_model": _api_pass_model(probe_kind)}],
     )
 
     normalized = normalize_journey_contracts(payload, current_schema_version=SCHEMA_VERSION)
@@ -85,6 +156,28 @@ def test_non_webapp_journeys_are_api_with_typed_probe_kind(
     journey = normalized["behavior_journeys"][0]
     assert journey["verification_level"] == "api"
     assert journey["probe_kind"] == probe_kind
+
+
+def test_current_schema_missing_or_empty_journeys_fails_closed() -> None:
+    for payload in (
+        {"schema_version": SCHEMA_VERSION, "project_kind": "webapp"},
+        {"schema_version": SCHEMA_VERSION, "project_kind": "webapp", "behavior_journeys": "missing"},
+        {"schema_version": SCHEMA_VERSION, "project_kind": "webapp", "behavior_journeys": []},
+    ):
+        with pytest.raises(VerificationContractError) as excinfo:
+            normalize_journey_contracts(payload, current_schema_version=SCHEMA_VERSION)
+        assert excinfo.value.code == "verification_contract_missing"
+
+
+def test_current_schema_journey_missing_typed_fields_fails_closed() -> None:
+    payload = _payload("webapp", [_webapp_journey()])
+    payload["schema_version"] = SCHEMA_VERSION
+
+    with pytest.raises(VerificationContractError) as excinfo:
+        normalize_journey_contracts(payload, current_schema_version=SCHEMA_VERSION)
+
+    assert excinfo.value.code == "verification_contract_missing"
+    assert "verification_level" in excinfo.value.path
 
 
 def test_typed_ui_journey_missing_pass_model_routes_to_contract_missing() -> None:
@@ -108,6 +201,8 @@ def test_weak_pass_model_routes_to_contract_invalid() -> None:
             {
                 "id": "issue.create",
                 "state_changing": True,
+                "role": "button",
+                "name": "Create issue",
                 "covers_primary_actions": ["issue.create"],
                 "success_observables": [
                     {
@@ -139,3 +234,52 @@ def test_weak_pass_model_routes_to_contract_invalid() -> None:
 
     assert excinfo.value.code == "verification_contract_invalid"
     assert "success_observables" in excinfo.value.path
+
+
+@pytest.mark.parametrize(
+    ("project_kind", "probe_kind", "weak_pass_model"),
+    [
+        ("api", "http_api", {"steps": [{"method": "GET", "path": "/items", "expect_status": 200}]}),
+        ("cli", "cli_command", {"command": ["python3", "-c", "pass"], "expect_exit_code": 0}),
+        ("library", "library_call", {"module": "calc", "function": "add", "args": [1, 2]}),
+        (
+            "service",
+            "service_health",
+            {
+                "start_command": ["python3", "service.py"],
+                "health_url": "http://127.0.0.1:8000/health",
+                "expect_status": 200,
+            },
+        ),
+    ],
+)
+def test_current_schema_api_journey_requires_strong_adapter_pass_model(
+    project_kind: str,
+    probe_kind: str,
+    weak_pass_model: dict[str, object],
+) -> None:
+    valid_journey: dict[str, object] = {
+        "id": "main",
+        "description": "Run the primary behavior.",
+        "covers_primary_actions": ["main.run"],
+        "start_state": "empty",
+        "verification_level": "api",
+        "probe_kind": probe_kind,
+        "pass_model": _api_pass_model(probe_kind),
+    }
+    valid_payload = {
+        "schema_version": SCHEMA_VERSION,
+        "project_kind": project_kind,
+        "behavior_journeys": [valid_journey],
+    }
+
+    normalized = normalize_journey_contracts(valid_payload, current_schema_version=SCHEMA_VERSION)
+    assert normalized["behavior_journeys"][0]["probe_kind"] == probe_kind
+
+    weak_payload = {
+        **valid_payload,
+        "behavior_journeys": [{**valid_journey, "pass_model": weak_pass_model}],
+    }
+    with pytest.raises(VerificationContractError) as excinfo:
+        normalize_journey_contracts(weak_payload, current_schema_version=SCHEMA_VERSION)
+    assert excinfo.value.code == "verification_contract_invalid"

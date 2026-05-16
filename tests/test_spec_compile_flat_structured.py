@@ -11,6 +11,8 @@ import pytest
 from otto.spec_compile_flat import (
     FlatSpec,
     INTENT_CLAIMS_MAX,
+    SCHEMA_VERSION,
+    StructuredSpecValidationError,
     _PROMPT_TEMPLATE,
     _cleanup_root_spec_artifacts,
     _read_structured_output_tool_input,
@@ -19,6 +21,35 @@ from otto.spec_compile_flat import (
     load_flat_spec,
     validate_structured_spec,
 )
+
+
+def _ui_pass_model() -> dict[str, object]:
+    observable = {
+        "kind": "persisted_data_visible",
+        "primary_action_id": "issue.create",
+        "description": "The created issue title appears in the backlog after submit.",
+        "text": "Fix login",
+    }
+    return {
+        "start_state": "unauthenticated",
+        "setup": [],
+        "actions": [
+            {
+                "id": "issue.create",
+                "state_changing": True,
+                "role": "button",
+                "name": "Create issue",
+                "covers_primary_actions": ["issue.create"],
+                "success_observables": [observable],
+                "network_expectations": [],
+            }
+        ],
+        "success_observables": [observable],
+        "ready_policy": {"route": "/", "wait_for": "interactive"},
+        "settle_policy": {"after_action": "dom_or_network_effect", "timeout_ms": 5000},
+        "network_expectations": [],
+        "final_dom_assertions": [observable],
+    }
 
 
 def _valid_spec() -> FlatSpec:
@@ -98,6 +129,8 @@ def _valid_spec() -> FlatSpec:
                 "covers_primary_actions": ["issue.create"],
                 "start_state": "unauthenticated",
                 "entry_route": "/",
+                "verification_level": "ui",
+                "pass_model": _ui_pass_model(),
             }
         ],
     )
@@ -105,6 +138,11 @@ def _valid_spec() -> FlatSpec:
 
 def test_valid_structured_flat_spec_passes() -> None:
     assert validate_structured_spec(_valid_spec(), strict=True) == []
+
+
+def test_behavior_journey_role_is_not_in_schema_or_prompt() -> None:
+    assert '"role": "illustrative"' not in _PROMPT_TEMPLATE
+    assert "behavior_journeys[{jid}].role" not in _PROMPT_TEMPLATE
 
 
 def test_compile_prompt_contains_v6_output_cap_guidance() -> None:
@@ -188,6 +226,43 @@ async def test_compile_flat_spec_removes_root_spec_artifacts_after_success(
     assert (session_dir / "spec" / "spec.json").is_file()
 
 
+@pytest.mark.asyncio
+async def test_compile_flat_spec_missing_webapp_entry_route_is_hard_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_options(_project_dir: Path, _config: dict[str, object], *, agent_type: str | None = None):
+        assert agent_type == "spec"
+        return SimpleNamespace(
+            max_turns=1,
+            provider="claude",
+            model="claude-sonnet-test",
+        )
+
+    async def fake_run_compile(
+        _prompt: str,
+        _options: object,
+        log_dir: Path,
+        _project_dir: Path,
+    ) -> str:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "messages.jsonl").write_text("", encoding="utf-8")
+        payload = asdict(_valid_spec())
+        payload["behavior_journeys"][0].pop("entry_route", None)
+        return json.dumps(payload)
+
+    monkeypatch.setattr("otto.spec_compile_flat.make_agent_options", fake_options)
+    monkeypatch.setattr("otto.spec_compile_flat._run_compile", fake_run_compile)
+
+    with pytest.raises(StructuredSpecValidationError, match="entry_route"):
+        await compile_flat_spec(
+            project_dir=tmp_path,
+            session_dir=tmp_path / "otto_logs" / "sessions" / "s1",
+            intent="build an issue tracker",
+            config={"spec_compile_no_cache": True},
+        )
+
+
 def test_intent_claims_over_cap_warns_without_strict_failure() -> None:
     spec = _valid_spec()
     claim_ids = [f"claim.issue_create_{idx}" for idx in range(INTENT_CLAIMS_MAX + 1)]
@@ -217,7 +292,7 @@ def test_product_overview_json_roundtrip_validates() -> None:
     spec = _valid_spec()
     roundtripped = json.loads(json.dumps(asdict(spec)))
 
-    assert roundtripped["schema_version"] == 3
+    assert roundtripped["schema_version"] == SCHEMA_VERSION
     assert roundtripped["product_overview"]["primary_navigation"]["sidebar"] == ["team.backlog"]
     assert validate_structured_spec(roundtripped, strict=True) == []
 
@@ -292,7 +367,7 @@ def test_webapp_root_cold_start_journey_gap_warns() -> None:
     assert any("entry_route '/'" in warning for warning in warnings)
 
 
-def test_legacy_flat_spec_loads_and_warns(tmp_path: Path) -> None:
+def test_legacy_flat_spec_without_entry_route_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "spec.json"
     path.write_text(json.dumps({
         "schema_version": 1,
@@ -301,12 +376,8 @@ def test_legacy_flat_spec_loads_and_warns(tmp_path: Path) -> None:
         "behavior_journeys": [{"id": "legacy", "description": "User sees the app."}],
     }))
 
-    spec = load_flat_spec(path)
-    warnings = validate_structured_spec(spec, strict=False)
-
-    assert spec.intent_claims == []
-    assert spec.core_entities == []
-    assert any("structured spec fields are absent" in warning for warning in warnings)
+    with pytest.raises(StructuredSpecValidationError, match="entry_route"):
+        load_flat_spec(path)
 
 
 @pytest.mark.asyncio

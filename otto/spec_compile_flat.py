@@ -425,7 +425,7 @@ INTENT:
 Emit one JSON object through StructuredOutput/final structured JSON. Do not
 write `product-contract.json`, `spec.json`, or any other project-root spec file.
 
-Use this shape. Keep it compact; empty arrays are fine when a field is not useful.
+Use this shape. Keep it compact; empty arrays are fine for supporting fields when a field is not useful, but `behavior_journeys` must contain at least one executable verification journey.
 {{
   "project_kind": "webapp" | "cli" | "api" | "library" | "service",
   "product_overview": {{
@@ -486,6 +486,7 @@ Use this shape. Keep it compact; empty arrays are fine when a field is not usefu
       "covers_primary_actions": ["entity.action"],
       "start_state": "unauthenticated",
       "entry_route": "/",
+      "verification_level": "ui",
       "pass_model": {{
         "start_state": "unauthenticated",
         "setup": [],
@@ -494,21 +495,26 @@ Use this shape. Keep it compact; empty arrays are fine when a field is not usefu
             "id": "entity.action.effect",
             "description": "Use the visible UI to perform entity.action.",
             "state_changing": true,
+            "role": "button",
+            "name": "Create entity",
+            "inputs": [
+              {{"label": "Name", "value": "Example entity"}}
+            ],
             "covers_primary_actions": ["entity.action"],
             "success_observables": [
-              {{"kind": "persisted_data_visible", "primary_action_id": "entity.action", "description": "The created/changed entity appears in the UI after the action."}}
+              {{"kind": "persisted_data_visible", "primary_action_id": "entity.action", "description": "The created/changed entity appears in the UI after the action.", "text": "Example entity"}}
             ],
             "network_expectations": []
           }}
         ],
         "success_observables": [
-          {{"kind": "persisted_data_visible", "primary_action_id": "entity.action", "description": "The created/changed entity appears in the UI after the action."}}
+          {{"kind": "persisted_data_visible", "primary_action_id": "entity.action", "description": "The created/changed entity appears in the UI after the action.", "text": "Example entity"}}
         ],
         "ready_policy": {{"route": "/", "wait_for": "interactive"}},
         "settle_policy": {{"after_action": "dom_or_network_effect", "timeout_ms": 5000}},
         "network_expectations": [],
         "final_dom_assertions": [
-          {{"kind": "persisted_data_visible", "primary_action_id": "entity.action", "description": "The created/changed entity appears in the UI after the action."}}
+          {{"kind": "persisted_data_visible", "primary_action_id": "entity.action", "description": "The created/changed entity appears in the UI after the action.", "text": "Example entity"}}
         ]
       }}
     }}
@@ -516,9 +522,11 @@ Use this shape. Keep it compact; empty arrays are fine when a field is not usefu
 }}
 
 Guidance:
-- Behavior journeys are representative user-language samples and must include a concrete pass_model for UI effects.
+- Behavior journeys are representative user-language samples and must include typed executable verification fields.
+- Webapp UI journeys use `verification_level: "ui"` and a pass_model with accessible locators: role/name for controls, label/name for inputs, and text/role/name/label assertions for resulting UI. Avoid CSS selectors and data-testids unless no accessible locator exists.
+- API/CLI/library/service journeys use `verification_level: "api"`, the adapter `probe_kind`, and a strong pass_model: http_api needs response payload assertions/extracted state; cli_command needs stdout/stderr or filesystem effects; library_call needs expect_return or expect_raises; service_health needs health plus payload assertion.
 - Do not use route-loaded, HTTP-200, body-present, skeleton, or generic text as the only success observable.
-- Use at most 5 representative critical flows; avoid selectors, data-testids, or DOM APIs.
+- Use at most 5 representative critical flows; avoid DOM APIs.
 - IDs should be terse and stable, e.g. `issue.create` or `report.export`.
 - Consolidate repeated or low-priority claims; intent_claims cap <= 30.
 - Prefer useful product structure over perfect cross-reference coverage. Build agents can reason from context.
@@ -530,7 +538,7 @@ _PROMPT_RETRY_SUFFIX = """
 YOUR PREVIOUS OUTPUT WAS NOT USABLE JSON FOR OTTO:
 {warnings}
 
-Re-emit one JSON object. Keep journeys in user-language; no DOM selectors.
+Re-emit one JSON object. Keep journeys in user-language; prefer accessible role/name/label/text locators over DOM selectors.
 """
 
 
@@ -747,8 +755,21 @@ async def compile_flat_spec(
                                 "pass_model": {
                                     "type": "object",
                                     "properties": {
-                                        key: {"type": ["array", "object", "string"]}
-                                        for key in PASS_MODEL_KEYS
+                                        **{
+                                            key: {"type": ["array", "object", "string", "number", "boolean"]}
+                                            for key in PASS_MODEL_KEYS
+                                        },
+                                        "steps": {"type": "array", "items": {"type": "object"}},
+                                        "api_steps": {"type": "array", "items": {"type": "object"}},
+                                        "command": {"type": "array", "items": {"type": "string"}},
+                                        "start_command": {"type": "array", "items": {"type": "string"}},
+                                        "module": {"type": "string"},
+                                        "function": {"type": "string"},
+                                        "expect_return": {},
+                                        "expect_raises": {"type": "string"},
+                                        "health_url": {"type": "string"},
+                                        "expect_body_contains": {"type": "string"},
+                                        "expect_json": {},
                                     },
                                 },
                             },
@@ -757,7 +778,8 @@ async def compile_flat_spec(
                                 "description",
                                 "covers_primary_actions",
                                 "start_state",
-                                "entry_route",
+                                "verification_level",
+                                "pass_model",
                             ],
                         },
                     },
