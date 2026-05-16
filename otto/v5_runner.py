@@ -3010,6 +3010,64 @@ async def _process_children(
                 )
                 break
 
+            try:
+                from otto.v5_capability_inventory import persist_foundation_contracts_from_charter
+
+                parent_id = _parent_task_id_for_child(
+                    project_dir,
+                    architect_tid,
+                    str(architect_task.get("integration_branch") or "main"),
+                )
+                foundation_contracts, foundation_findings = (
+                    persist_foundation_contracts_from_charter(
+                        project_dir,
+                        parent_task_id=parent_id,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                foundation_contracts = []
+                foundation_findings = []
+                logger.warning("foundation contracts parse failed: %s", exc)
+            if foundation_findings:
+                foundation_feedback = {
+                    "kind": "foundation_contracts_contract_invalid",
+                    "step_id": "architect_foundation_contracts",
+                    "message": "architect Foundation Contracts block is invalid",
+                    "architect_task_id": architect_tid,
+                    "parent_task_id": _parent_task_id_for_child(
+                        project_dir,
+                        architect_tid,
+                        str(architect_task.get("integration_branch") or "main"),
+                    ),
+                    "contract_findings": [
+                        {"kind": f.kind, "reference": f.reference, "detail": f.detail}
+                        for f in foundation_findings
+                    ],
+                    "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                _emit(on_event, {
+                    "event": "architect_contract_invalid",
+                    "task_id": architect_tid,
+                    "reason": foundation_feedback.get("kind"),
+                    "structured_reason": foundation_feedback,
+                })
+                retry_architect = _reenter_or_block_architect_contract(
+                    project_dir=project_dir,
+                    architect_tid=architect_tid,
+                    child_results=child_results,
+                    completed=completed,
+                    feedback=foundation_feedback,
+                    origin="architect_contract",
+                    on_event=on_event,
+                )
+                break
+            if foundation_contracts:
+                _emit(on_event, {
+                    "event": "foundation_contracts_recorded",
+                    "architect_task_id": architect_tid,
+                    "count": len(foundation_contracts),
+                })
+
             # Architect passed AND scaffold preflight is clean.
             # Run shared toolchain preflight in the architect
             # worktree so ignored install dirs exist there before

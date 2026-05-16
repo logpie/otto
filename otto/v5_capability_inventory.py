@@ -548,6 +548,10 @@ _IA_HEADING = re.compile(
     r"^##\s+Information Architecture Contract\s*$",
     flags=re.MULTILINE,
 )
+_FOUNDATION_CONTRACTS_HEADING = re.compile(
+    r"^##\s+Foundation Contracts\s*$",
+    flags=re.MULTILINE,
+)
 _FENCED_JSON = re.compile(r"```(?:json)?\s*\n(.*?)\n```", flags=re.DOTALL)
 _KNOWN_SURFACE_KINDS = frozenset({
     "route",
@@ -654,6 +658,17 @@ def _extract_ia_block(charter_text: str) -> str | None:
     return charter_text[body_start:body_end]
 
 
+def _extract_foundation_contracts_block(charter_text: str) -> str | None:
+    """Return the Foundation Contracts section body, if present."""
+    start_m = _FOUNDATION_CONTRACTS_HEADING.search(charter_text)
+    if not start_m:
+        return None
+    body_start = start_m.end()
+    next_m = _NEXT_SECTION.search(charter_text, pos=body_start)
+    body_end = next_m.start() if next_m else len(charter_text)
+    return charter_text[body_start:body_end]
+
+
 def parse_information_architecture_contract(source: str | Path) -> dict[str, Any] | None:
     """Parse the CHARTER Information Architecture Contract JSON block.
 
@@ -679,6 +694,145 @@ def parse_information_architecture_contract(source: str | Path) -> dict[str, Any
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _read_charter_source(source: str | Path) -> str | None:
+    if isinstance(source, Path):
+        try:
+            return source.read_text(encoding="utf-8")
+        except OSError:
+            return None
+    return source
+
+
+def _foundation_contracts_payload(charter_text: str) -> Any:
+    ia = parse_information_architecture_contract(charter_text)
+    if isinstance(ia, dict) and "foundation_contracts" in ia:
+        return ia.get("foundation_contracts")
+    block = _extract_foundation_contracts_block(charter_text)
+    if block is None:
+        return None
+    fenced = _FENCED_JSON.search(block)
+    json_text = fenced.group(1).strip() if fenced else block.strip()
+    if not json_text:
+        return None
+    try:
+        payload = json.loads(json_text)
+    except json.JSONDecodeError:
+        return {"__invalid_json__": True}
+    if isinstance(payload, dict) and "foundation_contracts" in payload:
+        return payload.get("foundation_contracts")
+    return payload
+
+
+def parse_foundation_contracts(
+    source: str | Path,
+) -> tuple[list[dict[str, Any]], list[CoherenceFinding]]:
+    """Parse machine-readable CHARTER foundation contracts.
+
+    The preferred form is ``CHARTER.IA foundation_contracts``. A sibling
+    ``## Foundation Contracts`` JSON block is also accepted so architects can
+    keep the ownership contract visually separate while using the same parser
+    module as the IA contract.
+    """
+    text = _read_charter_source(source)
+    if text is None:
+        return [], []
+
+    payload = _foundation_contracts_payload(text)
+    if payload is None:
+        return [], []
+    if isinstance(payload, dict) and payload.get("__invalid_json__"):
+        return [], [CoherenceFinding(
+            kind="foundation_contracts_contract_invalid",
+            reference="foundation_contracts",
+            detail="Foundation Contracts section does not contain valid JSON",
+        )]
+    if not isinstance(payload, list):
+        return [], [CoherenceFinding(
+            kind="foundation_contracts_contract_invalid",
+            reference="foundation_contracts",
+            detail="foundation_contracts must be a list",
+        )]
+
+    ia = parse_information_architecture_contract(text) or {}
+    registry_paths = _declared_shared_registry_paths(ia)
+    contracts: list[dict[str, Any]] = []
+    findings: list[CoherenceFinding] = []
+    for index, item in enumerate(payload):
+        reference = f"foundation_contracts[{index}]"
+        if not isinstance(item, dict):
+            findings.append(CoherenceFinding(
+                kind="foundation_contracts_contract_invalid",
+                reference=reference,
+                detail="foundation contract entries must be objects",
+            ))
+            continue
+        path = str(item.get("path") or "").strip().lstrip("./")
+        owner_task_id = str(item.get("owner_task_id") or "").strip()
+        check = str(item.get("check") or "").strip()
+        if not path:
+            findings.append(CoherenceFinding(
+                kind="foundation_contracts_contract_invalid",
+                reference=f"{reference}.path",
+                detail="foundation contract entries must include path",
+            ))
+            continue
+        if not owner_task_id:
+            findings.append(CoherenceFinding(
+                kind="foundation_contracts_contract_invalid",
+                reference=f"{reference}.owner_task_id",
+                detail="foundation contract entries must include owner_task_id",
+            ))
+            continue
+        if check not in {"literal", "semantic"}:
+            findings.append(CoherenceFinding(
+                kind="foundation_contracts_contract_invalid",
+                reference=f"{reference}.check",
+                detail="foundation contract check must be literal or semantic",
+            ))
+            continue
+        if check == "semantic" and path in registry_paths:
+            findings.append(CoherenceFinding(
+                kind="foundation_contracts_registry_semantic_rejected",
+                reference=f"{reference}.check",
+                detail=(
+                    f"{path} is declared in registration_isolation.shared_registry_files; "
+                    "route registries must use check='literal'"
+                ),
+            ))
+            continue
+        contract: dict[str, Any] = {
+            "path": path,
+            "owner_task_id": owner_task_id,
+            "check": check,
+        }
+        required_exports = item.get("required_exports")
+        if isinstance(required_exports, list):
+            contract["required_exports"] = [
+                str(value).strip() for value in required_exports if str(value).strip()
+            ]
+        behavior_probes = item.get("behavior_probes")
+        if isinstance(behavior_probes, list):
+            contract["behavior_probes"] = [
+                str(value).strip() for value in behavior_probes if str(value).strip()
+            ]
+        contracts.append(contract)
+    return contracts, findings
+
+
+def persist_foundation_contracts_from_charter(
+    project_dir: Path,
+    *,
+    parent_task_id: str,
+) -> tuple[list[dict[str, Any]], list[CoherenceFinding]]:
+    """Parse CHARTER foundation contracts and store them on the parent task."""
+    contracts, findings = parse_foundation_contracts(project_dir / "CHARTER.md")
+    if contracts and not findings:
+        from otto.queue.task_graph import update_task_metadata
+
+        update_task_metadata(project_dir, parent_task_id, foundation_contracts=contracts)
+    return contracts, findings
 
 
 def _registration_isolation_payload(ia: dict[str, Any]) -> dict[str, Any] | None:
@@ -1055,6 +1209,8 @@ def validate_information_architecture_contract(
             ))
 
     findings.extend(_validate_registration_isolation_contract(ia, require=False))
+    _contracts, foundation_findings = parse_foundation_contracts(charter_text)
+    findings.extend(foundation_findings)
     return findings
 
 

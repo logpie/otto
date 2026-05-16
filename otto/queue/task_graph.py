@@ -61,6 +61,8 @@ Verdict = Literal[
 ]
 
 Decomposition = Literal["inline", "emit", "pending", "unknown"]
+TaskRole = Literal["foundation", "feature", "contract_amendment", "integration"]
+TASK_ROLES: set[str] = {"foundation", "feature", "contract_amendment", "integration"}
 
 
 def task_graph_path(project_dir: Path) -> Path:
@@ -142,6 +144,8 @@ def record_task(
     depends_on: list[str] | None = None,
     owned_paths: list[str] | None = None,
     action_ids: list[str] | None = None,
+    task_role: TaskRole = "feature",
+    foundation_contracts: list[dict[str, Any]] | None = None,
     decomposition: Decomposition = "unknown",
 ) -> None:
     """Atomically register a task in the graph (or update if it exists).
@@ -152,8 +156,14 @@ def record_task(
     the parent) and again by the child's own ``run_lead`` (which does not).
     """
     with _locked_graph(project_dir) as (_path, graph):
-        existing = graph["tasks"].get(task_id, {})
-        entry: dict[str, Any] = {
+        existing_raw = graph["tasks"].get(task_id, {})
+        existing: dict[str, Any] = existing_raw if isinstance(existing_raw, dict) else {}
+        entry: dict[str, Any] = dict(existing)
+        role = task_role if task_role in TASK_ROLES else "feature"
+        existing_role = entry.get("task_role")
+        if isinstance(existing_role, str) and existing_role in TASK_ROLES and task_role == "feature":
+            role = existing_role
+        entry.update({
             "parent_task_id": parent_task_id if parent_task_id is not None
                               else existing.get("parent_task_id"),
             "intent": intent or existing.get("intent", ""),
@@ -177,7 +187,13 @@ def record_task(
                 if action_ids is not None
                 else existing.get("action_ids", []) or []
             ),
-        }
+            "task_role": role,
+            "foundation_contracts": list(
+                foundation_contracts
+                if foundation_contracts is not None
+                else existing.get("foundation_contracts", []) or []
+            ),
+        })
         graph["tasks"][task_id] = entry
         if parent_task_id and parent_task_id in graph["tasks"]:
             parent = graph["tasks"][parent_task_id]
@@ -214,6 +230,10 @@ def set_verdict(
                 "cost_usd": cost_usd or 0.0,
                 "child_task_ids": [],
                 "depends_on": [],
+                "owned_paths": [],
+                "action_ids": [],
+                "task_role": "feature",
+                "foundation_contracts": [],
             }
             return
         graph["tasks"][task_id]["verdict"] = verdict
@@ -244,6 +264,10 @@ def update_task_metadata(
                 "cost_usd": 0.0,
                 "child_task_ids": [],
                 "depends_on": [],
+                "owned_paths": [],
+                "action_ids": [],
+                "task_role": "feature",
+                "foundation_contracts": [],
             }
         graph["tasks"][task_id].update(clean)
 

@@ -60,6 +60,8 @@ When you decompose:
 - Emit semantic user-visible goals with `mcp__otto__submit_subtask`.
 - Use dependencies only when one child literally needs another child's output.
 - Make ownership clear in the child intent when files or subsystems matter.
+- Emit the architect/scaffold child with `task_role="foundation"`; ordinary
+  build leaves use `task_role="feature"`.
 - The architect, if emitted, must build inline and must not decompose.
 
 Architect task guidance:
@@ -77,6 +79,10 @@ Architect task guidance:
   must be scaffold-owned loader/composer files with `leaf_edit: false`; leaf
   tasks add files matching the extension globs instead of editing those
   registries.
+- Declare shared foundation files in a machine-readable `## Foundation Contracts`
+  JSON block or `foundation_contracts` IA field. Each entry has `path`,
+  `owner_task_id`, `check` (`literal` or `semantic`), and optional
+  `required_exports`/`behavior_probes`; route registries must use `literal`.
 - Keep prose short. Do not restate JSON in paragraphs.
 - Create `decisions.md`.
 - Verify the scaffold with the smallest build/typecheck command that proves it
