@@ -21,7 +21,6 @@ real CHARTER — which has 4 fenced blocks, the contract NOT first — to parse.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from otto.v5_capability_inventory import (
