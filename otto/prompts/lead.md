@@ -82,6 +82,15 @@ Architect task guidance:
   must be scaffold-owned loader/composer files with `leaf_edit: false`; leaf
   tasks add files matching the extension globs instead of editing those
   registries.
+- Shared TEST/BUILD infrastructure is a registration registry too. Any file
+  every feature would otherwise each create or edit — test config/bootstrap
+  (`conftest.py`, `tests/setup.*`, `jest.config.*`, shared DB/session
+  fixtures, shared mocks/factories), shared lint/type config — MUST be
+  created by the scaffold and listed in `shared_registry_files` with
+  `leaf_edit: false`. Feature leaves add only their own `test_<feature>.*`
+  modules under the extension globs and import the shared harness; they must
+  never create or edit the shared test bootstrap. Divergent independent
+  creates of these files are the #1 cause of integration merge conflicts.
 - Declare shared foundation files in a machine-readable `## Foundation Contracts`
   JSON block or `foundation_contracts` IA field. Each entry has `path`,
   `owner_task_id`, `check` (`literal` or `semantic`), and optional
