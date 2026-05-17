@@ -29,7 +29,7 @@ from otto.v5_clean_verify import (
 
 @dataclass(frozen=True)
 class RepairBudget:
-    wall_clock_s: float = 400.0
+    wall_clock_s: float = 1200.0
     cost_usd: float | None = None
     agent_turns: int = 1
     oracle_invocations: int = 4
@@ -55,7 +55,7 @@ class RepairBudget:
         if not isinstance(raw, dict):
             return cls()
         return cls(
-            wall_clock_s=float(raw.get("wall_clock_s") or 400.0),
+            wall_clock_s=float(raw.get("wall_clock_s") or 1200.0),
             cost_usd=(
                 float(raw["cost_usd"])
                 if isinstance(raw.get("cost_usd"), (int, float))

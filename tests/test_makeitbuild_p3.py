@@ -86,11 +86,26 @@ def test_foreign_busy_port_fails_fast_with_process_details(tmp_path: Path) -> No
     assert issue["processes"]["5173"][0]["cmdline"] == "python3 -m http.server 5173"
 
 
-def test_preflight_repair_budget_defaults_to_400_seconds() -> None:
-    assert RepairBudget().wall_clock_s == 400.0
+def test_preflight_repair_budget_defaults_to_1200_seconds() -> None:
+    """P3 originally tightened the repair wall-clock 1800→400s to stop runaway
+    env-repair. Live runs #6 and #7 proved 400s is too aggressive for real
+    feature-level verify/repair on a production product: 4+ substantively-
+    building features were merge_blocked solely because the repair agent hit
+    "Timed out after 399s" mid-work (NOT a real failure). 400s was the brittle
+    over-tightening; 1200s lets a genuine repair complete while
+    run_budget_seconds (the true ceiling, e.g. 3000s) still bounds the run.
+    Config (`{prefix}_wall_clock_s` / `repair_wall_clock_s`) still overrides."""
+    assert RepairBudget().wall_clock_s == 1200.0
     assert _repair_budget_from_config(
         {},
         prefix="merge",
         default_agent_turns=1,
         default_oracle_invocations=1,
-    ).wall_clock_s == 400.0
+    ).wall_clock_s == 1200.0
+    # Config override still wins (the value is not hard-coded).
+    assert _repair_budget_from_config(
+        {"merge_wall_clock_s": 600},
+        prefix="merge",
+        default_agent_turns=1,
+        default_oracle_invocations=1,
+    ).wall_clock_s == 600.0

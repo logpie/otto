@@ -2536,7 +2536,7 @@ def _repair_budget_from_config(
     prefix: str,
     default_agent_turns: int,
     default_oracle_invocations: int,
-    default_wall_clock_s: float = 400.0,
+    default_wall_clock_s: float = 1200.0,
 ) -> RepairBudget:
     def number(key: str, default: float | None) -> float | None:
         raw = config.get(f"{prefix}_{key}", config.get(f"repair_{key}", default))
