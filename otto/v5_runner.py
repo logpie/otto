@@ -9062,6 +9062,21 @@ def _build_decomp_runtime_context(
         entry for entry in runnable
         if all(dep in dependency_satisfied for dep in (entry.get("depends_on") or []))
     ]
+    # The architect/scaffold child authors feature_owned_paths keyed by the
+    # real sibling feature task_ids. It runs in an isolated worktree with NO
+    # otto_logs/ (otto-owned, never propagated to agent surfaces), so it
+    # cannot read task_graph.json. Supply the exact ids+titles here — the
+    # sanctioned channel — so it never has to invent placeholder keys.
+    feature_partition_targets = [
+        {
+            "task_id": str(tid),
+            "title": str(task.get("title") or task.get("intent") or "").strip()[:120],
+        }
+        for tid, task in tasks.items()
+        if isinstance(task, dict)
+        and task.get("task_role") == "feature"
+        and str(tid) != "root"
+    ]
     elapsed = int(time.monotonic() - run_started_at) if run_started_at else 0
     budget = int(config.get("run_budget_seconds") or 3600)
     provider = (
@@ -9086,6 +9101,7 @@ def _build_decomp_runtime_context(
             "free_slots": max(1, int(max_parallel or 1)),
         },
         "spec_profile": _spec_profile(spec_payload),
+        "feature_partition_targets": feature_partition_targets,
         "runtime_policy": {
             "tier": str(config.get("v5_tier") or "auto"),
             "root_only_decomposition": _root_only_decomposition_enabled(config),

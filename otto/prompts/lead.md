@@ -97,9 +97,13 @@ Architect task guidance:
   `required_exports`/`behavior_probes`; route registries must use `literal`.
 - After building the scaffold, author the authoritative ownership partition in
   CHARTER's Information Architecture Contract as `feature_owned_paths`: an
-  object keyed by each sibling feature child task_id from
-  `otto_logs/cross-sessions/task_graph.json`, with exact NEW file paths/globs
-  that feature may add. Feature paths must live under
+  object keyed by each sibling feature child task_id. Use the EXACT task_ids
+  listed under `feature_partition_targets` in the runtime context above (each
+  entry has the real `task_id` and its `title`/scope). You will NOT have an
+  `otto_logs/` directory — do not try to read task_graph.json, and never
+  invent placeholder keys like `PLACEHOLDER_*`; an unknown task_id fails the
+  contract gate. Provide an entry for every listed target, with exact NEW
+  file paths/globs that feature may add. Feature paths must live under
   `registration_isolation.leaf_extension_globs`; never assign a
   foundation_contract or shared registry file to a feature.
 - Keep prose short. Do not restate JSON in paragraphs.
