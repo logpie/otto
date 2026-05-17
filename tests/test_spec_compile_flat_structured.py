@@ -11,6 +11,7 @@ import pytest
 from otto.spec_compile_flat import (
     FlatSpec,
     INTENT_CLAIMS_MAX,
+    PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS,
     SCHEMA_VERSION,
     SpecContractRepairExhaustedError,
     StructuredSpecValidationError,
@@ -470,7 +471,12 @@ async def test_compile_flat_spec_exhausts_weak_itracker_pass_model_without_fallb
             max_retries=0,
         )
 
-    assert len(prompts) == 3
+    # 1 initial compile + PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS repair attempts
+    # (max_retries=0 + 1 + 5). The anti-false-pass INVARIANT this test guards —
+    # a weak pass_model must exhaust and raise, never fall back, never write
+    # spec.json — is unchanged below; only the bounded attempt count grew when
+    # the brittle 2-cap was raised to 5 (05b204df9, run #9 evidence).
+    assert len(prompts) == 1 + PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS
     assert excinfo.value.code == "verification_contract_invalid"
     assert "comment_mention_inbox" in excinfo.value.path
     assert "state-changing action lacks a non-tautological post-action observable" in str(excinfo.value)
