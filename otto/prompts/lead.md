@@ -98,6 +98,22 @@ Architect task guidance:
   edit the shared test bootstrap (the foundation_contract owner makes that an
   isolation violation). Divergent independent creates of these files are the
   #1 cause of integration merge conflicts.
+- Shared cross-feature CLIENT RUNTIME STATE is the same hazard as route
+  registration. If multiple features need a shared store/slice, context,
+  provider, or shared hook (e.g. `frontend/src/store/uiStore.ts`,
+  `hooks/useWebSocket.ts`, a notifications/toast/realtime context), the
+  scaffold MUST set up a COMPOSITION/extension point: the scaffold-owned
+  store/provider auto-composes feature-local slices, and each feature adds
+  ONLY its own `frontend/src/features/<feature>/store.ts` (or `*.slice.ts` /
+  hook) under its leaf-extension glob — features must NEVER edit the central
+  scaffold-owned store/hook (the foundation_contract owner makes that a
+  `foundation_contract_write_blocked` isolation violation, the way run #14's
+  realtime feature was blocked writing the shared uiStore/useWebSocket). If a
+  feature's scope genuinely needs shared client state or a shared transport
+  (websocket/event bus), the scaffold MUST provide that extension point at
+  build time (a slice registry, a context with feature-pluggable reducers, a
+  subscribe API) and declare it in `registration_isolation.leaf_extension_globs`
+  — do not leave a feature with no isolated way to contribute shared state.
 - Declare shared foundation files in a machine-readable `## Foundation Contracts`
   JSON block or `foundation_contracts` IA field. Each entry has `path`,
   `owner_task_id`, `check` (`literal` or `semantic`), and optional
