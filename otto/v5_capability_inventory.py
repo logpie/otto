@@ -972,19 +972,8 @@ def parse_feature_owned_paths_from_charter(
     if payload is None:
         return {}, []
 
-    contracts, contract_findings = parse_foundation_contracts(text)
-    contract_paths = {
-        str(contract.get("path") or "").strip().lstrip("./")
-        for contract in contracts
-        if str(contract.get("path") or "").strip()
-    }
+    _contracts, contract_findings = parse_foundation_contracts(text)
     shared_registry_paths = _declared_shared_registry_paths(ia)
-    isolation = _registration_isolation_payload(ia) or {}
-    leaf_globs = [
-        str(item).strip().lstrip("./")
-        for item in (isolation.get("leaf_extension_globs") or [])
-        if str(item).strip()
-    ] if isinstance(isolation.get("leaf_extension_globs"), list) else []
 
     owned_by_task: dict[str, list[str]] = {}
     findings: list[CoherenceFinding] = list(contract_findings)
@@ -1011,14 +1000,15 @@ def parse_feature_owned_paths_from_charter(
                     reference=f"feature_owned_paths[{task_id}]",
                     detail=f"{path} is a shared registry file and cannot be feature-owned",
                 ))
-            if path not in contract_paths and not _path_matches_leaf_extension(path, leaf_globs):
-                findings.append(CoherenceFinding(
-                    kind="feature_ownership_contract_invalid",
-                    reference=f"feature_owned_paths[{task_id}]",
-                    detail=(
-                        f"{path} is outside registration_isolation.leaf_extension_globs"
-                    ),
-                ))
+            # NOTE: the architect derives feature_owned_paths from the scaffold
+            # it actually built; a real feature legitimately owns files outside
+            # the (also architect-authored, often narrower) leaf_extension_globs
+            # — e.g. components/ui, lib/, store/. The ONLY isolation invariants
+            # that matter here are: not a shared registry (checked above) and
+            # not a foundation_contract (enforced separately by
+            # `_foundation_isolation_feedback`). Do NOT hard-reject the
+            # architect's self-consistent partition on a redundant glob list;
+            # `_path_matches_leaf_extension` stays available for advisory use.
         owned_by_task[task_id] = clean_paths
     return owned_by_task, findings
 
