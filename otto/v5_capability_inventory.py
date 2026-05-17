@@ -671,6 +671,48 @@ def _extract_foundation_contracts_block(charter_text: str) -> str | None:
     return charter_text[body_start:body_end]
 
 
+_IA_CONTRACT_KEYS = (
+    "registration_isolation",
+    "foundation_contracts",
+    "feature_owned_paths",
+)
+
+
+def _first_json_object_with_keys(
+    text: str, keys: tuple[str, ...]
+) -> dict[str, Any] | None:
+    """First fenced ```json block that parses to a dict containing any of
+    `keys`.
+
+    The architect's CHARTER routinely interleaves invalid JSON *code examples*
+    (WebSocket event shapes, sample payloads, search-query examples) with the
+    real contract block. Blindly taking the first fenced block picks an
+    example, `json.loads` fails, the IA contract reads as absent, and the
+    architect contract gate spuriously fails attempt 1 — costing a full
+    ~14min architect re-dispatch every run (#6/#8/#10). Scan every fence and
+    pick the one that actually carries the contract keys instead. A parseable
+    dict without the keys is kept only as a last-resort fallback.
+    """
+    if not text:
+        return None
+    fallback: dict[str, Any] | None = None
+    for match in _FENCED_JSON.finditer(text):
+        body = match.group(1).strip()
+        if not body:
+            continue
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if any(k in payload for k in keys):
+            return payload
+        if fallback is None:
+            fallback = payload
+    return fallback
+
+
 def parse_information_architecture_contract(source: str | Path) -> dict[str, Any] | None:
     """Parse the CHARTER Information Architecture Contract JSON block.
 
@@ -684,17 +726,19 @@ def parse_information_architecture_contract(source: str | Path) -> dict[str, Any
             return None
     else:
         text = source
+    if not text:
+        return None
+    # Prefer the heading-anchored IA section, but scan its fences for the one
+    # carrying the contract keys (not blindly the first — an invalid code
+    # example often precedes it). If the heading is missing/mis-placed or the
+    # section held only example blocks, fall back to scanning the whole
+    # CHARTER for the block that actually has the IA contract keys.
     block = _extract_ia_block(text)
-    if block is None:
-        return None
-    fenced = _FENCED_JSON.search(block)
-    json_text = fenced.group(1).strip() if fenced else block.strip()
-    if not json_text:
-        return None
-    try:
-        payload = json.loads(json_text)
-    except json.JSONDecodeError:
-        return None
+    payload: dict[str, Any] | None = None
+    if block is not None:
+        payload = _first_json_object_with_keys(block, _IA_CONTRACT_KEYS)
+    if payload is None:
+        payload = _first_json_object_with_keys(text, _IA_CONTRACT_KEYS)
     return payload if isinstance(payload, dict) else None
 
 
