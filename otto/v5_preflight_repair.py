@@ -29,7 +29,7 @@ from otto.v5_clean_verify import (
 
 @dataclass(frozen=True)
 class RepairBudget:
-    wall_clock_s: float = 1800.0
+    wall_clock_s: float = 400.0
     cost_usd: float | None = None
     agent_turns: int = 1
     oracle_invocations: int = 4
@@ -55,7 +55,7 @@ class RepairBudget:
         if not isinstance(raw, dict):
             return cls()
         return cls(
-            wall_clock_s=float(raw.get("wall_clock_s") or 1800.0),
+            wall_clock_s=float(raw.get("wall_clock_s") or 400.0),
             cost_usd=(
                 float(raw["cost_usd"])
                 if isinstance(raw.get("cost_usd"), (int, float))
@@ -986,6 +986,14 @@ async def _maybe_await(value: Any) -> Any:
 
 
 def _repair_prompt(packet: RepairPacket) -> str:
+    custom_template = str(packet.repair_unit.get("prompt_template") or "").strip()
+    custom_text = ""
+    if custom_template:
+        prompt_path = Path(__file__).resolve().parent / "prompts" / custom_template
+        try:
+            custom_text = prompt_path.read_text(encoding="utf-8").strip() + "\n\n"
+        except OSError:
+            custom_text = ""
     allowed_paths = [str(path) for path in packet.repair_unit.get("allowed_paths") or []]
     if allowed_paths:
         scope_text = (
@@ -1000,6 +1008,8 @@ def _repair_prompt(packet: RepairPacket) -> str:
             "and graph/verdict invariants). "
         )
     return (
+        custom_text
+        +
         f"{scope_text}Preserve the product contract, P0-P4 "
         "merge invariants, and owned-path/scope rules. "
         "Diagnose from the complete evidence packet. Run the oracle as your "

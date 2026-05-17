@@ -59,9 +59,12 @@ overhead.
 When you decompose:
 - Emit semantic user-visible goals with `mcp__otto__submit_subtask`.
 - Use dependencies only when one child literally needs another child's output.
-- Make ownership clear in the child intent when files or subsystems matter.
+- Do NOT predict `owned_paths` for feature children during decomposition. Omit
+  feature `owned_paths`; the architect/scaffold child must derive the exact
+  partition from the scaffold it actually builds.
 - Emit the architect/scaffold child with `task_role="foundation"`; ordinary
-  build leaves use `task_role="feature"`.
+  build leaves use `task_role="feature"` and `depends_on=[architect_task_id]`
+  when a foundation child exists.
 - The architect, if emitted, must build inline and must not decompose.
 
 Architect task guidance:
@@ -83,6 +86,13 @@ Architect task guidance:
   JSON block or `foundation_contracts` IA field. Each entry has `path`,
   `owner_task_id`, `check` (`literal` or `semantic`), and optional
   `required_exports`/`behavior_probes`; route registries must use `literal`.
+- After building the scaffold, author the authoritative ownership partition in
+  CHARTER's Information Architecture Contract as `feature_owned_paths`: an
+  object keyed by each sibling feature child task_id from
+  `otto_logs/cross-sessions/task_graph.json`, with exact NEW file paths/globs
+  that feature may add. Feature paths must live under
+  `registration_isolation.leaf_extension_globs`; never assign a
+  foundation_contract or shared registry file to a feature.
 - Keep prose short. Do not restate JSON in paragraphs.
 - Create `decisions.md`.
 - Verify the scaffold with the smallest build/typecheck command that proves it

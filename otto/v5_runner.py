@@ -172,6 +172,49 @@ class V5RunResult:
     failure_reason: str = ""
 
 
+class _V5RunDeadlineExceeded(TimeoutError):
+    def __init__(self, *, phase: str, budget_s: int) -> None:
+        self.phase = phase
+        self.budget_s = budget_s
+        super().__init__(f"run_budget_seconds exceeded during {phase} ({budget_s}s)")
+
+
+def _run_budget_seconds(config: dict[str, Any]) -> int:
+    try:
+        return max(1, int(config.get("run_budget_seconds") or 3600))
+    except (TypeError, ValueError):
+        return 3600
+
+
+def _run_budget_remaining_s(
+    *,
+    config: dict[str, Any],
+    started_at: float,
+) -> float:
+    return max(0.0, float(_run_budget_seconds(config)) - (time.monotonic() - started_at))
+
+
+async def _await_with_run_deadline(
+    awaitable: Any,
+    *,
+    config: dict[str, Any],
+    started_at: float,
+    phase: str,
+    cap_s: float | None = None,
+) -> Any:
+    remaining = _run_budget_remaining_s(config=config, started_at=started_at)
+    if remaining <= 0:
+        raise _V5RunDeadlineExceeded(phase=phase, budget_s=_run_budget_seconds(config))
+    timeout = remaining if cap_s is None else min(remaining, max(0.001, float(cap_s)))
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except TimeoutError as exc:
+        raise _V5RunDeadlineExceeded(
+            phase=phase,
+            budget_s=_run_budget_seconds(config),
+        ) from exc
+
+
 def _new_session_id() -> str:
     return time.strftime("%Y-%m-%d-%H%M%S", time.gmtime()) + "-" + uuid.uuid4().hex[:6]
 
@@ -373,6 +416,13 @@ def _status_path(line: str) -> str:
 
 def _port_cleanup_payload(cleanup: Any, *, project_dir: Path) -> dict[str, Any]:
     still_bound = list(getattr(cleanup, "still_bound_ports", []) or [])
+    process_details = {
+        str(port): _process_details_for_pids(
+            list((getattr(cleanup, "pids_after", {}) or {}).get(port, []))
+            or list((getattr(cleanup, "pids_before", {}) or {}).get(port, []))
+        )
+        for port in still_bound
+    }
     payload: dict[str, Any] = {
         "check": "startup_port_cleanup",
         "phase": "pipeline_start",
@@ -389,6 +439,7 @@ def _port_cleanup_payload(cleanup: Any, *, project_dir: Path) -> dict[str, Any]:
             "ports_without_owned_process": list(
                 getattr(cleanup, "ports_without_owned_process", []) or []
             ),
+            "processes": process_details,
         },
         "error": None,
     }
@@ -401,9 +452,178 @@ def _port_cleanup_payload(cleanup: Any, *, project_dir: Path) -> dict[str, Any]:
                     "Declared ports still bound after startup cleanup: "
                     + ", ".join(str(port) for port in still_bound)
                 ),
+                "ports": still_bound,
+                "processes": process_details,
             }
         ]
     return payload
+
+
+def _process_details_for_pids(pids: list[int]) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    clean_pids: set[int] = set()
+    for raw_pid in pids:
+        try:
+            pid_int = int(raw_pid)
+        except (TypeError, ValueError):
+            continue
+        if pid_int > 0:
+            clean_pids.add(pid_int)
+    for pid in sorted(clean_pids):
+        detail: dict[str, Any] = {"pid": pid, "binary": "", "cmdline": ""}
+        try:
+            import psutil
+
+            proc = psutil.Process(pid)
+            detail["binary"] = proc.exe() or proc.name() or ""
+            detail["cmdline"] = " ".join(proc.cmdline()) or proc.name() or ""
+        except Exception:  # noqa: BLE001
+            try:
+                proc = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "comm=", "-o", "command="],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+                line = (proc.stdout or "").strip().splitlines()
+                if proc.returncode == 0 and line:
+                    parts = line[0].strip().split(None, 1)
+                    detail["binary"] = parts[0] if parts else ""
+                    detail["cmdline"] = parts[1] if len(parts) > 1 else line[0].strip()
+            except (OSError, subprocess.SubprocessError):
+                pass
+        details.append(detail)
+    return details
+
+
+def _mechanical_fail_fast_payload(
+    *,
+    payload: dict[str, Any],
+    kind: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    out = dict(payload)
+    issue = {
+        "kind": kind,
+        "severity": "block",
+        "message": message,
+        **dict(details or {}),
+    }
+    out["passed"] = False
+    out["issues"] = [issue]
+    out["repair"] = {
+        "terminal_state": "escalated",
+        "repair_phase": "mechanical_env_classifier",
+        "summary": message,
+        "mechanical_blocker": issue,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    return out
+
+
+def _handle_mechanical_preflight_blocker(
+    *,
+    payload: dict[str, Any],
+    project_dir: Path,
+    on_event: Any = None,
+) -> tuple[str, dict[str, Any]]:
+    """Classify preflight blockers before spending an LLM repair turn."""
+    check = str(payload.get("check") or "")
+    issues = [issue for issue in (payload.get("issues") or []) if isinstance(issue, dict)]
+    if check == "git_checkout_clean":
+        status_lines: list[str] = []
+        for issue in issues:
+            for path in issue.get("paths") or []:
+                status_lines.append(f" M {path}")
+            message = str(issue.get("message") or "")
+            status_lines.extend(_status_lines_from_detail(message))
+        paths = _porcelain_paths(status_lines)
+        if _dirty_paths_are_runner_committable(paths):
+            ok, detail = _commit_runner_output_paths(
+                worktree_path=project_dir,
+                paths=paths,
+                message="chore(otto): commit runner output before checkout",
+            )
+            _emit(on_event, {
+                "event": "mechanical_blocker_committed",
+                "kind": "dirty_from_otto_output",
+                "paths": paths,
+                "detail": detail,
+            })
+            if ok:
+                return "retry", payload
+            return "terminal", _mechanical_fail_fast_payload(
+                payload=payload,
+                kind="dirty_from_otto_output_commit_failed",
+                message=detail,
+                details={"paths": paths},
+            )
+        return "repair", payload
+
+    if any(str(issue.get("kind") or "") == "clean_deploy_port_busy" for issue in issues):
+        cleanup = payload.get("cleanup") if isinstance(payload.get("cleanup"), dict) else {}
+        busy_ports = list(cleanup.get("still_bound_ports") or [])
+        foreign_ports = list(cleanup.get("ports_without_owned_process") or busy_ports)
+        processes = cleanup.get("processes") or {}
+        if foreign_ports:
+            message = (
+                "Declared port(s) are still busy after killing Otto-owned processes: "
+                + ", ".join(str(port) for port in foreign_ports)
+            )
+            return "terminal", _mechanical_fail_fast_payload(
+                payload=payload,
+                kind="clean_deploy_port_busy_foreign_process",
+                message=message,
+                details={"ports": foreign_ports, "processes": processes},
+            )
+
+    for issue in issues:
+        kind = str(issue.get("kind") or "")
+        message = str(issue.get("message") or "")
+        lowered = f"{kind} {message}".lower()
+        if (
+            "missing_toolchain" in lowered
+            or "missing toolchain" in lowered
+            or "command not found" in lowered
+            or "no such file or directory" in lowered and "tool" in lowered
+        ):
+            return "terminal", _mechanical_fail_fast_payload(
+                payload=payload,
+                kind="missing_toolchain_fail_fast",
+                message=message or "required toolchain is missing",
+                details={"issue_kind": kind},
+            )
+    return "repair", payload
+
+
+def _handle_mechanical_merge_blocker(
+    *,
+    detail: str,
+    project_dir: Path,
+    child_task_id: str,
+    on_event: Any = None,
+) -> tuple[str, str]:
+    status_lines = _status_lines_from_detail(detail)
+    paths = _porcelain_paths(status_lines)
+    if not _dirty_paths_are_runner_committable(paths):
+        return "repair", detail
+    ok, commit_detail = _commit_runner_output_paths(
+        worktree_path=project_dir,
+        paths=paths,
+        message="chore(otto): commit runner output before upward merge",
+    )
+    _emit(on_event, {
+        "event": "mechanical_blocker_committed",
+        "kind": "dirty_from_otto_output",
+        "task_id": child_task_id,
+        "paths": paths,
+        "detail": commit_detail,
+    })
+    if ok:
+        return "retry", commit_detail
+    return "terminal", commit_detail
 
 
 async def _run_startup_port_cleanup_with_repair(
@@ -432,6 +652,19 @@ async def _run_startup_port_cleanup_with_repair(
     first = run_once()
     if not _integration_smoke_blocks(first):
         return first
+
+    action, classified = _handle_mechanical_preflight_blocker(
+        payload=first,
+        project_dir=project_dir,
+        on_event=on_event,
+    )
+    if action == "terminal":
+        return classified
+    if action == "retry":
+        second = run_once()
+        if not _integration_smoke_blocks(second):
+            return second
+        first = second
 
     return await _run_preflight_payload_repair_session(
         initial_payload=first,
@@ -503,6 +736,134 @@ def _git_diff_name_only(worktree: Path) -> list[str]:
         if rel:
             paths.append(rel)
     return sorted(dict.fromkeys(paths))
+
+
+_RUNNER_COMMITTABLE_OUTPUT_PATHS = frozenset({"CHARTER.md"})
+
+
+def _porcelain_paths(status_lines: list[str]) -> list[str]:
+    paths: list[str] = []
+    for line in status_lines:
+        path = _status_path(str(line))
+        if path:
+            paths.append(path)
+    return sorted(dict.fromkeys(paths))
+
+
+def _status_lines_from_detail(detail: str) -> list[str]:
+    lines: list[str] = []
+    capture = False
+    for raw in (detail or "").splitlines():
+        stripped = raw.strip()
+        if stripped == "dirty_status:":
+            capture = True
+            continue
+        if not capture:
+            continue
+        if not stripped:
+            continue
+        # MergeWorktreeDirtyError indents preview rows with two spaces.
+        line = raw[2:] if raw.startswith("  ") else stripped
+        if len(line) >= 3:
+            lines.append(line)
+    return lines
+
+
+def _dirty_paths_are_runner_committable(paths: list[str]) -> bool:
+    if not paths:
+        return False
+    try:
+        from otto.setup_gitignore import is_otto_owned_path
+    except Exception:  # noqa: BLE001
+        def is_otto_owned_path(_path: str) -> bool:
+            return False
+
+    return all(
+        path in _RUNNER_COMMITTABLE_OUTPUT_PATHS or is_otto_owned_path(path)
+        for path in paths
+    )
+
+
+def _commit_runner_output_paths(
+    *,
+    worktree_path: Path,
+    paths: list[str],
+    message: str,
+) -> tuple[bool, str]:
+    """Commit only runner-owned output paths, preserving unrelated dirt."""
+    clean_paths = [
+        path
+        for path in sorted(dict.fromkeys(paths))
+        if path in _RUNNER_COMMITTABLE_OUTPUT_PATHS
+    ]
+    if not clean_paths:
+        return True, "no-op (only ignored Otto runtime dirt)"
+    try:
+        reset = subprocess.run(
+            ["git", "reset", "-q"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if reset.returncode != 0:
+            return False, f"git reset failed: {(reset.stderr or '').strip()}"
+        add = subprocess.run(
+            ["git", "add", "--", *clean_paths],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if add.returncode != 0:
+            return False, f"git add runner outputs failed: {(add.stderr or '').strip()}"
+        diff = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=str(worktree_path),
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        if diff.returncode == 0:
+            return True, "no-op (nothing to commit)"
+        commit = subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=str(worktree_path),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if commit.returncode != 0:
+            return False, f"git commit runner outputs failed: {(commit.stderr or '').strip()}"
+        remaining = _git_status_short(worktree_path)
+        if remaining:
+            remaining_lines = [line for line in remaining.splitlines() if line.strip()]
+            remaining_paths = _porcelain_paths(remaining_lines)
+            if _dirty_paths_are_runner_committable(remaining_paths):
+                return False, (
+                    "runner output commit left committable dirty paths: "
+                    + ", ".join(remaining_paths[:10])
+                )
+        return True, f"committed runner outputs: {', '.join(clean_paths)}"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"runner output commit crashed: {type(exc).__name__}: {exc}"
+
+
+def _commit_charter_injection_if_dirty(project_dir: Path) -> tuple[bool, str]:
+    status = _git_status_short(project_dir)
+    lines = [line for line in status.splitlines() if line.strip()]
+    charter_lines = [line for line in lines if _status_path(line) == "CHARTER.md"]
+    if not charter_lines:
+        return True, "no-op (CHARTER.md clean)"
+    paths = _porcelain_paths(charter_lines)
+    return _commit_runner_output_paths(
+        worktree_path=project_dir,
+        paths=paths,
+        message="chore(otto): record detected infrastructure in CHARTER",
+    )
 
 
 def _foundation_contract_write_feedback(
@@ -2146,7 +2507,7 @@ def _repair_budget_from_config(
     prefix: str,
     default_agent_turns: int,
     default_oracle_invocations: int,
-    default_wall_clock_s: float = 1800.0,
+    default_wall_clock_s: float = 400.0,
 ) -> RepairBudget:
     def number(key: str, default: float | None) -> float | None:
         raw = config.get(f"{prefix}_{key}", config.get(f"repair_{key}", default))
@@ -2522,6 +2883,19 @@ async def _run_preflight_payload_repair_session(
     scope_policy: str = "unrestricted",
     journey_scope: ExecutionScope = "subtree_integration",
 ) -> dict[str, Any]:
+    action, classified = _handle_mechanical_preflight_blocker(
+        payload=initial_payload,
+        project_dir=project_dir,
+        on_event=on_event,
+    )
+    if action == "terminal":
+        return classified
+    if action == "retry":
+        retried = run_once()
+        if not _integration_smoke_blocks(retried):
+            return retried
+        initial_payload = retried
+
     repair_slug = safe_slug(
         f"{task_id}-{repair_phase}-{initial_payload.get('phase') or initial_payload.get('check') or 'repair'}",
         max_len=64,
@@ -2698,6 +3072,18 @@ async def _checkout_v5_branch_clean_with_repair(
     first = run_once()
     if not _integration_smoke_blocks(first):
         return first
+    action, classified = _handle_mechanical_preflight_blocker(
+        payload=first,
+        project_dir=project_dir,
+        on_event=on_event,
+    )
+    if action == "terminal":
+        return classified
+    if action == "retry":
+        second = run_once()
+        if not _integration_smoke_blocks(second):
+            return second
+        first = second
     return await _run_preflight_payload_repair_session(
         initial_payload=first,
         run_once=run_once,
@@ -3605,11 +3991,21 @@ async def run_v5_pipeline(
         # ---- Phase B: Compile flat spec ----
         _emit(on_event, {"event": "compile_start"})
         try:
-            spec = await compile_flat_spec(
-                project_dir=project_dir,
-                session_dir=root_session_dir,
-                intent=intent,
+            spec = await _await_with_run_deadline(
+                compile_flat_spec(
+                    project_dir=project_dir,
+                    session_dir=root_session_dir,
+                    intent=intent,
+                    config=config,
+                ),
                 config=config,
+                started_at=started,
+                phase="spec_compile",
+                cap_s=float(
+                    config.get("spec_timeout")
+                    or config.get("spec_compile_timeout_s")
+                    or 240
+                ),
             )
             result.spec = spec
             _emit(on_event, {
@@ -3622,6 +4018,8 @@ async def run_v5_pipeline(
             result.verdict = "merge_blocked"
             result.failure_reason = f"spec_contract_repair_exhausted: {exc}"
             return result
+        except _V5RunDeadlineExceeded:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("flat spec compile failed")
             result.verdict = "catastrophic"
@@ -3638,21 +4036,27 @@ async def run_v5_pipeline(
 
         # ---- Phase C: Run root Lead ----
         _emit(on_event, {"event": "lead_start", "task_id": ROOT_TASK_ID})
-        root_result = await run_lead(
-            task_id=ROOT_TASK_ID,
-            intent=intent,
-            project_dir=project_dir,
-            session_dir=root_session_dir,
-            integration_branch=None,
-            config=config,
-            kind="plan_or_inline",
-            decomp_runtime_context=_build_decomp_runtime_context(
+        root_result = await _await_with_run_deadline(
+            run_lead(
+                task_id=ROOT_TASK_ID,
+                intent=intent,
                 project_dir=project_dir,
+                session_dir=root_session_dir,
+                integration_branch=None,
                 config=config,
-                max_parallel=max_parallel,
-                run_started_at=started,
-                spec=spec,
+                kind="plan_or_inline",
+                decomp_runtime_context=_build_decomp_runtime_context(
+                    project_dir=project_dir,
+                    config=config,
+                    max_parallel=max_parallel,
+                    run_started_at=started,
+                    spec=spec,
+                ),
             ),
+            config=config,
+            started_at=started,
+            phase="root_decomposition",
+            cap_s=float(config.get("decomposition_timeout_s") or 240),
         )
         result.root_lead_result = root_result
         _emit(on_event, {
@@ -3695,16 +4099,21 @@ async def run_v5_pipeline(
 
         # ---- Phase D: Process emitted children, if any ----
         if root_result.decomposition == "emit" and root_result.emitted_subtask_ids:
-            await _process_children(
-                project_dir=project_dir,
-                parent_task_id=ROOT_TASK_ID,
+            await _await_with_run_deadline(
+                _process_children(
+                    project_dir=project_dir,
+                    parent_task_id=ROOT_TASK_ID,
+                    config=config,
+                    max_parallel=max_parallel,
+                    tree_budget_usd=tree_budget_usd,
+                    child_results=result.child_results,
+                    integration_results=result.integration_results,
+                    on_event=on_event,
+                    run_started_at=started,
+                ),
                 config=config,
-                max_parallel=max_parallel,
-                tree_budget_usd=tree_budget_usd,
-                child_results=result.child_results,
-                integration_results=result.integration_results,
-                on_event=on_event,
-                run_started_at=started,
+                started_at=started,
+                phase="children_and_subtree_integration",
             )
             # ---- Phase E: Run root integration ----
             child_summaries = _build_child_summaries(
@@ -3768,18 +4177,23 @@ async def run_v5_pipeline(
                     integration_branch=root_branch,
                     integration_worktree=project_dir,
                 )
-                integration_result = await run_lead(
-                    task_id=ROOT_TASK_ID,
-                    intent=intent,
-                    project_dir=project_dir,
-                    session_dir=integration_session_dir,
-                    integration_branch=None,  # root integration ultimately merges to main
+                integration_result = await _await_with_run_deadline(
+                    run_lead(
+                        task_id=ROOT_TASK_ID,
+                        intent=intent,
+                        project_dir=project_dir,
+                        session_dir=integration_session_dir,
+                        integration_branch=None,  # root integration ultimately merges to main
+                        config=config,
+                        kind="integration",
+                        child_summaries=child_summaries,
+                        preflight_result=preflight_result,
+                        integration_packet_path=str(integration_packet_path),
+                        execution_scope="root_integration",
+                    ),
                     config=config,
-                    kind="integration",
-                    child_summaries=child_summaries,
-                    preflight_result=preflight_result,
-                    integration_packet_path=str(integration_packet_path),
-                    execution_scope="root_integration",
+                    started_at=started,
+                    phase="root_integration",
                 )
                 _commit_integration_agent_changes(
                     project_dir=project_dir,
@@ -3869,6 +4283,16 @@ async def run_v5_pipeline(
         result.verdict = aggregate_verdict(project_dir, ROOT_TASK_ID)
         result.total_cost_usd = tree_total_cost(project_dir, ROOT_TASK_ID)
 
+    except _V5RunDeadlineExceeded as exc:
+        logger.warning("v5 pipeline hit hard run deadline: %s", exc)
+        result.verdict = "merge_blocked"
+        result.failure_reason = str(exc)
+        _emit(on_event, {
+            "event": "run_deadline_exceeded",
+            "phase": exc.phase,
+            "run_budget_seconds": exc.budget_s,
+            "elapsed_s": round(time.monotonic() - started, 3),
+        })
     except Exception as exc:  # noqa: BLE001 — top-level safety net
         logger.exception("v5 pipeline crashed")
         result.verdict = "catastrophic"
@@ -3952,7 +4376,168 @@ def _architect_contract_feedback_reason(feedback: dict[str, Any]) -> str:
     )
 
 
-def _reenter_or_block_architect_contract(
+def _unambiguous_foundation_contract_overlap_findings(
+    feedback: dict[str, Any],
+) -> list[dict[str, Any]]:
+    findings = [
+        finding
+        for finding in (feedback.get("findings") or [])
+        if isinstance(finding, dict)
+    ]
+    return [
+        finding
+        for finding in findings
+        if str(finding.get("kind") or "") == "feature_overlaps_foundation_contract"
+    ]
+
+
+def _feature_overlap_findings(feedback: dict[str, Any]) -> list[dict[str, Any]]:
+    findings = [
+        finding
+        for finding in (feedback.get("findings") or [])
+        if isinstance(finding, dict)
+    ]
+    return [
+        finding
+        for finding in findings
+        if str(finding.get("kind") or "") == "feature_owned_paths_overlap"
+    ]
+
+
+def _remove_feature_owned_foundation_contract_paths(
+    *,
+    project_dir: Path,
+    feedback: dict[str, Any],
+) -> dict[str, Any] | None:
+    removals: list[dict[str, Any]] = []
+    by_task: dict[str, set[str]] = {}
+    for finding in _unambiguous_foundation_contract_overlap_findings(feedback):
+        task_id = str(finding.get("task_id") or "").strip()
+        contract_path = _normalize_contract_path(str(finding.get("contract_path") or ""))
+        if not task_id or not contract_path:
+            continue
+        for owned in finding.get("owned_paths") or []:
+            owned_path = _normalize_contract_path(str(owned))
+            if owned_path and _path_overlaps(owned_path, contract_path):
+                by_task.setdefault(task_id, set()).add(owned_path)
+    if not by_task:
+        return None
+
+    for task_id, remove_paths in sorted(by_task.items()):
+        task = get_task(project_dir, task_id) or {}
+        before = _task_owned_paths(task)
+        after = [path for path in before if path not in remove_paths]
+        if after == before:
+            continue
+        update_task_metadata(project_dir, task_id, owned_paths=after)
+        removals.append({
+            "task_id": task_id,
+            "removed_paths": sorted(remove_paths),
+            "remaining_owned_paths": after,
+        })
+    if not removals:
+        return None
+    return {
+        "kind": "foundation_contract_feature_rescoped",
+        "message": "removed foundation contract paths from feature owned_paths",
+        "removals": removals,
+        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+async def _run_plan_amendment_repair_packet(
+    *,
+    project_dir: Path,
+    architect_tid: str,
+    feedback: dict[str, Any],
+    config: dict[str, Any],
+    on_event: Any = None,
+) -> Any:
+    repair_slug = safe_slug(f"{architect_tid}-plan-amendment", max_len=64)
+    packet = _build_repair_packet(
+        session_dir=_paths.cross_sessions_dir(project_dir),
+        repair_slug=repair_slug,
+        worktree_path=project_dir,
+        task_id=architect_tid,
+        phase="plan_amendment",
+        repair_phase="plan_amendment",
+        verify_scope="subtree",
+        config=config,
+        budget_prefix="plan_amendment_repair",
+        default_agent_turns=1,
+        default_oracle_invocations=1,
+        latest_oracle_result={
+            "passed": False,
+            "issues": [{
+                "kind": str(feedback.get("kind") or "plan_amendment_needed"),
+                "severity": "block",
+                "message": str(feedback.get("message") or "plan amendment needed"),
+            }],
+            "feedback": feedback,
+        },
+        product_contract=_worktree_product_contract(worktree=project_dir),
+        integration_context={
+            "architect_task_id": architect_tid,
+            "feedback": feedback,
+            "task_graph_path": str(_paths.cross_sessions_dir(project_dir) / "task_graph.json"),
+            "pending_path": str(_paths.cross_sessions_dir(project_dir) / "v5_pending.jsonl"),
+        },
+        success_criteria={
+            "plan_amendment_only": True,
+            "no_full_architect_redispatch": True,
+            "foundation_isolation_feedback_clears": True,
+        },
+        attempt_history_entry={
+            "type": "plan_amendment_feedback",
+            "feedback": feedback,
+        },
+        allowed_paths=[
+            "CHARTER.md",
+            "otto_logs/cross-sessions/task_graph.json",
+            "otto_logs/cross-sessions/v5_pending.jsonl",
+        ],
+        scope_policy="allowed_paths",
+        repair_unit_extra={"prompt_template": "plan-amendment.md"},
+    )
+    _emit(on_event, {
+        "event": "plan_amendment_repair_start",
+        "task_id": architect_tid,
+        "repair_packet": str(packet.packet_path),
+    })
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
+        changed_paths = _git_diff_name_only(project_dir)
+        scope_feedback = _allowed_paths_write_feedback(
+            acting_task_id=architect_tid,
+            changed_paths=changed_paths,
+            allowed_paths=list(packet.repair_unit.get("allowed_paths") or []),
+            scope_policy="allowed_paths",
+            operation="plan_amendment_commit",
+        )
+        if scope_feedback is not None:
+            return False, _foundation_contract_write_block_detail(scope_feedback)
+        return _commit_runner_output_paths(
+            worktree_path=project_dir,
+            paths=[path for path in changed_paths if path == "CHARTER.md"],
+            message="chore(otto): amend v5 ownership partition",
+        )
+
+    repair = await run_oracle_repair_agent(
+        packet,
+        config=config,
+        commit_hook=commit_hook,
+    )
+    _emit(on_event, {
+        "event": "plan_amendment_repair_done",
+        "task_id": architect_tid,
+        "verdict": repair.verdict,
+        "summary": repair.summary,
+        "repair_packet": repair.packet_path,
+    })
+    return repair
+
+
+async def _reenter_or_block_architect_contract(
     *,
     project_dir: Path,
     architect_tid: str,
@@ -3960,8 +4545,89 @@ def _reenter_or_block_architect_contract(
     completed: set[str],
     feedback: dict[str, Any],
     origin: str,
+    config: dict[str, Any] | None = None,
     on_event: Any = None,
 ) -> bool:
+    parent_id = str(feedback.get("parent_task_id") or "").strip()
+    if (
+        feedback.get("kind") == "shared_foundation_not_isolated"
+        and parent_id
+        and _unambiguous_foundation_contract_overlap_findings(feedback)
+    ):
+        rescope = _remove_feature_owned_foundation_contract_paths(
+            project_dir=project_dir,
+            feedback=feedback,
+        )
+        if rescope is not None:
+            contracts = _foundation_contracts_for_parent(
+                project_dir,
+                parent_id,
+                read_graph(project_dir).get("tasks") or {},
+            )
+            followup = _foundation_isolation_feedback(
+                parent_task_id=parent_id,
+                architect_task_id=architect_tid,
+                tasks=read_graph(project_dir).get("tasks") or {},
+                contracts=contracts,
+            )
+            _emit(on_event, {
+                "event": "architect_contract_rescoped",
+                "task_id": architect_tid,
+                "structured_reason": rescope,
+                "followup_feedback": followup,
+            })
+            if followup is None:
+                return False
+            feedback = followup
+
+    if (
+        feedback.get("kind") == "shared_foundation_not_isolated"
+        and _feature_overlap_findings(feedback)
+        and config is not None
+    ):
+        repair = await _run_plan_amendment_repair_packet(
+            project_dir=project_dir,
+            architect_tid=architect_tid,
+            feedback=feedback,
+            config=config,
+            on_event=on_event,
+        )
+        if repair.verdict == "pass" and parent_id:
+            contracts = _foundation_contracts_for_parent(
+                project_dir,
+                parent_id,
+                read_graph(project_dir).get("tasks") or {},
+            )
+            followup = _foundation_isolation_feedback(
+                parent_task_id=parent_id,
+                architect_task_id=architect_tid,
+                tasks=read_graph(project_dir).get("tasks") or {},
+                contracts=contracts,
+            )
+            if followup is None:
+                return False
+            feedback = followup
+        else:
+            result = child_results.get(architect_tid) or LeadResult(
+                task_id=architect_tid,
+                verdict="merge_blocked",
+            )
+            completed.discard(architect_tid)
+            reason = (
+                "Plan-amendment repair did not clear feature ownership overlap: "
+                f"{getattr(repair, 'summary', '')}"
+            )
+            _record_task_merge_blocked_reason(
+                project_dir=project_dir,
+                task_id=architect_tid,
+                result=result,
+                reason=reason,
+                origin=origin,
+                structured_reason=feedback,
+            )
+            child_results[architect_tid] = result
+            return True
+
     current_retries = get_retry_count(project_dir, architect_tid)
     reason = _architect_contract_feedback_reason(feedback)
     if current_retries < MAX_ARCHITECT_RETRIES:
@@ -4528,6 +5194,85 @@ async def _process_children(
                     scaffold_repair_summary=repair.summary,
                 )
 
+            parent_id = _parent_task_id_for_child(
+                project_dir,
+                architect_tid,
+                str(architect_task.get("integration_branch") or "main"),
+            )
+            try:
+                from otto.v5_capability_inventory import (
+                    persist_feature_owned_paths_from_charter,
+                    persist_foundation_contracts_from_charter,
+                )
+
+                foundation_contracts, foundation_findings = (
+                    persist_foundation_contracts_from_charter(
+                        project_dir,
+                        parent_task_id=parent_id,
+                    )
+                )
+                feature_owned_paths, feature_findings = (
+                    persist_feature_owned_paths_from_charter(
+                        project_dir,
+                        parent_task_id=parent_id,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                foundation_contracts = []
+                foundation_findings = []
+                feature_owned_paths = {}
+                feature_findings = []
+                logger.warning("architect partition parse failed: %s", exc)
+            partition_findings = list(foundation_findings) + list(feature_findings)
+            if partition_findings:
+                foundation_feedback = {
+                    "kind": "foundation_contracts_contract_invalid",
+                    "step_id": "architect_foundation_contracts",
+                    "message": "architect Foundation Contracts or feature ownership partition is invalid",
+                    "architect_task_id": architect_tid,
+                    "parent_task_id": parent_id,
+                    "contract_findings": [
+                        {"kind": f.kind, "reference": f.reference, "detail": f.detail}
+                        for f in partition_findings
+                    ],
+                    "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                _emit(on_event, {
+                    "event": "architect_contract_invalid",
+                    "task_id": architect_tid,
+                    "reason": foundation_feedback.get("kind"),
+                    "structured_reason": foundation_feedback,
+                })
+                retry_architect = await _reenter_or_block_architect_contract(
+                    project_dir=project_dir,
+                    architect_tid=architect_tid,
+                    child_results=child_results,
+                    completed=completed,
+                    feedback=foundation_feedback,
+                    origin="architect_contract",
+                    config=config,
+                    on_event=on_event,
+                )
+                break
+            if foundation_contracts:
+                _emit(on_event, {
+                    "event": "foundation_contracts_recorded",
+                    "architect_task_id": architect_tid,
+                    "count": len(foundation_contracts),
+                })
+            else:
+                foundation_contracts = _foundation_contracts_for_parent(
+                    project_dir,
+                    parent_id,
+                    read_graph(project_dir).get("tasks") or {},
+                )
+            if feature_owned_paths:
+                _emit(on_event, {
+                    "event": "feature_owned_paths_recorded",
+                    "architect_task_id": architect_tid,
+                    "count": len(feature_owned_paths),
+                })
+
             try:
                 from otto.v5_capability_inventory import check_route_registration_isolation
 
@@ -4546,76 +5291,17 @@ async def _process_children(
                     "reason": route_isolation_feedback.get("kind"),
                     "structured_reason": route_isolation_feedback,
                 })
-                retry_architect = _reenter_or_block_architect_contract(
+                retry_architect = await _reenter_or_block_architect_contract(
                     project_dir=project_dir,
                     architect_tid=architect_tid,
                     child_results=child_results,
                     completed=completed,
                     feedback=route_isolation_feedback,
                     origin="architect_contract",
+                    config=config,
                     on_event=on_event,
                 )
                 break
-
-            parent_id = _parent_task_id_for_child(
-                project_dir,
-                architect_tid,
-                str(architect_task.get("integration_branch") or "main"),
-            )
-            try:
-                from otto.v5_capability_inventory import persist_foundation_contracts_from_charter
-
-                foundation_contracts, foundation_findings = (
-                    persist_foundation_contracts_from_charter(
-                        project_dir,
-                        parent_task_id=parent_id,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                foundation_contracts = []
-                foundation_findings = []
-                logger.warning("foundation contracts parse failed: %s", exc)
-            if foundation_findings:
-                foundation_feedback = {
-                    "kind": "foundation_contracts_contract_invalid",
-                    "step_id": "architect_foundation_contracts",
-                    "message": "architect Foundation Contracts block is invalid",
-                    "architect_task_id": architect_tid,
-                    "parent_task_id": parent_id,
-                    "contract_findings": [
-                        {"kind": f.kind, "reference": f.reference, "detail": f.detail}
-                        for f in foundation_findings
-                    ],
-                    "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                }
-                _emit(on_event, {
-                    "event": "architect_contract_invalid",
-                    "task_id": architect_tid,
-                    "reason": foundation_feedback.get("kind"),
-                    "structured_reason": foundation_feedback,
-                })
-                retry_architect = _reenter_or_block_architect_contract(
-                    project_dir=project_dir,
-                    architect_tid=architect_tid,
-                    child_results=child_results,
-                    completed=completed,
-                    feedback=foundation_feedback,
-                    origin="architect_contract",
-                    on_event=on_event,
-                )
-                break
-            if foundation_contracts:
-                _emit(on_event, {
-                    "event": "foundation_contracts_recorded",
-                    "architect_task_id": architect_tid,
-                    "count": len(foundation_contracts),
-                })
-            else:
-                foundation_contracts = _foundation_contracts_for_parent(
-                    project_dir,
-                    parent_id,
-                    read_graph(project_dir).get("tasks") or {},
-                )
 
             isolation_feedback = _foundation_isolation_feedback(
                 parent_task_id=parent_id,
@@ -4624,13 +5310,14 @@ async def _process_children(
                 contracts=foundation_contracts,
             )
             if isolation_feedback is not None:
-                retry_architect = _reenter_or_block_architect_contract(
+                retry_architect = await _reenter_or_block_architect_contract(
                     project_dir=project_dir,
                     architect_tid=architect_tid,
                     child_results=child_results,
                     completed=completed,
                     feedback=isolation_feedback,
                     origin="architect_contract",
+                    config=config,
                     on_event=on_event,
                 )
                 break
@@ -4723,6 +5410,7 @@ async def _process_children(
                 inv = build_inventory(project_dir)
                 rendered = render_inventory(inv)
                 if inject_into_charter(project_dir, rendered):
+                    commit_ok, commit_detail = _commit_charter_injection_if_dirty(project_dir)
                     logger.info(
                         "Detected Infrastructure section injected into CHARTER.md "
                         "(%d package.jsons, %d pyprojects, %d configs)",
@@ -4735,7 +5423,16 @@ async def _process_children(
                         "package_json_count": len(inv.package_jsons),
                         "pyproject_count": len(inv.pyprojects),
                         "known_config_count": len(inv.known_configs),
+                        "commit": {
+                            "ok": commit_ok,
+                            "detail": commit_detail,
+                        },
                     })
+                    if not commit_ok:
+                        logger.warning(
+                            "Detected Infrastructure CHARTER commit failed: %s",
+                            commit_detail,
+                        )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("capability inventory injection failed: %s", exc)
 
@@ -4796,13 +5493,14 @@ async def _process_children(
                         "reason": scheduler_feedback.get("kind"),
                         "structured_reason": scheduler_feedback,
                     })
-                    _reenter_or_block_architect_contract(
+                    await _reenter_or_block_architect_contract(
                         project_dir=project_dir,
                         architect_tid=reenter_foundation_id,
                         child_results=child_results,
                         completed=completed,
                         feedback=scheduler_feedback,
                         origin="foundation_scheduler",
+                        config=config,
                         on_event=on_event,
                     )
                     foundation_after_reenter = get_task(project_dir, reenter_foundation_id) or {}
@@ -4938,6 +5636,36 @@ async def _process_children(
 
                     # If this child itself emitted grandchildren, recursively process.
                     if result.decomposition == "emit" and result.emitted_subtask_ids:
+                        if (
+                            _root_only_decomposition_enabled(config)
+                            and _ancestor_count(project_dir, tid) >= 1
+                        ):
+                            reason = (
+                                "non-root Lead emitted subtasks, but this run uses "
+                                "root-only decomposition; child scopes must build inline"
+                            )
+                            result.verdict = "merge_blocked"
+                            result.failure_reason = reason
+                            set_verdict(project_dir, tid, "merge_blocked", cost_usd=result.cost_usd)
+                            update_task_metadata(
+                                project_dir,
+                                tid,
+                                merge_blocked_origin="decomposition_depth",
+                                merge_blocked_reason=reason,
+                                non_root_decomposition_rejected=True,
+                            )
+                            _emit(on_event, {
+                                "event": "non_root_decomposition_rejected",
+                                "task_id": tid,
+                                "emitted_subtask_ids": list(result.emitted_subtask_ids),
+                                "structured_reason": {
+                                    "kind": "inline_only_at_depth",
+                                    "message": reason,
+                                    "task_id": tid,
+                                    "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                },
+                            })
+                            continue
                         await _process_children(
                             project_dir=project_dir,
                             parent_task_id=tid,
@@ -6420,6 +7148,56 @@ async def _merge_child_branch(
         else:
             detail = f"{detail}; conflict repair attempt: {repair_detail}"
     if not ok and not _looks_like_merge_conflict(detail):
+        mechanical_action, mechanical_detail = _handle_mechanical_merge_blocker(
+            detail=detail,
+            project_dir=project_dir,
+            child_task_id=child_task_id,
+            on_event=on_event,
+        )
+        if mechanical_action == "retry":
+            try:
+                ok, detail = merge_child_into_integration(
+                    project_dir=project_dir,
+                    child_task_id=child_task_id,
+                    parent_integration_branch=parent_integration_branch,
+                )
+            except MergeWorktreeDirtyError as exc:
+                ok = False
+                detail = str(exc)
+            except Exception as exc:  # noqa: BLE001 - merge path must not escape post-commit
+                ok = False
+                detail = f"merge after mechanical blocker commit crashed: {type(exc).__name__}: {exc}"
+        elif mechanical_action == "terminal":
+            detail = (
+                "mechanical merge blocker could not be resolved deterministically: "
+                f"{mechanical_detail}"
+            )
+        if ok:
+            pass
+        elif mechanical_action == "terminal":
+            logger.warning("merge_child_into_integration(%s) failed: %s", child_task_id, detail)
+            feedback = {
+                "kind": "upward_merge_gate_mechanical_blocked",
+                "step_id": "upward_merge_gate",
+                "message": detail,
+                "task_id": child_task_id,
+                "source_branch": source_branch,
+                "parent_integration_branch": parent_integration_branch,
+                "pre_merge_ref": pre_merge_ref,
+                "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            _record_structured_merge_failed(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                reason=detail,
+                origin="upward_merge_gate",
+                phase="merge",
+                structured_reason=feedback,
+                on_event=on_event,
+            )
+            return
+    if not ok and not _looks_like_merge_conflict(detail):
         try:
             repaired, repair_detail = await _repair_child_upward_merge_gate_once(
                 project_dir=project_dir,
@@ -7386,7 +8164,7 @@ def _git_status_short(worktree_path: Path) -> str:
         return ""
     if proc.returncode != 0:
         return ""
-    return proc.stdout.strip()
+    return proc.stdout.rstrip("\n")
 
 
 def _branch_checked_out(worktree_path: Path) -> str:
@@ -8090,6 +8868,27 @@ def _is_descendant_of(project_dir: Path, candidate_id: str, ancestor_id: str) ->
     return False
 
 
+def _ancestor_count(project_dir: Path, task_id: str) -> int:
+    count = 0
+    cur = task_id
+    seen: set[str] = set()
+    while cur and cur not in seen:
+        seen.add(cur)
+        entry = get_task(project_dir, cur) or {}
+        parent = entry.get("parent_task_id")
+        if parent is None:
+            return count
+        count += 1
+        cur = str(parent)
+    return count
+
+
+def _root_only_decomposition_enabled(config: dict[str, Any]) -> bool:
+    if bool(config.get("v5_allow_recursive_decomposition")):
+        return False
+    return str(config.get("v5_tier") or "") in {"auto", "lead", "modular"}
+
+
 def _reconcile_recovered_children(
     project_dir: Path,
     parent_task_id: str,
@@ -8260,6 +9059,7 @@ def _build_decomp_runtime_context(
         "spec_profile": _spec_profile(spec_payload),
         "runtime_policy": {
             "tier": str(config.get("v5_tier") or "auto"),
+            "root_only_decomposition": _root_only_decomposition_enabled(config),
             "review_first_decomp": bool(config.get("v5_review_first_decomp")),
             "context_slicing": _context_slicing_enabled(config),
             "provider": str(provider),

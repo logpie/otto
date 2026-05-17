@@ -32,6 +32,7 @@ section.
 from __future__ import annotations
 
 import json
+import fnmatch
 import re
 import time
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -839,6 +840,202 @@ def persist_foundation_contracts_from_charter(
 
         update_task_metadata(project_dir, parent_task_id, foundation_contracts=contracts)
     return contracts, findings
+
+
+def _feature_ownership_payload(charter_text: str) -> Any:
+    ia = parse_information_architecture_contract(charter_text)
+    if not isinstance(ia, dict):
+        return None
+    for key in (
+        "feature_owned_paths",
+        "feature_ownership",
+        "feature_partitions",
+        "owned_paths_by_feature",
+    ):
+        if key in ia:
+            return ia.get(key)
+    partition = ia.get("ownership_partition")
+    if isinstance(partition, dict):
+        for key in (
+            "feature_owned_paths",
+            "feature_ownership",
+            "feature_partitions",
+            "owned_paths_by_feature",
+            "features",
+        ):
+            if key in partition:
+                return partition.get(key)
+    return None
+
+
+def _feature_ownership_items(payload: Any) -> list[tuple[str, list[str]]]:
+    if isinstance(payload, dict):
+        items: list[tuple[str, list[str]]] = []
+        for task_id, raw_paths in payload.items():
+            if isinstance(raw_paths, dict):
+                raw_paths = raw_paths.get("owned_paths")
+            paths = [
+                str(path).strip().lstrip("./")
+                for path in (raw_paths or [])
+                if str(path).strip()
+            ] if isinstance(raw_paths, list) else []
+            items.append((str(task_id).strip(), paths))
+        return items
+    if isinstance(payload, list):
+        items = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            task_id = str(
+                entry.get("task_id")
+                or entry.get("id")
+                or entry.get("feature_task_id")
+                or ""
+            ).strip()
+            raw_paths = entry.get("owned_paths")
+            paths = [
+                str(path).strip().lstrip("./")
+                for path in (raw_paths or [])
+                if str(path).strip()
+            ] if isinstance(raw_paths, list) else []
+            items.append((task_id, paths))
+        return items
+    return []
+
+
+def _literal_prefix_before_glob(pattern: str) -> str:
+    markers = [idx for marker in "*?[" if (idx := pattern.find(marker)) >= 0]
+    if not markers:
+        return pattern.rstrip("/")
+    return pattern[: min(markers)].rstrip("/")
+
+
+def _path_matches_leaf_extension(path: str, leaf_globs: list[str]) -> bool:
+    if not leaf_globs:
+        return True
+    path = path.strip().lstrip("./")
+    for raw_glob in leaf_globs:
+        glob = raw_glob.strip().lstrip("./")
+        if not glob:
+            continue
+        if fnmatch.fnmatch(path, glob):
+            return True
+        prefix = _literal_prefix_before_glob(glob)
+        if prefix and (path == prefix or path.startswith(prefix.rstrip("/") + "/")):
+            return True
+        path_prefix = _literal_prefix_before_glob(path)
+        if path_prefix and fnmatch.fnmatch(path_prefix, glob):
+            return True
+    return False
+
+
+def parse_feature_owned_paths_from_charter(
+    source: str | Path,
+) -> tuple[dict[str, list[str]], list[CoherenceFinding]]:
+    """Parse architect-authored feature ownership from CHARTER.IA.
+
+    The preferred IA shape is ``feature_owned_paths`` keyed by child task_id,
+    with arrays of file/glob paths. ``ownership_partition.features`` and a few
+    legacy-compatible aliases are accepted so prompt wording can evolve
+    without changing the runner contract.
+    """
+    text, read_finding = _read_charter_source(source)
+    if read_finding is not None:
+        return {}, [read_finding]
+    if text is None:
+        return {}, []
+    ia = parse_information_architecture_contract(text) or {}
+    payload = _feature_ownership_payload(text)
+    if payload is None:
+        return {}, []
+
+    contracts, contract_findings = parse_foundation_contracts(text)
+    contract_paths = {
+        str(contract.get("path") or "").strip().lstrip("./")
+        for contract in contracts
+        if str(contract.get("path") or "").strip()
+    }
+    shared_registry_paths = _declared_shared_registry_paths(ia)
+    isolation = _registration_isolation_payload(ia) or {}
+    leaf_globs = [
+        str(item).strip().lstrip("./")
+        for item in (isolation.get("leaf_extension_globs") or [])
+        if str(item).strip()
+    ] if isinstance(isolation.get("leaf_extension_globs"), list) else []
+
+    owned_by_task: dict[str, list[str]] = {}
+    findings: list[CoherenceFinding] = list(contract_findings)
+    for task_id, paths in _feature_ownership_items(payload):
+        if not task_id:
+            findings.append(CoherenceFinding(
+                kind="feature_ownership_contract_invalid",
+                reference="feature_owned_paths",
+                detail="feature ownership entries must include task_id",
+            ))
+            continue
+        clean_paths = sorted(dict.fromkeys(path for path in paths if path))
+        if not clean_paths:
+            findings.append(CoherenceFinding(
+                kind="feature_ownership_contract_invalid",
+                reference=f"feature_owned_paths[{task_id}]",
+                detail="feature ownership entries must include owned_paths",
+            ))
+            continue
+        for path in clean_paths:
+            if path in shared_registry_paths:
+                findings.append(CoherenceFinding(
+                    kind="feature_ownership_contract_invalid",
+                    reference=f"feature_owned_paths[{task_id}]",
+                    detail=f"{path} is a shared registry file and cannot be feature-owned",
+                ))
+            if path not in contract_paths and not _path_matches_leaf_extension(path, leaf_globs):
+                findings.append(CoherenceFinding(
+                    kind="feature_ownership_contract_invalid",
+                    reference=f"feature_owned_paths[{task_id}]",
+                    detail=(
+                        f"{path} is outside registration_isolation.leaf_extension_globs"
+                    ),
+                ))
+        owned_by_task[task_id] = clean_paths
+    return owned_by_task, findings
+
+
+def persist_feature_owned_paths_from_charter(
+    project_dir: Path,
+    *,
+    parent_task_id: str,
+) -> tuple[dict[str, list[str]], list[CoherenceFinding]]:
+    """Persist architect-authored feature owned_paths onto sibling tasks."""
+    owned_by_task, findings = parse_feature_owned_paths_from_charter(
+        project_dir / "CHARTER.md"
+    )
+    if findings or not owned_by_task:
+        return owned_by_task, findings
+    from otto.queue.task_graph import read_graph, update_task_metadata
+
+    tasks = read_graph(project_dir).get("tasks") or {}
+    for task_id, owned_paths in owned_by_task.items():
+        task = tasks.get(task_id)
+        if not isinstance(task, dict):
+            findings.append(CoherenceFinding(
+                kind="feature_ownership_contract_invalid",
+                reference=f"feature_owned_paths[{task_id}]",
+                detail="feature ownership references an unknown task_id",
+            ))
+            continue
+        if str(task.get("parent_task_id") or "") != parent_task_id:
+            findings.append(CoherenceFinding(
+                kind="feature_ownership_contract_invalid",
+                reference=f"feature_owned_paths[{task_id}]",
+                detail=(
+                    f"feature ownership task is not a child of {parent_task_id}"
+                ),
+            ))
+            continue
+        if str(task.get("task_role") or "feature") != "feature":
+            continue
+        update_task_metadata(project_dir, task_id, owned_paths=list(owned_paths))
+    return owned_by_task, findings
 
 
 def _registration_isolation_payload(ia: dict[str, Any]) -> dict[str, Any] | None:

@@ -229,6 +229,13 @@ def submit_subtask_for_lead(
     intent = (intent or "").strip()
     if not intent:
         return {"error": "submit_subtask: 'intent' is required and must be non-empty."}
+    if task_id != "root":
+        return {
+            "error": "submit_subtask: non-root Leads must build inline at this decomposition depth.",
+            "kind": "inline_only_at_depth",
+            "task_id": task_id,
+            "decomposition": "inline_only",
+        }
 
     role = _coerce_task_role(task_role)
     idem_key = _intent_hash(task_id, intent)
@@ -344,14 +351,15 @@ def create_otto_mcp_server(
         (
             "Emit a child task to the project's queue. Returns task_id immediately. "
             "Use this when this Lead's intent contains MULTIPLE strategic areas. "
+            "Only the root Lead may emit subtasks; non-root Leads must build inline. "
             "Each call produces one child task with its own Lead. The CALLING "
             "Lead's task_id is automatically recorded as parent_task_id; you do "
             "NOT pass it. If a child must run after another, pass depends_on=[task_id, ...]. "
-            "When known, pass owned_paths=[...] and action_ids=[...] so Otto can "
-            "safely scope child context. Omit task_role when unchanged; use "
+            "Do not predict feature owned_paths during root decomposition; the "
+            "architect/scaffold child will author the authoritative partition "
+            "after building the scaffold. Omit task_role when unchanged; use "
             "task_role='foundation' for the architect/scaffold child and an "
-            "explicit task_role='feature' only when correcting a child back to "
-            "ordinary feature ownership."
+            "explicit task_role='feature' for ordinary feature children."
         ),
         {
             "intent": str,

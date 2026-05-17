@@ -597,11 +597,9 @@ def _render_prompt(
         else:
             tier_hint = (
                 "\n## Tier preset: modular\n\n"
-                "Honor the architecture-first shape from the parent. Build "
-                "your scoped child inline unless this child scope is itself "
-                "multi-subsystem or explicitly asks for recursive "
-                "sub-decomposition; in that case emit a small nested subtree "
-                "with clear ownership boundaries.\n"
+                "Honor the architecture-first shape from the root Lead. You "
+                "MUST build this scoped child inline. Do not call "
+                "mcp__otto__submit_subtask from a non-root Lead.\n"
             )
 
     if kind == "plan_or_inline":
