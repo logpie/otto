@@ -573,12 +573,13 @@ _KNOWN_SURFACE_KINDS = frozenset({
     "global",
 })
 CHARTER_PROSE_TARGET_LINES = 300
-_REGISTRATION_ISOLATION_POLICIES = frozenset({
-    "file_local_auto_discovery",
-    "manifest_auto_compose",
-    "plugin_auto_discovery",
-    "none_needed",
-})
+# NOTE: a fixed registration_isolation.policy enum used to be enforced here.
+# Removed (2026-05-17): it rejected the architect's self-consistent CHARTERs
+# whenever it labeled an equivalent strategy differently ("auto-discover" vs
+# "file_local_auto_discovery"), forcing ~14min architect-rebuild retries. The
+# policy label is descriptive; the structural contract (shared_registry_files
+# scaffold-owned + leaf_edit:false, leaf_extension_globs) is the real invariant
+# and is validated in _validate_registration_isolation_contract.
 _ROUTE_REGISTRATION_TERMS = frozenset({
     "api",
     "blueprint",
@@ -1105,30 +1106,35 @@ def _validate_registration_isolation_contract(
         return []
 
     findings: list[CoherenceFinding] = []
-    policy = str(isolation.get("policy") or "").strip()
-    if policy not in _REGISTRATION_ISOLATION_POLICIES:
+    policy = str(isolation.get("policy") or "").strip().lower()
+    _globs_raw = isolation.get("leaf_extension_globs")
+    _regs_raw = isolation.get("shared_registry_files")
+    _has_globs = isinstance(_globs_raw, list) and any(
+        isinstance(i, str) and i.strip() for i in _globs_raw
+    )
+    _has_regs = isinstance(_regs_raw, list) and len(_regs_raw) > 0
+    # The policy STRING is descriptive metadata, not a load-bearing contract.
+    # Accept whatever label the architect chose ("auto-discover",
+    # "file_local_auto_discovery", "plugin scan", ...). The real isolation
+    # invariant is structural and enforced below: shared registry files are
+    # scaffold-owned with leaf_edit:false, and leaf_extension_globs tell
+    # leaves where to add route modules. "Effectively none-needed" = the
+    # architect explicitly said so, OR there is no shared registry and no
+    # leaf globs (single leaf / no shared route registration to isolate).
+    effectively_none_needed = (
+        policy in {"none_needed", "none", "n/a", "not_needed"}
+        or (not _has_regs and not _has_globs)
+    )
+
+    if not effectively_none_needed and not _has_globs:
         findings.append(CoherenceFinding(
             kind="route_registration_isolation_contract_invalid",
-            reference="registration_isolation.policy",
+            reference="registration_isolation.leaf_extension_globs",
             detail=(
-                "registration_isolation.policy must be one of "
-                + ", ".join(sorted(_REGISTRATION_ISOLATION_POLICIES))
+                "registration_isolation.leaf_extension_globs must list "
+                "where feature leaves add route modules"
             ),
         ))
-
-    leaf_globs = isolation.get("leaf_extension_globs")
-    if policy != "none_needed":
-        if not isinstance(leaf_globs, list) or not any(
-            isinstance(item, str) and item.strip() for item in leaf_globs
-        ):
-            findings.append(CoherenceFinding(
-                kind="route_registration_isolation_contract_invalid",
-                reference="registration_isolation.leaf_extension_globs",
-                detail=(
-                    "registration_isolation.leaf_extension_globs must list "
-                    "where feature leaves add route modules"
-                ),
-            ))
 
     registries = isolation.get("shared_registry_files")
     if registries is not None and not isinstance(registries, list):
