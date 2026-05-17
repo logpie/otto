@@ -2101,11 +2101,36 @@ def _subtree_verify_start_sh(
     log(f"verify_from_clean: running start.sh in {temp_root}")
     proc = None
     listening: set[int] = set()
+    # ROOT FIX: capture start.sh stdout/stderr to a FILE, never an undrained
+    # subprocess.PIPE. The previous code used stdout=PIPE/stderr=STDOUT but
+    # only ever read the pipe in the `start_exited_early` branch — which
+    # cannot fire for a normal start.sh that ends in `wait` (servers run
+    # forever, proc never exits). A cold `pip install` (FastAPI/SQLAlchemy is
+    # very verbose) + `npm install` + vite-through-`sed` easily exceeds the
+    # ~64KB OS pipe buffer; with no concurrent reader the writing child
+    # processes BLOCK on write(), so `npm install`/vite never finish and the
+    # frontend port never binds — surfacing as a spurious `ports_not_listening`
+    # after the full budget. Classic subprocess.PIPE deadlock. A real file
+    # sink never blocks the writers AND lets us persist the deploy output for
+    # diagnosis on every failure path (previously start.sh's runtime output
+    # was unrecoverable on the timeout path — un-debuggable from logs alone).
+    deploy_log = temp_root / ".otto-clean-deploy.log"
+    log_fh = None
+
+    def _deploy_tail(limit: int = 2000) -> str:
+        try:
+            return deploy_log.read_bytes()[-limit:].decode(
+                "utf-8", errors="replace"
+            )
+        except OSError:
+            return ""
+
     try:
+        log_fh = deploy_log.open("wb")
         proc = subprocess.Popen(  # noqa: S603 — our own script
             [bash, "start.sh"],
             cwd=temp_root,
-            stdout=subprocess.PIPE,
+            stdout=log_fh,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
@@ -2129,14 +2154,7 @@ def _subtree_verify_start_sh(
             ret = proc.poll()
             if ret is not None and ret != 0 and not start_exited_early:
                 start_exited_early = True
-                try:
-                    out = (
-                        proc.stdout.read(2000).decode("utf-8", errors="replace")
-                        if proc.stdout
-                        else ""
-                    )
-                except Exception:  # noqa: BLE001
-                    out = ""
+                out = _deploy_tail()
                 return (
                     False,
                     "start_failed",
@@ -2167,12 +2185,14 @@ def _subtree_verify_start_sh(
         if declared_ports:
             missing = [p for p in declared_ports if p not in listening]
             if missing:
+                tail = _deploy_tail()
                 return (
                     False,
                     "ports_not_listening",
                     f"After clean-state deploy, ports {missing} did not bind "
                     f"within {deploy_budget_s}s (install-inclusive). Listening: "
-                    f"{sorted(listening) or 'none'}.",
+                    f"{sorted(listening) or 'none'}. start.sh output (tail): "
+                    f"{tail[-1200:]!r}",
                     steps,
                     sorted(listening),
                 )
@@ -2184,6 +2204,11 @@ def _subtree_verify_start_sh(
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (OSError, ProcessLookupError):
+                pass
+        if log_fh is not None:
+            try:
+                log_fh.close()
+            except OSError:
                 pass
         # Kill anything bound to declared ports we tested.
         for port in declared_ports:
