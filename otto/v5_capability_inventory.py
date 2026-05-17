@@ -869,11 +869,29 @@ def _feature_ownership_payload(charter_text: str) -> Any:
 
 
 def _feature_ownership_items(payload: Any) -> list[tuple[str, list[str]]]:
+    # The architect authors this block freely; accept the natural shapes an
+    # LLM produces — value may be a list of paths, or an object whose path
+    # array lives under any of these synonym keys.
+    _PATH_ARRAY_KEYS = (
+        "owned_paths",
+        "may_add",
+        "paths",
+        "globs",
+        "add",
+        "new_files",
+        "files",
+    )
     if isinstance(payload, dict):
         items: list[tuple[str, list[str]]] = []
         for task_id, raw_paths in payload.items():
             if isinstance(raw_paths, dict):
-                raw_paths = raw_paths.get("owned_paths")
+                nested = raw_paths
+                raw_paths = None
+                for _k in _PATH_ARRAY_KEYS:
+                    candidate = nested.get(_k)
+                    if isinstance(candidate, list):
+                        raw_paths = candidate
+                        break
             paths = [
                 str(path).strip().lstrip("./")
                 for path in (raw_paths or [])
@@ -892,7 +910,12 @@ def _feature_ownership_items(payload: Any) -> list[tuple[str, list[str]]]:
                 or entry.get("feature_task_id")
                 or ""
             ).strip()
-            raw_paths = entry.get("owned_paths")
+            raw_paths = None
+            for _k in _PATH_ARRAY_KEYS:
+                candidate = entry.get(_k)
+                if isinstance(candidate, list):
+                    raw_paths = candidate
+                    break
             paths = [
                 str(path).strip().lstrip("./")
                 for path in (raw_paths or [])
