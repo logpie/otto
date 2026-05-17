@@ -2109,7 +2109,21 @@ def _subtree_verify_start_sh(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-        deadline = time.time() + timeout_s + port_wait_s
+        # The clean-state temp copy deliberately excludes node_modules /
+        # .venv, so start.sh does a FULL cold dependency install (npm install
+        # for the whole frontend + python venv + pip install) BEFORE any
+        # server can bind. A single `timeout_s + port_wait_s` window
+        # (~100-130s) conflates that legitimately-slow install with the
+        # actual bind, so a correct production-grade product (cold npm install
+        # alone is routinely 60-150s) fails `ports_not_listening` even though
+        # `npm run build` passes. The build path already accounts for this
+        # (`timeout_s * 3`, "install often slower than build"); the deploy
+        # path must too. This still REQUIRES the ports to genuinely bind — a
+        # broken server still fails, just after a fair install-inclusive wait
+        # — so correctness/anti-false-pass is unchanged; only the brittle
+        # install-vs-bind conflation is removed.
+        deploy_budget_s = timeout_s * 3 + port_wait_s
+        deadline = time.time() + deploy_budget_s
         start_exited_early = False
         while time.time() < deadline:
             ret = proc.poll()
@@ -2157,7 +2171,7 @@ def _subtree_verify_start_sh(
                     False,
                     "ports_not_listening",
                     f"After clean-state deploy, ports {missing} did not bind "
-                    f"within {timeout_s + port_wait_s}s. Listening: "
+                    f"within {deploy_budget_s}s (install-inclusive). Listening: "
                     f"{sorted(listening) or 'none'}.",
                     steps,
                     sorted(listening),
