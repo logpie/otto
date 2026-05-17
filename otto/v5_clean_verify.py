@@ -2116,6 +2116,7 @@ def _subtree_verify_start_sh(
     # was unrecoverable on the timeout path — un-debuggable from logs alone).
     deploy_log = temp_root / ".otto-clean-deploy.log"
     log_fh = None
+    deploy_pgid: int | None = None
 
     def _deploy_tail(limit: int = 2000) -> str:
         try:
@@ -2124,6 +2125,37 @@ def _subtree_verify_start_sh(
             )
         except OSError:
             return ""
+
+    def _port_listeners(ports: list[int]) -> str:
+        # Independent failure-time signal: start.sh pipes the dev server
+        # through block-buffered `sed` (its stdout is a file, not a tty), so
+        # vite's startup output/error is swallowed exactly when we need it.
+        # Record what (if anything) actually holds each port — "nothing"
+        # means the server never started (real defect / env); a foreign
+        # pid means contention from a leaked/concurrent process.
+        bits: list[str] = []
+        for p in ports:
+            try:
+                out = subprocess.check_output(
+                    ["lsof", "-nP", f"-iTCP:{p}", "-sTCP:LISTEN"],
+                    text=True,
+                    timeout=3,
+                    stderr=subprocess.DEVNULL,
+                )
+                rows = [ln for ln in out.splitlines()[1:] if ln.strip()]
+                bits.append(
+                    f":{p}={rows[0].split()[0]}/{rows[0].split()[1]}"
+                    if rows
+                    else f":{p}=nothing"
+                )
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                FileNotFoundError,
+                IndexError,
+            ):
+                bits.append(f":{p}=nothing")
+        return " ".join(bits)
 
     try:
         log_fh = deploy_log.open("wb")
@@ -2134,6 +2166,21 @@ def _subtree_verify_start_sh(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        # start_new_session=True makes start.sh a new session+group leader, so
+        # its pgid == its pid and every child/grandchild it spawns (the
+        # backgrounded uvicorn/vite the product's start.sh launches) inherits
+        # that pgid. Capture it NOW, while proc is alive: start.sh exits after
+        # its own wait-loops (~60s), long before this verifier's cleanup runs
+        # (we poll the full deploy budget). Deriving the pgid from proc at
+        # teardown time then fails (proc reaped → ProcessLookupError) and the
+        # old `if proc.poll() is None: killpg(getpgid(proc.pid))` SKIPPED the
+        # kill entirely, leaking the orphaned servers — they survived as
+        # listeners on the declared ports and poisoned subsequent clean_deploy
+        # rounds/runs (spurious port_busy / mis-bind → bogus merge_blocked).
+        try:
+            deploy_pgid = os.getpgid(proc.pid)
+        except (OSError, ProcessLookupError):
+            deploy_pgid = proc.pid
         # The clean-state temp copy deliberately excludes node_modules /
         # .venv, so start.sh does a FULL cold dependency install (npm install
         # for the whole frontend + python venv + pip install) BEFORE any
@@ -2186,13 +2233,14 @@ def _subtree_verify_start_sh(
             missing = [p for p in declared_ports if p not in listening]
             if missing:
                 tail = _deploy_tail()
+                who = _port_listeners(missing)
                 return (
                     False,
                     "ports_not_listening",
                     f"After clean-state deploy, ports {missing} did not bind "
                     f"within {deploy_budget_s}s (install-inclusive). Listening: "
-                    f"{sorted(listening) or 'none'}. start.sh output (tail): "
-                    f"{tail[-1200:]!r}",
+                    f"{sorted(listening) or 'none'}. Port holders [{who}]. "
+                    f"start.sh output (tail): {tail[-1200:]!r}",
                     steps,
                     sorted(listening),
                 )
@@ -2200,9 +2248,20 @@ def _subtree_verify_start_sh(
             after_listening(sorted(listening))
         return True, None, None, steps, sorted(listening)
     finally:
-        if proc and proc.poll() is None:
+        # Reliably tear down the ENTIRE temp-deploy process tree. The product's
+        # start.sh backgrounds its servers (uvicorn/vite) in subshells and then
+        # itself exits after its own wait-loops (~60s) — long before this
+        # cleanup runs, since we poll the full deploy budget. The old
+        # `if proc.poll() is None: killpg(getpgid(proc.pid))` therefore SKIPPED
+        # the kill entirely once start.sh had exited (poll() != None), leaking
+        # the orphaned servers: they survived as listeners on the declared
+        # ports and poisoned subsequent clean_deploy rounds/runs (spurious
+        # port_busy / mis-bind → bogus merge_blocked). The captured pgid
+        # (start.sh is a session+group leader; servers inherit it) is killed
+        # UNCONDITIONALLY here, whether or not start.sh itself is still alive.
+        if deploy_pgid is not None:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                os.killpg(deploy_pgid, signal.SIGKILL)
             except (OSError, ProcessLookupError):
                 pass
         if log_fh is not None:
