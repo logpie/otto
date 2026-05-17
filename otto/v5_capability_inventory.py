@@ -868,36 +868,55 @@ def _feature_ownership_payload(charter_text: str) -> Any:
     return None
 
 
+# Keys under a feature entry whose value is prose/identity metadata, not
+# owned paths. Everything else that resolves to a list of strings IS owned
+# paths — the architect freely categorizes paths under self-invented keys
+# (owned_paths / paths / may_add, or layer keys backend / frontend / tests,
+# or any future grouping). Allowlisting key names is structurally fragile and
+# silently drops all-but-the-first match; collect from every path-like list
+# instead and only exclude known non-path metadata.
+_FEATURE_META_KEYS = frozenset({
+    "description",
+    "rationale",
+    "reason",
+    "why",
+    "notes",
+    "note",
+    "summary",
+    "purpose",
+    "title",
+    "owner",
+    "task_id",
+    "id",
+    "feature_task_id",
+})
+
+
+def _collect_path_strings(value: Any) -> list[str]:
+    """All path strings reachable from a feature-entry value, regardless of
+    how the architect grouped them (flat list, or dict of category->list,
+    nested one level deep). Non-path metadata keys are skipped."""
+    out: list[str] = []
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                out.append(item.strip().lstrip("./"))
+            elif isinstance(item, (list, dict)):
+                out.extend(_collect_path_strings(item))
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            if str(k).strip().lower() in _FEATURE_META_KEYS:
+                continue
+            if isinstance(v, (list, dict)):
+                out.extend(_collect_path_strings(v))
+    return out
+
+
 def _feature_ownership_items(payload: Any) -> list[tuple[str, list[str]]]:
-    # The architect authors this block freely; accept the natural shapes an
-    # LLM produces — value may be a list of paths, or an object whose path
-    # array lives under any of these synonym keys.
-    _PATH_ARRAY_KEYS = (
-        "owned_paths",
-        "may_add",
-        "paths",
-        "globs",
-        "add",
-        "new_files",
-        "files",
-    )
     if isinstance(payload, dict):
         items: list[tuple[str, list[str]]] = []
-        for task_id, raw_paths in payload.items():
-            if isinstance(raw_paths, dict):
-                nested = raw_paths
-                raw_paths = None
-                for _k in _PATH_ARRAY_KEYS:
-                    candidate = nested.get(_k)
-                    if isinstance(candidate, list):
-                        raw_paths = candidate
-                        break
-            paths = [
-                str(path).strip().lstrip("./")
-                for path in (raw_paths or [])
-                if str(path).strip()
-            ] if isinstance(raw_paths, list) else []
-            items.append((str(task_id).strip(), paths))
+        for task_id, raw in payload.items():
+            items.append((str(task_id).strip(), _collect_path_strings(raw)))
         return items
     if isinstance(payload, list):
         items = []
@@ -910,18 +929,7 @@ def _feature_ownership_items(payload: Any) -> list[tuple[str, list[str]]]:
                 or entry.get("feature_task_id")
                 or ""
             ).strip()
-            raw_paths = None
-            for _k in _PATH_ARRAY_KEYS:
-                candidate = entry.get(_k)
-                if isinstance(candidate, list):
-                    raw_paths = candidate
-                    break
-            paths = [
-                str(path).strip().lstrip("./")
-                for path in (raw_paths or [])
-                if str(path).strip()
-            ] if isinstance(raw_paths, list) else []
-            items.append((task_id, paths))
+            items.append((task_id, _collect_path_strings(entry)))
         return items
     return []
 
