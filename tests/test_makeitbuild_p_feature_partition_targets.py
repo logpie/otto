@@ -24,17 +24,21 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
-from otto.queue.task_graph import read_graph
+from otto.queue.task_graph import SCHEMA_VERSION, read_graph, task_graph_path
 from otto.v5_runner import _build_decomp_runtime_context
 
 
-def _seed_graph(tmp: Path, tasks: dict[str, dict]) -> None:
-    (tmp / "otto_logs" / "cross-sessions").mkdir(parents=True, exist_ok=True)
-    graph_path = tmp / "otto_logs" / "cross-sessions" / "task_graph.json"
-    graph_path.write_text(json.dumps({"tasks": tasks}), encoding="utf-8")
+def _seed_graph(tmp: Path, tasks: dict[str, dict[str, Any]]) -> None:
+    path = task_graph_path(tmp)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _ = path.write_text(
+        json.dumps({"schema_version": SCHEMA_VERSION, "tasks": tasks}),
+        encoding="utf-8",
+    )
     # Sanity: the helper round-trips through the real reader.
-    assert read_graph(tmp).get("tasks")
+    assert read_graph(tmp).get("tasks"), "seeded graph not read back"
 
 
 def test_feature_partition_targets_lists_real_feature_task_ids(tmp_path: Path) -> None:
