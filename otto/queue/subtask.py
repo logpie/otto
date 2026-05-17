@@ -69,6 +69,49 @@ def _locked_append(path: Path):
             os.close(lock_fd)
 
 
+def _pending_entry(
+    *,
+    project_dir: Path,
+    parent_task_id: str,
+    parent_session_dir: Path,
+    intent: str,
+    depends_on: list[str] | None = None,
+    owned_paths: list[str] | None = None,
+    action_ids: list[str] | None = None,
+    task_role: str = "feature",
+    parent_integration_branch: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    child_task_id = task_id or _generate_task_id(intent)
+    if parent_integration_branch:
+        integration_branch = parent_integration_branch
+    else:
+        from otto.v5_branching import integration_branch_name as _integ_name
+        integration_branch = _integ_name(parent_task_id)
+    return {
+        "schema_version": 1,
+        "task_id": child_task_id,
+        "parent_task_id": parent_task_id,
+        "parent_session_dir": str(parent_session_dir),
+        "intent": intent,
+        "depends_on": list(depends_on or []),
+        "owned_paths": list(owned_paths or []),
+        "action_ids": list(action_ids or []),
+        "task_role": task_role,
+        "integration_branch": integration_branch,
+        "review_state": "approved",  # autopilot default; Phase 3 may set "pending_review"
+        "enqueued_at": _now_iso(),
+    }
+
+
+def append_pending_entry(path: Path, entry: dict[str, Any]) -> None:
+    """Append one pending entry. Caller may hold ``_locked_append(path)``."""
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def enqueue_subtask(
     *,
     project_dir: Path,
@@ -76,6 +119,9 @@ def enqueue_subtask(
     parent_session_dir: Path,
     intent: str,
     depends_on: list[str] | None = None,
+    owned_paths: list[str] | None = None,
+    action_ids: list[str] | None = None,
+    task_role: str = "feature",
     parent_integration_branch: str | None = None,
 ) -> str:
     """Persist an agent-emitted subtask and return its task_id.
@@ -87,31 +133,22 @@ def enqueue_subtask(
     if not intent:
         raise ValueError("enqueue_subtask: 'intent' is required and must be non-empty.")
 
-    task_id = _generate_task_id(intent)
-    if parent_integration_branch:
-        integration_branch = parent_integration_branch
-    else:
-        from otto.v5_branching import integration_branch_name as _integ_name
-        integration_branch = _integ_name(parent_task_id)
-    entry: dict[str, Any] = {
-        "schema_version": 1,
-        "task_id": task_id,
-        "parent_task_id": parent_task_id,
-        "parent_session_dir": str(parent_session_dir),
-        "intent": intent,
-        "depends_on": list(depends_on or []),
-        "integration_branch": integration_branch,
-        "review_state": "approved",  # autopilot default; Phase 3 may set "pending_review"
-        "enqueued_at": _now_iso(),
-    }
+    entry = _pending_entry(
+        project_dir=project_dir,
+        parent_task_id=parent_task_id,
+        parent_session_dir=parent_session_dir,
+        intent=intent,
+        depends_on=depends_on,
+        owned_paths=owned_paths,
+        action_ids=action_ids,
+        task_role=task_role,
+        parent_integration_branch=parent_integration_branch,
+    )
 
     path = v5_pending_path(project_dir)
     with _locked_append(path):
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-    return task_id
+        append_pending_entry(path, entry)
+    return str(entry["task_id"])
 
 
 def read_pending(project_dir: Path) -> list[dict[str, Any]]:
@@ -133,18 +170,53 @@ def read_pending(project_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
-_TERMINAL_VERDICTS = frozenset({
+def _reconcile_pending_entry_with_graph(
+    entry: dict[str, Any],
+    graph_tasks: dict[str, Any],
+) -> dict[str, Any]:
+    """Overlay dispatch-critical metadata from task_graph onto pending JSONL.
+
+    ``v5_pending.jsonl`` is append-only history; task_graph is authoritative
+    for duplicate metadata corrections made after the original enqueue.
+    """
+    tid = entry.get("task_id")
+    graph_entry = graph_tasks.get(tid) if isinstance(tid, str) else None
+    if not isinstance(graph_entry, dict):
+        return entry
+    reconciled = dict(entry)
+    if isinstance(graph_entry.get("owned_paths"), list):
+        reconciled["owned_paths"] = list(graph_entry.get("owned_paths") or [])
+    role = graph_entry.get("task_role")
+    if isinstance(role, str):
+        reconciled["task_role"] = role
+    return reconciled
+
+
+_TERMINAL_FOR_REDISPATCH_VERDICTS = frozenset({
     "pass", "partial", "unverified", "merge_blocked", "catastrophic",
 })
+_NON_RUNNABLE_VERDICTS = _TERMINAL_FOR_REDISPATCH_VERDICTS | {"pending_children"}
 
 
-def _globally_completed_task_ids(project_dir: Path) -> set[str]:
-    """Tasks whose verdict in task_graph.json is terminal (not pending).
+def _verdict_satisfies_dependency(verdict: Any, review_state: Any = None) -> bool:
+    """Return whether a completed upstream can unlock a dependent task.
+
+    This is deliberately stricter than "non-runnable." Failed terminal states
+    must not be redispatched, but they also must not satisfy dependents. Raw
+    partials are not enough either; only the P0 reviewed-partial gate is.
+    """
+    if verdict == "pass":
+        return True
+    return verdict == "partial" and review_state == "reviewed_partial"
+
+
+def _globally_dependency_satisfied_task_ids(project_dir: Path) -> set[str]:
+    """Tasks whose task_graph state satisfies downstream dependencies.
 
     The runner's local ``completed`` set in _process_children is per-call,
     so recursive invocations don't see siblings completed in earlier passes —
     leading to re-dispatch loops. The task graph is the global source of
-    truth for completion; reading from it stops the thrash.
+    truth for dependency satisfaction.
     """
     from otto.queue.task_graph import read_graph
 
@@ -155,9 +227,58 @@ def _globally_completed_task_ids(project_dir: Path) -> set[str]:
     done: set[str] = set()
     for tid, t in (graph.get("tasks") or {}).items():
         verdict = t.get("verdict")
-        if isinstance(verdict, str) and verdict in _TERMINAL_VERDICTS:
+        if _verdict_satisfies_dependency(verdict, t.get("review_state")):
             done.add(tid)
     return done
+
+
+def _globally_non_runnable_task_ids(project_dir: Path) -> set[str]:
+    """Tasks whose graph verdict means they should not be dispatched again.
+
+    ``pending_children`` is not terminal for dependency satisfaction, but it is
+    terminal for the planning Lead's own dispatch: that Lead already emitted
+    children and must not be picked up again by a sibling scheduler loop.
+    """
+    from otto.queue.task_graph import contract_amendment_retry_is_stale, read_graph
+
+    try:
+        graph = read_graph(project_dir)
+    except Exception:  # noqa: BLE001 — best-effort
+        return set()
+    done: set[str] = set()
+    for tid, t in (graph.get("tasks") or {}).items():
+        if (
+            isinstance(t, dict)
+            and t.get("contract_amendment_retry_in_progress")
+            and not contract_amendment_retry_is_stale(t)
+        ):
+            done.add(tid)
+            continue
+        verdict = t.get("verdict")
+        if isinstance(verdict, str) and verdict in _NON_RUNNABLE_VERDICTS:
+            done.add(tid)
+    return done
+
+
+def _globally_dependency_blocked_task_ids(
+    project_dir: Path,
+    completed_all: set[str],
+) -> set[str]:
+    """Tasks blocked on an unsatisfied amendment task."""
+    from otto.queue.task_graph import read_graph
+
+    try:
+        graph = read_graph(project_dir)
+    except Exception:  # noqa: BLE001 — best-effort
+        return set()
+    blocked: set[str] = set()
+    for tid, t in (graph.get("tasks") or {}).items():
+        if not isinstance(t, dict):
+            continue
+        blocker = t.get("blocked_on_task_id")
+        if isinstance(blocker, str) and blocker and blocker not in completed_all:
+            blocked.add(str(tid))
+    return blocked
 
 
 def take_ready(
@@ -174,18 +295,32 @@ def take_ready(
     """
     # Union local + global completion. Local catches in-flight transitions
     # the graph hasn't observed yet; global catches across recursive calls.
-    globally_done = _globally_completed_task_ids(project_dir)
+    globally_done = _globally_dependency_satisfied_task_ids(project_dir)
     completed_all = set(completed_task_ids) | globally_done
+    non_runnable = (
+        set(completed_task_ids)
+        | globally_done
+        | _globally_non_runnable_task_ids(project_dir)
+        | _globally_dependency_blocked_task_ids(project_dir, completed_all)
+    )
 
     pending = read_pending(project_dir)
+    try:
+        from otto.queue.task_graph import read_graph
+
+        graph_tasks = read_graph(project_dir).get("tasks") or {}
+        if not isinstance(graph_tasks, dict):
+            graph_tasks = {}
+    except Exception:  # noqa: BLE001 — best-effort
+        graph_tasks = {}
     ready: list[dict[str, Any]] = []
     for entry in pending:
         tid = entry.get("task_id")
-        if not tid or tid in completed_all or tid in in_flight_task_ids:
+        if not tid or tid in non_runnable or tid in in_flight_task_ids:
             continue
         if entry.get("review_state") not in ("approved", None):
             continue
         deps = entry.get("depends_on") or []
         if all(d in completed_all for d in deps):
-            ready.append(entry)
+            ready.append(_reconcile_pending_entry_with_graph(entry, graph_tasks))
     return ready

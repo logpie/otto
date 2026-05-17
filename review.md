@@ -5,6 +5,80 @@ implementation of `plan-parallel.md`.
 
 ---
 
+## Leaf Runtime Invariant Poisoning Fix — Implementation Gate (2026-05-15)
+
+Scope reviewed:
+- `otto/lead.py` prompt runtime block/sanitizer and verdict Write-tool rescue.
+- `tests/test_v5_leaf_runtime_invariants.py`.
+- Current `research.md` / `plan.md` entries.
+
+Local `codex-gate` checklist result: APPROVED. External Codex MCP gate remains
+unavailable in this session; no peer review tool was invoked.
+
+Diff review findings:
+- Adjusted sanitizer to apply only to child/integration prompts so root
+  user-authored intents are not unexpectedly altered.
+- No blocking findings after the adjustment.
+
+Validation:
+- Pre-fix check: reversed only the `otto/lead.py` patch and ran
+  `uv run --extra dev python -m pytest tests/test_v5_leaf_runtime_invariants.py -v`
+  — both tests failed against the old behavior, then passed after reapplying.
+- `uv run --extra dev python -m pytest tests/test_v5_leaf_runtime_invariants.py -v`
+  — 2 passed.
+- `uv run --extra dev python -m pytest tests/test_v5_verdict_recovery.py tests/test_v5_integration_worktree.py -q`
+  — 18 passed.
+- `uv run --extra dev python -m pytest tests/smoke -v` — 12 passed.
+- `uv run ruff check otto/lead.py tests/test_v5_leaf_runtime_invariants.py`
+  — passed.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error otto/lead.py tests/test_v5_leaf_runtime_invariants.py`
+  — 0 errors.
+- Strict `basedpyright` without `--level error` still exits nonzero on the
+  existing warning profile in `otto/lead.py` (0 errors, 144 warnings).
+
+---
+
+## Field-Test Forced Tiers — Implementation Gate (2026-05-15)
+
+Scope reviewed:
+- Scenario tier metadata and expected-shape declarations under
+  `bench/field-tests/`.
+- `scripts/run_field_tests.py` tier validation/reporting.
+- `otto/lead.py` tier prompt semantics.
+- `otto/v5_runner.py` root inline commit finalization.
+- Regression tests for field-test reporting, tier prompt text, and root inline
+  commit behavior.
+
+Local `codex-gate` checklist result: APPROVED. External Codex MCP gate remains
+unavailable in this session; no peer review tool was invoked.
+
+Diff review findings:
+- No blocking findings. Root inline uses `commit_worktree()` instead of the
+  stricter integration allowlist because greenfield inline products may create
+  legitimate top-level files such as `csv_to_json.py`.
+
+Validation:
+- `uv run --extra dev pytest tests/test_run_field_tests.py tests/test_v5_inline_commit.py tests/test_v5_integration_worktree.py -q` — 17 passed.
+- `uv run ruff check scripts/run_field_tests.py tests/test_run_field_tests.py tests/test_v5_inline_commit.py tests/test_v5_integration_worktree.py otto/lead.py otto/v5_runner.py` — passed.
+- `uv run --extra dev pytest tests/smoke/ -q` — 12 passed.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/run_field_tests.py --dry-run --report-path /tmp/otto-field-test-tier-dry-run.md` — passed and wrote tiered dry-run report.
+
+---
+
+## v6 Dispatch 3 — Gate Availability (2026-05-14)
+
+The local `codex-gate` skill was present, but the `mcp__codex__codex` tool was
+not available in this session. Plan Gate and Implementation Gate could not be
+invoked through MCP. Local validation was used instead:
+
+- `uv run --extra dev pytest tests/test_v5_context_slicer.py tests/test_v5_ia_contract.py tests/test_v5_capability_inventory.py tests/test_spec_compile_flat_structured.py tests/test_v5_record_preservation.py -q` — 68 passed
+- `uv run --extra dev pytest tests/ -q -k "v5 or spec_compile or charter" --ignore=tests/integration` — 354 passed, 2261 deselected
+- `uv run ruff check otto scripts tests` — passed
+
+No review findings were produced because the MCP gate was unavailable.
+
+---
+
 ## Phase 1 — Implementation Gate (Codex, 2026-04-19)
 
 ### Round 1 (read-only review of initial Phase 1 implementation)
@@ -518,3 +592,776 @@ What this unblocks:
 
 Pending (NOT blocking A6 closure):
 - A6.6 (file preserve markers, e.g. `.otto/preserve` file pattern) — deferred until needed by a real user; mechanism options sketched in progress.md.
+
+---
+
+## Implementation Gate — 2026-05-14 — Pre-v6c hardening
+
+Codex MCP gate status: skipped because the `mcp__codex__codex` tool required
+by `/codex-gate` is not available in this session. Local deterministic review
+and verification were used instead.
+
+Findings from the new hardening tests:
+- [IMPORTANT] Lead verdict rescue missed Codex/OpenAI-style terminal `result`
+  records — fixed in `otto/lead.py`.
+- [IMPORTANT] Nested schedulers could re-dispatch a `pending_children`
+  decomposition task after releasing the global lease — fixed in
+  `otto/queue/subtask.py`.
+
+Verification:
+- New hardening tests: 8 passed.
+- Requested focused suite: 412 passed, 2229 deselected.
+- Ruff on touched files: passed.
+- Py compile on touched Python files: passed.
+
+---
+
+## Implementation Gate — 2026-05-14 — v6.6 consolidation
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, diff review, ruff, and
+the requested smoke matrix were used instead.
+
+Findings during implementation review:
+- [IMPORTANT] Initial artifact edit overwrote the existing tracked
+  `research.md`; restored it from HEAD and moved this pass's notes to
+  `research-v6.6-consolidation.md`.
+- [IMPORTANT] Separate smoke-preflight repair consumed the failure before the
+  integration prompt could see it; changed integration smoke preflight to
+  observe/inject and left repair-loop dispatch for branch hygiene.
+- [NOTE] Git commits could not be created because the sandbox cannot write the
+  parent git admin dir for this worktree.
+
+Verification:
+- Six post-change runs of `uv run --extra dev pytest tests/smoke/ -q` passed.
+- Six post-change runs of
+  `uv run --extra dev pytest tests/ -q -k "v5" --ignore=tests/integration`
+  passed.
+- Final matrix: smoke 14 passed; v5 suite 302 passed, 2353 deselected.
+- Ruff on touched files passed.
+
+---
+
+## Implementation Gate — 2026-05-15 — field-test rig
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, diff review, focused
+tests, ruff, py_compile, and dry-run report generation were used instead.
+
+Findings during implementation review:
+- [IMPORTANT] `bench/` was ignored globally, so the new scenario files would
+  have been invisible to git. Added a narrow `.gitignore` exception for
+  `bench/field-tests/**` while keeping `bench/field-tests/runs/*` ignored.
+- [IMPORTANT] Boot-smoke cleanup now stores the process group id immediately
+  after launching `start.sh`, so cleanup can still kill child processes even if
+  the shell exits quickly.
+- [NOTE] No live Otto run was launched. Only dry-run report generation was
+  exercised.
+
+Verification:
+- `uv run pytest -q tests/test_run_field_tests.py` passed: 4 tests.
+- `uv run ruff check scripts/run_field_tests.py tests/test_run_field_tests.py`
+  passed.
+- `uv run python -m py_compile scripts/run_field_tests.py tests/test_run_field_tests.py`
+  passed.
+- `uv run python scripts/run_field_tests.py --dry-run --report-path /tmp/otto-field-test-dry-run.md`
+  passed and wrote the sample matrix without launching Otto.
+- `uv run python scripts/run_field_tests.py --dry-run --scenario 03-todo-fullstack --parallel 2 --report-path /tmp/otto-field-test-one-dry-run.md`
+  passed and verified scenario selection.
+- `git diff --check` passed.
+
+---
+
+## Implementation Gate — 2026-05-15 — Round 6 nested integration worktree binding
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, diff inspection,
+red/green regression proof, requested non-regression suites, ruff,
+basedpyright, and `git diff --check` were used instead.
+
+Findings during implementation review:
+- [HIGH] Confirmed root cause in `otto/v5_branching.py`: the merge primitive
+  checked out the target integration branch in caller `project_dir`, even when
+  that branch was already legally checked out by a dedicated integration
+  worktree. Git rejects that with "already used by worktree".
+- [HIGH] Fixed by resolving the target branch owner through
+  `git worktree list --porcelain` and running the merge in that owner
+  worktree. This applies to child-build to parent-integration merges and
+  subtree-integration to grandparent-integration merges because both use
+  `merge_branch_into()`.
+- [MEDIUM] Added a per-target branch lock under the git common dir so two
+  completions cannot mutate the same integration branch at the same time.
+- [MEDIUM] Preserved repair observability by mirroring conflict packets back
+  to `project_dir` when the merge ran in a separate target worktree.
+- [NOTE] The e469 all-pass subtree was not this Git checkout failure. Its
+  branch reached `main`; it stayed `partial` due runner-check failures. The
+  bc66 serving child was blocked by dependencies and was not a separate
+  orphaning mechanism.
+
+Verification:
+- Red proof before production patch: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_integration_worktree.py::test_child_merge_uses_existing_integration_worktree_owner -q`
+  failed as expected with `checkout i2p/integ/v5-parent failed: fatal:
+  'i2p/integ/v5-parent' is already used by worktree .../.worktrees/integ-v5-parent`.
+- Focused regression after implementation: same command passed, 1 passed.
+- Existing merge/worktree suites: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_integration_worktree.py tests/test_v5_merge_noise.py tests/test_v5_phase5.py -q`
+  passed: 37 passed.
+- Required hardening/leaf/smoke/guardrail batch plus the new regression:
+  `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p0_hardening.py tests/test_v5_p1_hardening.py tests/test_v5_p2_hardening.py tests/test_v5_pass4_hardening.py tests/test_v5_leaf_runtime_invariants.py tests/test_brittleness_guardrail.py tests/smoke tests/test_v5_integration_worktree.py::test_child_merge_uses_existing_integration_worktree_owner -q`
+  passed after replacing an implicit `or project_dir` fallback flagged by the
+  guardrail: 113 passed.
+- Required smoke tier: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke`
+  passed: 306 passed, 2471 deselected.
+- Required merge queue: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_merge_queue.py -q`
+  passed: 46 passed.
+- Touched-file ruff passed.
+- Touched-file basedpyright passed: 0 errors, 0 warnings, 0 notes.
+- `git diff --check` passed.
+
+---
+
+## Implementation Gate — 2026-05-15 — modular decomposition repair
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, diff review, focused
+tests, ruff, py_compile, and live field-test launch attempts were used
+instead.
+
+Findings during implementation review:
+- [IMPORTANT] `start.sh` clean-deploy failures were blocking before the
+  integration repair loop could act. Root and subtree integration smoke
+  preflights now run through the repair controller and commit successful
+  repair edits on the integration branch.
+- [IMPORTANT] Direct child branch propagation had no final invariant. The
+  scheduler now verifies that every pass/partial/unverified child branch tip
+  reaches the parent target branch before it declares the parent ready.
+- [IMPORTANT] Port cleanup killed every PID on declared ports. It now kills
+  only Otto-owned or field-test-owned listeners and leaves unrelated processes
+  alone.
+- [NOTE] Live validation could not reach product execution in this sandbox:
+  the requested runs root was not writable, and writable reruns for
+  `04-mini-crm` and `05-blog-generator` both stopped during spec compilation
+  because the Claude provider was not logged in.
+
+Verification:
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run ruff check otto/v5_runner.py otto/v5_preflight_repair.py otto/v5_clean_verify.py tests/test_v5_integration_worktree.py tests/test_v5_port_cleanup.py tests/test_v5_decomposed_child_lands_in_main.py` passed.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python -m py_compile otto/v5_runner.py otto/v5_preflight_repair.py otto/v5_clean_verify.py tests/test_v5_integration_worktree.py tests/test_v5_port_cleanup.py tests/test_v5_decomposed_child_lands_in_main.py` passed.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev pytest -q tests/test_v5_port_cleanup.py tests/smoke/test_preflight_repair_fixtures.py tests/test_v5_integration_worktree.py::test_integration_smoke_failure_runs_repair_on_resolved_worktree tests/test_v5_decomposed_child_lands_in_main.py::test_all_passing_direct_child_branch_tips_reach_main_even_noop_child` passed: 18 tests.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev pytest -q tests/test_v5_integration_worktree.py tests/test_v5_port_cleanup.py tests/test_v5_decomposed_child_lands_in_main.py tests/smoke/test_preflight_repair_fixtures.py tests/test_v5_preflight.py tests/smoke/test_nested_subtree_propagation.py` passed: 46 tests.
+- `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke` passed: 305 passed, 2370 deselected.
+- `git diff --check` passed.
+
+---
+
+## Implementation Gate — 2026-05-15 — v5 P0 merge/verdict integrity
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, focused diff review,
+red/green regression proof, smoke gates, ruff, and basedpyright were used
+instead.
+
+Findings during implementation review:
+- [IMPORTANT] Raw `partial` and `unverified` child verdicts are now blocked
+  before upward merge and routed through one verify/repair attempt plus the
+  existing clean-deploy smoke oracle. Only `pass` or a recorded
+  `review_state="reviewed_partial"` may merge upward.
+- [IMPORTANT] Vague success payloads without journey/evidence proof now
+  canonicalize to `unverified`; runner verification-plan crashes also
+  invalidate self-reported `pass`.
+- [IMPORTANT] Compile-spec JSON failures now fail loudly instead of writing an
+  empty fallback contract.
+- [IMPORTANT] Unknown clean-verify/preflight failure kinds now block for
+  repair with raw failure context instead of defaulting to warning.
+- [IMPORTANT] Scaffold clean-copy failures now block for repair; only the
+  explicitly named "no package manager/runtime to compile" skips remain
+  warnings.
+- [NOTE] `reviewed_partial` is intentionally minimal: a durable task-graph
+  review state plus metadata, leaving the terminal verdict as `partial`.
+
+Verification:
+- Red proof used a reversible production patch rollback because git stash
+  could not write the worktree index from this sandbox. With the production
+  P0 patch reversed, `tests/test_v5_p0_hardening.py` failed: 15 failed,
+  1 passed.
+- Green focused regression: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p0_hardening.py tests/test_merge_queue.py::test_run_merge_queue_blocks_degraded_slice_with_failed_behavior_check -q`
+  passed: 17 passed.
+- Required invariant/smoke suite: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_leaf_runtime_invariants.py tests/smoke -q`
+  passed: 61 passed.
+- Required smoke tier: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke`
+  passed: 306 passed, 2434 deselected.
+- Touched-file lint: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run ruff check ...`
+  passed.
+- Touched-file type check: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error ...`
+  passed: 0 errors.
+
+---
+
+## Implementation Gate — 2026-05-15 — v5 P1 agentic-native hardening
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, focused diff review,
+red/green regression proof, smoke gates, ruff, and basedpyright were used
+instead.
+
+Findings during implementation review:
+- [IMPORTANT] Required runtime/build failures now stay in the repair lane:
+  missing required runtimes block instead of warn-skip, scaffold timeouts get
+  one larger-budget retry, and remaining failures route through the existing
+  preflight repair oracle.
+- [IMPORTANT] Deterministic preflight auto-fixes now have honest no-op
+  semantics. Empty filename/chmod repairs fall through to the agent instead of
+  logging repaired without a state change.
+- [IMPORTANT] Startup port cleanup now reports killed/freed/still-bound ports.
+  Still-bound ports after cleanup block startup unless agent repair plus the
+  cleanup oracle clears them.
+- [IMPORTANT] Integration worktree setup must produce the intended worktree and
+  branch. Setup failures now trigger repair and block if unresolved, instead of
+  running integration in `project_dir`.
+- [IMPORTANT] Non-driver merge conflicts now write a conflict packet with both
+  sides and dispatch a focused repair agent, then require a clean merge plus
+  smoke oracle before accepting the result.
+- [IMPORTANT] Audit repair scheduling now guarantees an initial repair attempt
+  for every failing group before caps can narrow work, reserves re-audit budget
+  for that first fix, and raises on spec/verdict group mismatches.
+- [IMPORTANT] Ambiguous context slicing now dispatches a focused spec/scope
+  resolver agent from the runner and records explicit last-resort full-context
+  fallback only when that resolution path is unavailable or unresolved.
+- [IMPORTANT] Out-of-scope leaf writes are now blocking scope failures that
+  require amendment/revert before merge.
+- [NOTE] Duplicate sweep found `setup_child_worktree(...); falling back to
+  project_dir` in `otto/v5_branching.py`. It is outside this P1 item list
+  (the requested fallback fix was integration worktree setup in
+  `otto/v5_runner.py`), so it was left unchanged for a separate pass.
+
+Verification:
+- Red proof used a reversible production-only patch rollback. With the P1
+  production patch reversed, `uv run --extra dev python -m pytest tests/test_v5_p1_hardening.py -q`
+  failed: 15 failed.
+- Green focused regression: `uv run --extra dev python -m pytest tests/test_v5_p1_hardening.py -q`
+  passed: 15 passed.
+- Required invariant/smoke suite: `uv run --extra dev python -m pytest tests/test_v5_p0_hardening.py tests/test_v5_leaf_runtime_invariants.py tests/smoke -q`
+  passed: 77 passed.
+- Required smoke tier: `uv run python scripts/test_tiers.py smoke`
+  passed: 306 passed, 2449 deselected.
+- Merge queue non-regression: `uv run --extra dev python -m pytest tests/test_merge_queue.py -q`
+  passed: 46 passed.
+- Touched-file lint: `uv run ruff check otto/v5_preflight.py otto/v5_preflight_repair.py otto/v5_clean_verify.py otto/v5_runner.py otto/v5_branching.py otto/audit_loop.py otto/v5_context_slicer.py otto/build.py tests/test_v5_p1_hardening.py tests/test_audit_loop_repair.py tests/test_build.py`
+  passed.
+- Touched-file type check: `uv run --extra dev basedpyright --level error otto/v5_preflight.py otto/v5_preflight_repair.py otto/v5_clean_verify.py otto/v5_runner.py otto/v5_branching.py otto/audit_loop.py otto/v5_context_slicer.py otto/build.py tests/test_v5_p1_hardening.py tests/test_audit_loop_repair.py tests/test_build.py`
+  passed: 0 errors, 0 warnings, 0 notes.
+- `git diff --check` passed.
+
+---
+
+## Implementation Gate — 2026-05-15 — v5 P2 agentic-native hardening
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, focused diff review,
+red/green regression proof, smoke gates, ruff, basedpyright, and diff-check
+were used instead.
+
+Findings during implementation review:
+- [IMPORTANT] Detector-found non-passing verdicts now default to agent repair.
+  Deterministic no-repair is limited to typed provider/auth/quota codes with
+  explicit reasons.
+- [IMPORTANT] Browser command classification is centralized behind a typed
+  adapter with exact executable/module/script-table mappings. Unknown commands
+  fall through as real checks instead of being silently skipped.
+- [IMPORTANT] Flat spec compile now prefers typed structured-output payloads
+  from the provider result/breakdown, with only the exact Claude
+  `StructuredOutput` tool contract retained as provider-specific fallback.
+- [IMPORTANT] Webapp structured contract absence is a required verification
+  failure so compile/product repair can see it. Non-webapp legacy specs remain
+  skipped.
+- [IMPORTANT] Scaffold build failures now emit `partial` instead of
+  `unverified`, preserving the negative evidence for repair routing.
+- [NOTE] A residual string scan remains in the agent-browser server boot
+  preflight for script contents. It is outside the central command-family
+  router changed in this pass and should be revisited in a broader heuristic
+  audit.
+
+Verification:
+- Red proof before production patch: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p2_hardening.py -q`
+  failed as expected: 9 failed, 1 passed.
+- Focused P2 regression after implementation: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p2_hardening.py -q`
+  passed: 10 passed.
+- Existing touched regressions: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_repair_gates.py tests/test_browser_testing.py tests/test_spec_compile_flat_structured.py tests/test_v5_verification_plan.py tests/test_v5_certify_scaffold.py tests/test_audit_loop_repair.py -q`
+  passed: 75 passed.
+- Required P0/P1/leaf/smoke plus P2: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p0_hardening.py tests/test_v5_p1_hardening.py tests/test_v5_leaf_runtime_invariants.py tests/smoke tests/test_v5_p2_hardening.py -q`
+  passed: 102 passed.
+- Required merge/audit/build non-regression: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_merge_queue.py tests/test_audit_loop_repair.py tests/test_build.py -q`
+  passed: 137 passed.
+- Required smoke tier: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke`
+  passed: 306 passed, 2460 deselected.
+- Touched-file lint: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run ruff check ...`
+  passed.
+- Touched-file type check: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error ...`
+  passed: 0 errors, 0 warnings, 0 notes.
+
+---
+
+## Implementation Gate — 2026-05-15 — Overnight iTracker correctness bugs
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, research/plan notes,
+red/green regression proof, requested regression batch, smoke tier, ruff,
+basedpyright, and direct diff review were used instead.
+
+Findings during implementation review:
+- [HIGH] The preflight repair cap was counting successful repairs as total
+  failure pressure. It now keeps the old repeated-fingerprint and per-kind
+  guards, treats repaired/changed/narrowed oracle output as progress, and adds
+  a separate absolute ceiling for pathological loops.
+- [HIGH] Deprecation detection was matching prose that merely mentioned
+  warnings. It now requires an emitted `DeprecationWarning:` line, ignores
+  zeroed/filtered success summaries, and filters third-party path origins such
+  as `site-packages`.
+- [HIGH] Runner downgrades were not written into `failure_reason`, leaving
+  partial summaries with an empty reason. Downgrades now update the session
+  result, summary reason, and mutable verify result consistently.
+- [HIGH] Step 0b reconciliation was branch-ancestry-only. Verification-blocked
+  children now carry durable `merge_blocked_origin=verification`, and
+  reconciliation refuses to convert those to `pass` without a real oracle
+  re-verification.
+- [NOTE] Unknown legacy `merge_blocked` children still reconcile by ancestry to
+  preserve the existing recovered-child behavior. New verification-blocked
+  paths are explicitly marked so they do not rely on ambiguous legacy state.
+
+Verification:
+- Red proof before production patch:
+  `uv run pytest -q tests/smoke/test_preflight_repair_fixtures.py::test_progressing_preflight_repairs_do_not_hit_old_total_cap tests/test_v5_verification_plan.py::test_deprecation_detection_filters_prose_dependencies_and_records_downgrade_reason tests/test_v5_step0b_recovery.py::test_reconcile_does_not_upgrade_verification_blocked_child_by_ancestry`
+  failed as expected: 3 failed.
+- Same focused command after implementation passed: 3 passed.
+- Required regression batch:
+  `uv run pytest -q tests/test_v5_p0_hardening.py tests/test_v5_p1_hardening.py tests/test_v5_p2_hardening.py tests/test_v5_pass4_hardening.py tests/test_v5_leaf_runtime_invariants.py tests/test_brittleness_guardrail.py tests/test_v5_integration_worktree.py tests/smoke tests/test_merge_queue.py tests/test_v5_verification_plan.py tests/test_v5_step0b_recovery.py`
+  passed: 210 passed.
+- Required smoke tier:
+  `uv run python scripts/test_tiers.py smoke` passed:
+  307 passed, 2473 deselected.
+- Touched-file lint:
+  `uv run ruff check otto/v5_preflight_repair.py otto/v5_verification_plan.py otto/lead.py otto/v5_runner.py otto/queue/task_graph.py tests/smoke/test_preflight_repair_fixtures.py tests/test_v5_verification_plan.py tests/test_v5_step0b_recovery.py`
+  passed.
+- Touched-file type check:
+  `uv run basedpyright --level error otto/v5_preflight_repair.py otto/v5_verification_plan.py otto/lead.py otto/v5_runner.py otto/queue/task_graph.py tests/smoke/test_preflight_repair_fixtures.py tests/test_v5_verification_plan.py tests/test_v5_step0b_recovery.py`
+  passed: 0 errors, 0 warnings, 0 notes.
+
+---
+
+## Implementation Gate — 2026-05-15 — Pass 4 brittleness containment
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local codex-gate checklist, focused diff review,
+red/green regression proof, smoke gates, ruff, basedpyright, and diff-check
+were used instead.
+
+Findings during implementation review:
+- [HIGH] Redispatch terminality and dependency satisfaction were conflated.
+  `catastrophic`/`merge_blocked`/`unverified`/raw `partial` now stay
+  non-runnable for anti-thrash, but only `pass` and reviewed partials unlock
+  dependents.
+- [HIGH] Synthesized audit walkthroughs could report success with no runnable
+  webapp shape. Missing shape now fails the walkthrough oracle, and configured
+  walkthrough failure caps an otherwise-passing judge verdict to `partial`.
+- [HIGH] Malformed per-check evidence remains non-slice-blocking per v2.1, but
+  is now machine-marked as malformed, diagnostic-only, and not usable proof.
+  Audit packets and prompts consume that typed signal.
+- [HIGH] Child worktree setup no longer falls back to the project root or
+  dispatches a Lead without a valid parent integration branch. Setup failure
+  or missing branch identity records `merge_blocked` before agent dispatch.
+- [MEDIUM] Several silent JSON/YAML/config fallback readers now log malformed
+  or unreadable input before returning default state.
+- [MEDIUM] The standing guardrail is AST-based and green. It detects success on
+  error/malformed/fallback paths, swallowed state parse failures, substring
+  error classifiers, non-pass dependency-satisfaction sets, and branch/worktree
+  identity default fallbacks. Allowlist entries require concrete reasons.
+- [NOTE] Two legacy root/default-branch helpers remain explicitly allowlisted:
+  `otto/cli_run.py:_pipeline_base_branch` and
+  `otto/mission_control/service.py:_merge_target`. They are not child
+  worktree/dependency identity paths, but remain visible medium debt.
+
+Verification:
+- Red proof before production patch: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_pass4_hardening.py -q`
+  failed as expected: 7 failed.
+- Focused Pass 4 plus guardrail: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_pass4_hardening.py tests/test_brittleness_guardrail.py -q`
+  passed: 10 passed.
+- Required smoke tier: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run python scripts/test_tiers.py smoke`
+  passed: 306 passed, 2470 deselected.
+- Required hardening/leaf/smoke/guardrail batch: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_p0_hardening.py tests/test_v5_p1_hardening.py tests/test_v5_p2_hardening.py tests/test_v5_leaf_runtime_invariants.py tests/smoke tests/test_brittleness_guardrail.py -q`
+  passed: 104 passed.
+- Required merge/audit/build/repair plus Pass 4/config/audit regressions:
+  `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev python -m pytest tests/test_v5_pass4_hardening.py tests/test_merge_queue.py tests/test_audit_loop_repair.py tests/test_build.py tests/test_repair_gates.py tests/test_audit.py tests/test_config.py -q`
+  passed: 333 passed.
+- Extra touched check suite: adding `tests/test_checks.py` produced four
+  environment-only failures because this sandbox rejects local socket bind on
+  `127.0.0.1:0` with `PermissionError: [Errno 1] Operation not permitted`;
+  the same run had 400 passing tests before those socket probe failures.
+- Touched-file lint: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run ruff check ...`
+  passed.
+- Touched-file type check: `UV_CACHE_DIR=/private/tmp/otto-uv-cache uv run --extra dev basedpyright --level error ...`
+  passed: 0 errors, 0 warnings, 0 notes.
+- `git diff --check` passed.
+
+## Implementation Gate — 2026-05-15 — agent-native repair protocol (4 protocol commits + fixes)
+
+### Round 1 — Codex (REVISE)
+- [CRITICAL] composite gate ran after commit_hook → post-commit bypass — fixed by Codex (ed70bc5cc): pre-commit gate on working tree + post-commit gate via pre_repair_head..HEAD
+- [CRITICAL] dict(os.environ) serialized into packet/result/CLI → secret leak — fixed by Codex: serialized-env allowlist; runtime exec keeps live env
+- [IMPORTANT] AgentCallError escaped run_oracle_repair_agent — fixed: caught → structured merge_blocked escalation, session/cost preserved
+- [IMPORTANT] budgets reset on packet replay; cost/idle/closeout unenforced — fixed: budget reconciled from events.jsonl under lock; closeout implemented
+- [IMPORTANT] agent-run oracle pass ignored if controller oracle budget exhausted — fixed: packet reloaded after each agent turn, freshest oracle evaluated before escalation
+- [REFACTOR] RepairPacket construction duplicated x4 — fixed: shared _build_repair_packet (env-allowlist + baseline + budget-replay live once)
+
+### Round 2 — Codex re-reviewed fixes (REVISE — both CRITICALs confirmed fixed; 2 new IMPORTANT)
+- [IMPORTANT] CRITICAL-1 fix introduced a glob-ownership regression (literal-only _path_allowed false-blocks owned globs like src/features/foo/**) — fixed by Codex (8169f042e): extracted shared otto/path_ownership.py; build.py delegates (test_build 73 passed, no drift); _path_allowed gains globs, keeps literal-prefix
+- [IMPORTANT] closeout still dispatched a provider call after hard cost/wall/idle exhaustion — fixed: _CLOSEOUT_AGENT_REASONS = {budget_exhausted, oracle_budget_exhausted} only; cost/wall/idle/diff → packet-derived escalation, no agent turn
+
+### Round 3 — Codex re-reviewed round-2 fixes
+- APPROVED. No new CRITICAL/IMPORTANT. Shared matcher preserves build._matches_any semantics (no import cycle, no drift); closeout reason-gate complete; both CRITICALs remain fixed.
+
+Plan Gate: 4 rounds (11+7+3 findings) → APPROVED. Implementation Gate: 3 rounds (5+2 findings) → APPROVED.
+
+## Implementation Gate — journey-verification (Units 1-3) — 4 rounds → APPROVED
+
+### Round 1 — Codex (REVISE: 2 CRITICAL + 5 IMPORTANT + REFACTOR)
+- [CRITICAL] committed range internally broken (Unit-3 dropped legacy_results, v5_clean_verify still passed it — incomplete git-add) — fixed 5fb0fd7f5 (+ committed load-bearing spec_schemas/service.json Claude caught)
+- [CRITICAL] generated UI pass-models unexecutable (compile "avoid selectors" vs executor requires selectors) — fixed: accessible-locator lowering
+- [IMPORTANT] contract normalization failed open / non-webapp not enforced / leaf verdict regressed webapp / api informational passes / ui missed effects+untracked-dirt — all fixed
+- [REFACTOR] api if-chain → PROBE_EXECUTORS table + shared journey_executor_common.py
+### Round 2 — Codex (REVISE: 3 IMPORTANT) — fixed a42eaf0e7
+- api strength validator≠executor (header/json-path counted-not-enforced) → implemented + COUNTED==ENFORCED test
+- malformed api pass-model crashed → validate + per-journey guard → unverified
+- accessible UI lowering text false-pass → scoped pre/post DELTA + exact-default
+### Round 3 — Codex (REVISE: 1 IMPORTANT) — fixed 9240cf828
+- delta guard missed role/name/label-only observables → _dom_observable_state fingerprints all forms + require_delta all forms + locator-set agreement test
+### Round 4 — Codex
+- APPROVED. No new CRITICAL/IMPORTANT. Action-effect delta covers all validator-accepted locator forms; agreement test meaningful; final-persistence presence preserved; range clean.
+
+Plan Gate: 4 rounds (7+5+1) → APPROVED. Implementation Gate: 4 rounds (8+3+1) → APPROVED.
+
+---
+
+## Concurrency+Recursion Critical-Seam Fixes — Implementation Gate (2026-05-16)
+
+Reviewed: 6796a9058 (spec-state event_id flock + moving-target union repair),
+hardened across rounds. Repros banked in 401e78f6c
+(tests/test_concurrency_recursion_seam_repros.py): #1 depth-3 dual-subtree
+propagation GREEN (regression); #2 5-way concurrent merge RED→fixed; #3
+spec-state event_id race RED→fixed.
+
+### Round 1 — Codex
+- [CRITICAL] Conflict-path stale retry could terminal merge_blocked with
+  structured_reason=None (fell into generic block) — fixed by Codex (f92b55ff9):
+  unified record_terminal() always records non-None structured reason.
+- [CRITICAL] Three stale-target re-entry calls unguarded → escape →
+  catastrophic — fixed by Codex: _repair_child_stale_target_gate_once
+  builds feedback first, try/excepts the bounded re-entry.
+- [IMPORTANT] Stale-target success after conflict repair skipped merged-target
+  smoke oracle — fixed by Codex (run_smoke_preflight in shared helper).
+- [IMPORTANT] Follow-up union failure recorded stale_feedback as top-level,
+  burying integration_union_incomplete — fixed by Codex (followup_feedback
+  top-level, stale nested).
+- [REFACTOR] Three diverging near-duplicate stale-target blocks — collapsed
+  into one shared _repair_stale_target_and_retry_merge helper.
+
+### Round 2 — Codex re-reviewed fixes
+- [IMPORTANT] Union recheck (_record_and_check_integration_union) still
+  unguarded in helper + site-2 → escape → unstructured — fixed by Codex
+  (3779aca79): wrapped → integration_union_guard_error structured terminal.
+- [NOTE→fixed] Empty pre_merge_ref returned blind success — fixed: structured
+  *_pre_merge_ref_unresolved terminal before any downstream union check.
+
+### Round 3 — Codex re-reviewed fixes
+- [IMPORTANT] Original inline conflict-repair smoke call still unguarded
+  (escape / generic unstructured block) — fixed by Codex (9d82e48f8):
+  _child_merge_conflict_smoke_failed_feedback + unified recorder + return.
+- [IMPORTANT] Terminal recorder _record_structured_merge_failed could itself
+  throw via task-graph IO — fixed by Codex: now no-throw (staged in-memory →
+  best-effort durable with recording_error → best-effort emit); unified as
+  the single terminal recorder.
+
+### Round 4 — Codex re-reviewed fixes
+- [IMPORTANT] REGRESSION from round 3: _repair_child_upward_merge_gate_once
+  recorded terminally itself AND callers recorded → duplicate
+  merge_blocked + double merge_failed per child — fixed by Codex (b7ed0366a):
+  caller-owned terminal ownership; helper report-only again.
+- [IMPORTANT] Deeper repair-helper awaits after commit_worktree still
+  unguarded → escape — fixed by Codex: every direct await try/excepted via
+  _child_repair_helper_crashed_feedback + unified recorder + return; final
+  child_merge_path_incomplete guard before sole _emit "merged".
+
+### Round 5 — Codex final confirmation
+- APPROVED. All 5 invariant claims confirmed (exactly-one terminal; no
+  post-commit escape; "merged" unreachable after terminal; no-throw
+  recorder; bounded/single-channel unchanged). NOTE: structured-feedback
+  builder count is a maintainability follow-up, non-blocking.
+
+Independent verification (Claude): tests/test_concurrency_recursion_seam_repros
++ test_critical_seam_repros + test_shared_route_registration_repro 9/9;
+spec_state+v5_runner+merge_child 20/20; ruff clean.
+
+## 2026-05-16T08:22:38Z - Spec Compile Timeout Re-entry Review
+
+Implementation gate status: `/codex-gate` / Codex MCP is unavailable in this
+session's tool list, so no external gate was invoked.
+
+### Review findings
+- No issue found in timeout classification: `_is_compile_agent_timeout()` only
+  matches `AgentCallError` reasons with Otto's exact `Timed out after Ns`
+  wording, so max-turn/budget/provider errors keep propagating.
+- No issue found in retry bounds: timeout retries use three total compile-agent
+  attempts and the existing transient-provider retry remains one retry within
+  the same bounded attempt counter.
+- Budget wiring review found one issue before final verification: CLI and
+  runner compile call sites were not passing `RunBudget` into `compile_spec()`.
+  Fixed by threading `RunBudget.start_from(config)` through `_run_compile_phase`,
+  `_brownfield_compile_locked`, and `runner.run_pipeline()` compile fallback.
+- No issue found in terminal recording: compile `SpecValidationError`s now emit
+  `run.finished` with `verdict=blocked`; structured timeout exhaustion carries
+  `structured_reason.kind=spec_compile_timeout_exhausted`.
+
+### Verification
+- RED run before production fix: `tests/test_spec_compile_timeout_reentry.py`
+  failed 3/4, proving raw timeout propagation and missing terminal recording.
+- GREEN: `uv run --extra dev pytest tests/test_spec_compile_timeout_reentry.py -q -p no:cacheprovider`
+  passed 4/4.
+- GREEN: `uv run --extra dev pytest tests/ -q -k "spec_compile or compile_spec" -p no:cacheprovider`
+  passed 98/98 selected.
+- GREEN: `uv run ruff check otto/`.
+- Additional focused config check passed: `uv run --extra dev pytest tests/test_config.py -q -k spec_timeout -p no:cacheprovider`.
+
+Plan Gate: n/a (fix dispatched from RED repro evidence, not a written plan).
+Implementation Gate: 4 review rounds + 1 confirmation (8 findings) → APPROVED.
+Commits: 401e78f6c (repros) · 6796a9058 → f92b55ff9 → 3779aca79 → 9d82e48f8
+→ b7ed0366a (fix series).
+
+---
+
+## Spec-Compile Timeout Robustness — Implementation Gate (2026-05-16)
+
+Reviewed: 798b0a0d4 → a75677088 (bounded compile-timeout re-entry +
+structured terminal; default 600→1200). Surfaced by the iTracker capstone
+crashing catastrophic at the 600s spec-compile cap.
+
+### Round 1 — Codex
+- [CRITICAL] compile created a fresh/discarded RunBudget → not bounded by
+  run budget — fixed by Codex (a75677088): single invocation RunBudget
+  threaded through compile + raise_compile_budget_exhausted_if_needed.
+- [IMPORTANT] for_call() could yield 0/neg → degenerate 0s attempt —
+  fixed: budget.exhausted()/<=0 guard before dispatch → structured terminal.
+- [IMPORTANT] runner.py run_pipeline(spec=None) still escaped uncaught —
+  fixed: catches SpecValidationError → shared record_compile_failure_terminal
+  → blocked RunResult.
+- [IMPORTANT] timeout detection too broad (substring search) — fixed:
+  anchored fullmatch on exc.reason vs the exact agent.py outer-timeout shape.
+- [NOTE→addressed] test gaps — repro expanded 4→10.
+- [REJECTED/REVERTED by Claude] Codex added an out-of-scope
+  _repair_verdicts_for_audit "product-wide PASSED backfill" to green a
+  broadened test selection; it masked a PRE-EXISTING unrelated failure
+  (test_runner.py::test_layer2_repairs_multiple_actionable_features_by_default,
+  red at fd476df20, before this arc). Reverted in full; no verdict-semantics
+  change shipped. Pre-existing test tracked separately, intentionally left red.
+
+### Round 2 — Codex re-reviewed fixes
+- APPROVED. No CRITICAL/IMPORTANT.
+- [NOTE] downstream build/merge/audit still use BuildBudget not RunBudget
+  (accepted "minimum approach": compile just can't continue with 0 time).
+- [NOTE] SpecCompileBudgetExhaustedError records attempts=len(timeout_attempts),
+  undercounting a prior non-timeout attempt — structured-reason fidelity
+  only; control flow bounded/correct. Tracked follow-up.
+
+Implementation Gate: 1 review round + 1 confirmation → APPROVED.
+Commits: 798b0a0d4 → a75677088.
+
+### Separate finding (NOT this fix's scope) — capstone compile-convergence
+Live iTracker capstone (47-feature intent) crashed twice in spec-compile:
+600s (old default) then 1800s. Root: the compile AGENT thinking-loops —
+repeatedly emits "Let me write the spec JSON now" across elapsed 278s→773s
+→1288s without ever emitting the Write/structured-output. This timeout fix
+correctly converts that catastrophic crash into an honest bounded terminal
+but does NOT make the agent converge. Compile-agent convergence on very
+large intents is a separate open issue (prompt/agent design).
+
+---
+
+## Audit-Repair Over-Classification (#3) — Implementation Gate (2026-05-16)
+
+Reviewed: e551565a3 → 1415419f7. Root cause bisected to 146f2a889
+("agentic-native hardening pass 3 — over-classification"): removed
+audit_loop's blocked/no-evidence exclusion → repair_gate defaulted every
+non-passing verdict to REPAIR_NOW → no-evidence/"not evaluated" features
+perpetuated repair+audit rounds (test_layer2: 4 audits vs 2). User
+directive: kill the recurring classification class, not patch #4.
+
+### Round 1 — Codex
+- [CRITICAL] audit-timeout recovery flattened recovered `failed` →
+  evidence-less `blocked` → new evidence-driven gate returned NO_REPAIR
+  → genuine failure silently unrepaired (false-pass) — fixed by Codex
+  (1415419f7): shared typed contract; recovered failed/partial →
+  actionable; strength fields carried into Layer-2 payload.
+- [IMPORTANT] stale-verdict oscillation for evidence-backed failures
+  omitted by a PASSED re-audit — fixed: _fill_missing_attempted_oracle
+  _state makes omitted attempted ids count as no-progress (signature
+  only; no verdict synthesis) so the loop halts.
+- [NOTE] evidence signal was an ad-hoc allow-list (relocated taxonomy /
+  drift root) — fixed: new otto/repair_evidence.py single typed
+  RepairEvidence contract consumed by parse + recovery + runner payload
+  + gate.
+
+### Round 2 — Codex re-reviewed fixes
+- APPROVED. No CRITICAL/IMPORTANT.
+- [NOTE] _audit_output_format() producer schema still manually lists
+  only evidence_refs, not generated from the shared contract — "can't
+  desync" holds downstream of produced JSON only. Non-blocking; future
+  cleanup tracked.
+
+Production de-classified to evidence-driven (failed/partial = explicit
+signal; ambiguous needs actionable evidence); no verdict synthesis, no
+detail/test-string special-casing; oracle test_layer2_… byte-unchanged;
+2 regression tests added. Verified: oracle PASS; 194/194 focused;
+430/430 broad audit|repair|runner|audit_loop; ruff clean.
+
+Implementation Gate: 1 round + 1 confirmation → APPROVED.
+Commits: e551565a3 → 1415419f7. Triage trail: brownfield fixtures
+(stale Group.title, 0fa0a81bc) + this (146f2a889 regression). The 4
+tests/test_v5_*.py route-isolation dirty files remain pre-existing /
+out-of-scope (untouched, uncommitted).
+
+---
+
+## Ownership-first redesign S0 (runtime primitive) — Implementation Gate (2026-05-16)
+
+Plan: plan-ownership-decomposition.md (Plan Gate APPROVED, 4 rounds).
+S0 = task_role + foundation_contracts data-model/parse/persist/idempotency.
+
+### Round 1 — Codex (REVISE)
+- [CRITICAL] foundation→feature duplicate silently kept stale role —
+  fixed (sentinel) f9cd4cf96.
+- [CRITICAL] duplicate update changed task_graph not pending → stale
+  dispatch — fixed (_reconcile_pending_entry_with_graph, graph-wins at
+  take_ready).
+- [IMPORTANT] idempotency not atomic (double-create) — fixed
+  (_locked_append spans check+append+record).
+- [IMPORTANT] persist couldn't clear stale parent contracts on emptied
+  CHARTER — fixed (write [] on valid-empty).
+- [NOTE] scope confirmed clean (no S1 leak).
+
+### Round 2 — Codex (REVISE)
+- [CRITICAL] sentinel lost at MCP boundary (_coerce_task_role(None)→
+  "feature") → omitted-role duplicate still demoted foundation — fixed
+  b4b3202b5 (None survives end-to-end; clobber only on explicit role).
+- [IMPORTANT] unreadable/missing CHARTER wiped parent contracts (read
+  failure indistinguishable from valid-empty) — fixed
+  (foundation_contracts_charter_unreadable finding → persist no-op).
+- C2/I1 confirmed correct.
+
+### Round 3 — Codex — APPROVED
+- Omitted sentinel survives end-to-end; explicit clobbers; new child =
+  feature; duplicate-correction keyed on `role is not None` (real
+  signal, not value-sniff); unreadable-CHARTER no-clear while
+  genuine-removal clears; malformed-readable still re-enters. No new
+  issues.
+
+S0 Implementation Gate: 2 review rounds + 1 confirmation → APPROVED.
+Commits: b4cfa3afe (S0) → f9cd4cf96 (R1) → b4b3202b5 (R2). 16 S0 units
+GREEN; 5 scene repros still RED (S0 flips none — correct); ruff clean.
+4 test_v5_phase2 failures confirmed PRE-EXISTING (git-worktree
+test-harness rot, identical at 8dece7c93 before S0; one of the 4
+uncommitted route-isolation files; out of scope). Proceed to S1.
+
+---
+
+## Ownership-first redesign S1 (isolation gate + scheduler + write-invariant) — Impl Gate (2026-05-16)
+
+### Round 1 — Codex (REVISE)
+- [CRITICAL] scheduler allowed feature dispatch when contracts absent — fixed.
+- [CRITICAL] terminal-blocked foundation silently stranded features — fixed.
+- [CRITICAL] isolation gate missed the NESTED owned-path capstone shape
+  (foundation backend/, feature backend/routers/auth.py) — fixed; scene
+  #1 strengthened to nested shape (verified RED on old db5b8196c).
+- [IMPORTANT] _task_entry_allows_upward_merge ignored durable blocked — fixed.
+- [IMPORTANT] over-broad any-contract_amendment write allow — removed
+  (S2 reintroduces bound allow); integration-of-record deferred.
+- 8 commit hooks enumerated+gated; no S2-S5 leak — confirmed.
+
+### Round 2 — Codex (REVISE)
+- [CRITICAL] foundation passed-without-contracts dead-end (silent hold,
+  test masked via external injection) — fixed: re-enter architect
+  bounded → honest terminal; test rewritten to real transition.
+- [CRITICAL] terminal foundation only terminalized ready features, not
+  pending depends_on ones — fixed: scan ALL unmerged feature siblings.
+- Nested-tree fix + IMPORTANT-4/5 confirmed correct.
+
+### Round 3 — Codex — APPROVED
+- Bounded re-enter (existing cap), all dependents terminalized on
+  exhaustion, valid-contracts path unaffected, branches compose
+  (missing-after-pass vs terminal-blocked mutually exclusive),
+  pure-feature unaffected, tests assert real transitions. No new issues.
+
+S1 Implementation Gate: 2 review rounds + 1 confirmation → APPROVED.
+Commits: db5b8196c (S1) → cfabf1fbf (R1) → 78535d150 (R2). Scene #1
+GREEN (nested capstone shape); #2-#5 RED; 22 S0+S1 units GREEN; broad
+suite only the 4 known pre-existing test_v5_phase2 git-worktree-rot
+failures; ruff clean. Proceed to S2.
+
+---
+
+## Ownership-first redesign S2 (shared-contract repair routing + amendment lifecycle) — Impl Gate (2026-05-16)
+
+Hardest step — a net-new graph state machine with crash/restart/multi-runner concerns.
+
+### Round 1 — Codex (REVISE)
+- [CRITICAL] merge-only retry never persisted restored verdict → restart double-merge (scene masked via fake set_verdict) — fixed.
+- [CRITICAL] amendment crash stranded blocked leaves (settlement only on normal path) — fixed (any terminalization → settle).
+- [IMPORTANT] bound write-allow still permitted arbitrary non-contract writes — fixed (amendment writes only its bound contract).
+- [NOTE] futile-amendment churn unbounded — fixed (per-(leaf,contract) cap=2 → honest terminal).
+
+### Round 2 — Codex (REVISE)
+- [IMPORTANT] retry flag cleared before merge → crash/restart/2nd-runner re-dispatch window — fixed (durable contract_amendment_retry_in_progress, fails-closed).
+
+### Round 3 — Codex (REVISE)
+- [CRITICAL] R2 left second-runner race (mark not compare-and-set) — fixed (atomic CAS under _locked_graph).
+- [CRITICAL] R2 introduced crash/restart DEADLOCK (stale in-progress, no recovery) — fixed (bounded stale-recovery: pid/heartbeat → reclaim-resume or terminalize).
+
+### Round 4 — Codex (final; 1 minimal must-fix, rest accepted)
+- [CRITICAL] heartbeat never refreshed → live owner running a legit ~1800s merge falsely reclaimed after 15min → two concurrent merges — fixed (owner-token-checked 60s heartbeat refresh; dead owners still timeout-recover).
+- Accepted NOTE-level residual: conservative remote/unknown-host stale timeout (dead remote owner waits the bounded timeout before recovery).
+
+S2 Implementation Gate: 4 review rounds → APPROVED with one tracked
+NOTE. Commits: ea2dfccad (S2) → e661e80da (R1) → 6a2caac6e (R2) →
+ae224e766 (R3) → eae1f3a2e (R4). Scenes #1/#5 GREEN; #2/#3/#4 RED;
+34 S0+S1+S2 units GREEN; broad suite only the 4 known pre-existing
+test_v5_phase2 git-worktree-rot failures; ruff clean. Net invariant:
+exactly one runner executes a leaf's merge-only retry at a time;
+crash/restart always resolves to pass or honest merge_blocked within
+bounded attempts; no double-merge, no deadlock, no silent strand.
+Proceed to S3.
+
+---
+
+## Ownership-first redesign S4 (split detection-only smoke from leaf repair loop) — Impl Gate (2026-05-16)
+
+The fix for the user's ORIGINAL pain: the 1799s leaf repair-agent timeout that hung the iTracker capstone.
+
+### Round 1 — Codex (REVISE)
+- [CRITICAL] S4 broken on the REAL path: CleanOracleIssue.paths dropped by preflight_issues_from_clean_oracle/PreflightIssue/serialization → classifier saw pathless → empty-bound amendment + cap-check/increment key mismatch → 1799s stuck-cycle re-emerged via S2 tasks (tests masked with pathful fakes) — fixed (d91cece58): PreflightIssue.paths field threaded end-to-end + clean_oracle_result fallback; pathless → honest integration_smoke_unrouteable; single normalized repair_path cap key.
+- [IMPORTANT] in-scope leaf smoke-repair fallback entered UNRESTRICTED full-oracle loop — fixed: allowed_paths=owned + scope_policy + commit-hook allowlist before foundation gate.
+
+### Round 2 — Codex (REVISE)
+- [CRITICAL] py_compile set issue.paths = ALL compiled files (command input, not causal) → leaf-owned syntax error looked out-of-scope → misrouted in-scope bug — fixed (2adf5cad1): causal-path parsing at the producer; router binds ALL causal paths or honest unrouteable (no first-sorted guess); py_compile confirmed only non-causal producer; amendment gate multi-bound-path support stays tight.
+- R1 pathless/cap + in-scope-scoping confirmed CLOSED.
+
+### Round 3 — Codex — APPROVED
+- Causal py_compile parsing robust across shapes; broad input never drives routing; audit holds (py_compile only non-causal producer); multi-path binding tight (rejects outside bound set; unrouteable if cannot bind all); S4-R1 + S0/S1/S2 protections intact; tests exercise the real producer.
+- [NOTE tracked] _py_compile_causal_paths converts abs-path-outside-cwd → basename (edge: synthetic basename for unexpected internal traceback). Non-blocking; hardening = skip non-cwd-relative abs paths.
+
+S4 Implementation Gate: 2 review rounds + 1 confirmation → APPROVED with
+1 tracked NOTE. Commits: fa5c481c5 (S4) → d91cece58 (R1) → 2adf5cad1
+(R2). Scenes #1/#2/#5 GREEN; #3/#4 RED (S5/S3 not yet done); 44 S0-S2+S4
+ownership units GREEN; broad suite only the known pre-existing
+test_v5_phase2 git-worktree-rot + committed test_v5_architect_retry
+check_scaffold_compiles-AttributeError rot (both pre-session, e2329e9a7;
+entangled with the user's 4 uncommitted route-isolation dirty files —
+deliberately NOT committed); ruff clean. The original 1799s leaf
+repair-hang is now structurally impossible (detection-only smoke;
+out-of-scope→S2-routed runnable task; pathless/indeterminate→honest
+terminal; in-scope→owned-path-scoped). Remaining: S3, S5, global verify,
+capstone acceptance.

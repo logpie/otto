@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from otto.repair_gates import (
-    NEEDS_BROWSER_REPRO,
-    PROOF_GAP_ONLY,
+    NO_REPAIR,
     REPAIR_NOW,
     repair_gate_for_verdict,
 )
@@ -24,7 +23,7 @@ def test_repair_gate_allows_live_ui_actionable_failure() -> None:
     assert decision.actionable is True
 
 
-def test_repair_gate_blocks_visual_only_weak_finding() -> None:
+def test_repair_gate_routes_visual_only_weak_finding_to_agent() -> None:
     decision = repair_gate_for_verdict(
         {
             "feature_id": "layout",
@@ -36,11 +35,11 @@ def test_repair_gate_blocks_visual_only_weak_finding() -> None:
         }
     )
 
-    assert decision.action == NEEDS_BROWSER_REPRO
-    assert decision.actionable is False
+    assert decision.action == REPAIR_NOW
+    assert decision.actionable is True
 
 
-def test_repair_gate_blocks_curl_only_ui_story() -> None:
+def test_repair_gate_routes_curl_only_ui_story_to_agent() -> None:
     decision = repair_gate_for_verdict(
         {
             "feature_id": "filters",
@@ -52,14 +51,27 @@ def test_repair_gate_blocks_curl_only_ui_story() -> None:
         }
     )
 
-    assert decision.action == NEEDS_BROWSER_REPRO
-    assert decision.actionable is False
+    assert decision.action == REPAIR_NOW
+    assert decision.actionable is True
 
 
-def test_repair_gate_marks_empty_verdict_as_proof_gap() -> None:
+def test_repair_gate_blocks_no_evidence_blocked_verdict() -> None:
     decision = repair_gate_for_verdict(
         {"feature_id": "search", "verdict": "blocked", "detail": ""}
     )
 
-    assert decision.action == PROOF_GAP_ONLY
+    assert decision.action == NO_REPAIR
+    assert decision.actionable is False
+
+
+def test_repair_gate_blocks_typed_provider_auth_failure() -> None:
+    decision = repair_gate_for_verdict(
+        {
+            "feature_id": "search",
+            "verdict": "blocked",
+            "provider_error": {"code": "provider_auth_exhausted"},
+        }
+    )
+
+    assert decision.action == NO_REPAIR
     assert decision.actionable is False

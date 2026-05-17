@@ -16,8 +16,10 @@ from otto.mcp_tools import _run_scaffold_certification
 
 
 def test_pass_on_zero_exit(tmp_path: Path) -> None:
-    project = tmp_path / "p"; project.mkdir()
-    session = tmp_path / "session"; (session / "spec").mkdir(parents=True)
+    project = tmp_path / "p"
+    project.mkdir()
+    session = tmp_path / "session"
+    (session / "spec").mkdir(parents=True)
 
     result = asyncio.run(_run_scaffold_certification(
         project_dir=project,
@@ -35,9 +37,11 @@ def test_pass_on_zero_exit(tmp_path: Path) -> None:
     assert written["verdict"] == "pass"
 
 
-def test_unverified_on_nonzero_exit(tmp_path: Path) -> None:
-    project = tmp_path / "p"; project.mkdir()
-    session = tmp_path / "session"; (session / "spec").mkdir(parents=True)
+def test_partial_on_nonzero_exit(tmp_path: Path) -> None:
+    project = tmp_path / "p"
+    project.mkdir()
+    session = tmp_path / "session"
+    (session / "spec").mkdir(parents=True)
 
     result = asyncio.run(_run_scaffold_certification(
         project_dir=project,
@@ -45,13 +49,15 @@ def test_unverified_on_nonzero_exit(tmp_path: Path) -> None:
         build_command="false",
         summary="would have been pass",
     ))
-    assert result["verdict"] == "unverified"
+    assert result["verdict"] == "partial"
     assert "scaffold build failed" in result["summary"]
 
 
 def test_rejects_empty_command(tmp_path: Path) -> None:
-    project = tmp_path / "p"; project.mkdir()
-    session = tmp_path / "session"; (session / "spec").mkdir(parents=True)
+    project = tmp_path / "p"
+    project.mkdir()
+    session = tmp_path / "session"
+    (session / "spec").mkdir(parents=True)
 
     result = asyncio.run(_run_scaffold_certification(
         project_dir=project,
@@ -64,10 +70,13 @@ def test_rejects_empty_command(tmp_path: Path) -> None:
 
 def test_uses_worktree_symlink_as_cwd(tmp_path: Path) -> None:
     """When session_dir/worktree exists, the build command runs there, not in project_dir."""
-    project = tmp_path / "p"; project.mkdir()
-    worktree = tmp_path / "wt"; worktree.mkdir()
+    project = tmp_path / "p"
+    project.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
     (worktree / "marker.txt").write_text("hi\n")
-    session = tmp_path / "session"; (session / "spec").mkdir(parents=True)
+    session = tmp_path / "session"
+    (session / "spec").mkdir(parents=True)
     (session / "worktree").symlink_to(worktree)
 
     # Command checks for marker.txt in CWD — should pass only if CWD = worktree.

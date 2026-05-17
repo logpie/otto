@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from otto.audit_loop import (
     FailingFeature,
     RepairAttempt,
@@ -130,11 +132,11 @@ def test_no_failing_features_returns_immediately() -> None:
     assert fix_calls == []
 
 
-def test_visual_only_feature_verdict_does_not_trigger_repair() -> None:
+def test_visual_only_feature_verdict_triggers_agent_repair() -> None:
     spec = _spec("f1")
     fix_agent, fix_calls = _make_fix_agent()
 
-    result = asyncio.run(
+    asyncio.run(
         repair_failing_features(
             spec=spec,
             feature_verdicts=[
@@ -150,9 +152,7 @@ def test_visual_only_feature_verdict_does_not_trigger_repair() -> None:
         )
     )
 
-    assert result.attempts == []
-    assert result.halted_reason == "no_failing_features"
-    assert fix_calls == []
+    assert fix_calls == [("f1", "g")]
 
 
 def test_live_ui_feature_verdict_triggers_repair() -> None:
@@ -181,23 +181,22 @@ def test_live_ui_feature_verdict_triggers_repair() -> None:
 
 
 def test_features_without_group_skipped() -> None:
-    """An orphan feature (group_id="") can't be repaired — features_to_repair
-    excludes it, so repair_failing_features sees an empty selection."""
+    """A failing orphan feature is a spec/verdict mismatch, not a silent skip."""
     spec = Spec(
         intent="x",
         groups=[Group(id="g", name="G")],
         features=[Feature(id="orphan", name="orphan", group_id="")],
     )
     fix_agent, fix_calls = _make_fix_agent()
-    result = asyncio.run(
-        repair_failing_features(
-            spec=spec,
-            feature_verdicts=[_verdict("orphan", "partial")],
-            fix_agent=fix_agent,
+
+    with pytest.raises(ValueError, match="without repair group"):
+        asyncio.run(
+            repair_failing_features(
+                spec=spec,
+                feature_verdicts=[_verdict("orphan", "partial")],
+                fix_agent=fix_agent,
+            )
         )
-    )
-    assert result.attempts == []
-    assert result.halted_reason == "no_failing_features"
     assert fix_calls == []
 
 
@@ -248,7 +247,7 @@ def test_repair_dispatches_per_feature(test_max=10) -> None:
             spec=spec,
             feature_verdicts=[
                 _verdict("f1", "partial"),
-                _verdict("f2", "blocked"),
+                _verdict("f2", "blocked", evidence_refs=["walkthrough#L2"]),
             ],
             fix_agent=fix_agent,
             re_audit=re_audit,
@@ -283,7 +282,12 @@ def test_repair_coalesces_same_group_failures_before_reaudit() -> None:
             spec=spec,
             feature_verdicts=[
                 _verdict("f1", "partial", "form is missing"),
-                _verdict("f2", "blocked", "filters are missing"),
+                _verdict(
+                    "f2",
+                    "blocked",
+                    "filters are missing",
+                    evidence_refs=["walkthrough#L3"],
+                ),
             ],
             fix_agent=fix_agent,
             re_audit=re_audit,
@@ -303,6 +307,7 @@ def test_re_audit_still_partial_does_not_flip_succeeded() -> None:
     spec = _spec("f1")
     fix_agent, _ = _make_fix_agent(succeed=True)
     re_audit, _ = _make_re_audit({"f1": "partial"})
+    events: list[tuple[str, dict[str, Any]]] = []
 
     result = asyncio.run(
         repair_failing_features(
@@ -312,6 +317,7 @@ def test_re_audit_still_partial_does_not_flip_succeeded() -> None:
             re_audit=re_audit,
             max_attempts_per_run=1,
             max_audit_passes=10,
+            on_event=lambda kind, payload: events.append((kind, payload)),
         )
     )
     assert len(result.attempts) == 1
@@ -321,7 +327,42 @@ def test_re_audit_still_partial_does_not_flip_succeeded() -> None:
     # is not enough to mark the repair succeeded when audit still says
     # partial.
     assert a.succeeded is False
-    assert result.halted_reason == "repair_attempts_cap_exhausted"
+    assert result.halted_reason == "no_progress:oracle_state_unchanged"
+    assert any(kind == "audit.repair_session.no_progress" for kind, _payload in events)
+    assert any(kind == "audit.repair_session.oracle_gate" for kind, _payload in events)
+
+
+def test_re_audit_omitting_attempted_feature_halts_as_no_progress() -> None:
+    spec = _spec("f1")
+    fix_agent, fix_calls = _make_fix_agent(succeed=True)
+    re_audit_calls: list[list[str]] = []
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def empty_re_audit(feature_ids: list[str]) -> list[dict[str, Any]]:
+        re_audit_calls.append(list(feature_ids))
+        return []
+
+    result = asyncio.run(
+        repair_failing_features(
+            spec=spec,
+            feature_verdicts=[
+                _verdict("f1", "blocked", evidence_refs=["walkthrough.jsonl#L7"])
+            ],
+            fix_agent=fix_agent,
+            re_audit=empty_re_audit,
+            max_attempts_per_run=3,
+            max_audit_passes=5,
+            on_event=lambda kind, payload: events.append((kind, payload)),
+        )
+    )
+
+    assert fix_calls == [("f1", "g")]
+    assert re_audit_calls == [["f1"]]
+    assert result.audit_passes_run == 2
+    assert len(result.attempts) == 1
+    assert result.attempts[0].succeeded is False
+    assert result.halted_reason == "no_progress:oracle_state_unchanged"
+    assert any(kind == "audit.repair_session.no_progress" for kind, _payload in events)
 
 
 def test_repair_loop_retries_feature_that_reaudit_keeps_partial() -> None:
@@ -381,10 +422,10 @@ def test_repair_loop_preserves_unattempted_failures_when_reaudit_is_scoped() -> 
         )
     )
 
-    assert [feature_id for feature_id, _ in fix_calls] == ["f1", "f2", "f1"]
-    assert re_audit_calls == [["f1", "f2"], ["f1"]]
-    assert result.audit_passes_run == 3
-    assert result.halted_reason == "repair_attempts_cap_exhausted"
+    assert [feature_id for feature_id, _ in fix_calls] == ["f1", "f2"]
+    assert re_audit_calls == [["f1", "f2"]]
+    assert result.audit_passes_run == 2
+    assert result.halted_reason == "no_progress:oracle_state_unchanged"
     by_feature = {a.feature_id: a for a in result.attempts}
     assert by_feature["f2"].new_verdict == "partial"
     assert by_feature["f2"].succeeded is False
@@ -395,7 +436,7 @@ def test_repair_loop_preserves_unattempted_failures_when_reaudit_is_scoped() -> 
 # ---------------------------------------------------------------------------
 
 
-def test_audit_passes_cap_skips_fix_and_re_audit() -> None:
+def test_audit_passes_cap_reserves_one_fix_and_re_audit() -> None:
     spec = _spec("f1")
     fix_agent, fix_calls = _make_fix_agent(succeed=True)
     re_audit, re_audit_calls = _make_re_audit({"f1": "passed"})
@@ -411,15 +452,14 @@ def test_audit_passes_cap_skips_fix_and_re_audit() -> None:
             audit_passes_so_far=1,
         )
     )
-    # No hidden fix without a verification pass left.
-    assert result.attempts == []
-    assert fix_calls == []
-    assert re_audit_calls == []  # never called
-    assert result.halted_reason == "audit_passes_cap_exhausted"
+    assert [attempt.feature_id for attempt in result.attempts] == ["f1"]
+    assert fix_calls == [("f1", "g")]
+    assert re_audit_calls == [["f1"]]
+    assert result.audit_passes_run == 2
 
 
-def test_max_attempts_per_run_caps_selection() -> None:
-    """Three failing features but cap=2 → only 2 fix attempts."""
+def test_max_attempts_per_run_does_not_truncate_first_failing_group_attempts() -> None:
+    """Three failing groups and cap=2 still get one first fix attempt each."""
     spec = _spec_by_group({"f1": "g1", "f2": "g2", "f3": "g3"})
     fix_agent, fix_calls = _make_fix_agent()
 
@@ -436,14 +476,15 @@ def test_max_attempts_per_run_caps_selection() -> None:
             max_audit_passes=10,
         )
     )
-    assert len(result.attempts) == 2
-    assert len(fix_calls) == 2
+    assert len(result.attempts) == 3
+    assert len(fix_calls) == 3
     # Order is the input verdict order
     assert fix_calls[0][0] == "f1"
     assert fix_calls[1][0] == "f2"
+    assert fix_calls[2][0] == "f3"
 
 
-def test_unactionable_blocked_verdicts_do_not_crowd_out_real_repairs() -> None:
+def test_no_evidence_blocked_verdicts_do_not_crowd_out_real_repairs() -> None:
     spec = _spec_by_group({
         "not_seen": "g1",
         "crashing_api": "g2",
@@ -451,6 +492,7 @@ def test_unactionable_blocked_verdicts_do_not_crowd_out_real_repairs() -> None:
     })
     fix_agent, fix_calls = _make_fix_agent()
     re_audit, re_audit_calls = _make_re_audit({
+        "not_seen": "passed",
         "crashing_api": "passed",
         "wrong_output": "passed",
     })

@@ -48,6 +48,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from otto.journey_contracts import (
+    VerificationContractError,
+    normalize_journey_contracts,
+    synthesize_ui_pass_model,
+)
 from otto.spec_warnings import ValidationWarning, WarningCollector
 
 if TYPE_CHECKING:
@@ -55,7 +60,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("otto.spec_compile")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Schema v1 → v2 (round-3 audit gap 4): the redesign added Feature,
 # Component, Guardrail, dispatch_plan, audit_fixtures, shared_paths,
 # non_goals, done_means, amendments + 3 new CheckKinds, plus the
@@ -77,10 +82,12 @@ SCHEMA_LEGACY_GROUP_FIELDS_V1: tuple[str, ...] = (
 SPEC_FILENAME = "spec.json"
 COMPILE_PROMPT = "compile-spec.md"
 COMPILE_PROMPT_BROWNFIELD = "compile-spec-brownfield.md"
-PROJECT_KINDS: tuple[str, ...] = ("webapp", "cli", "library", "api")
+SPEC_COMPILE_AGENT_MAX_ATTEMPTS = 3
+PROJECT_KINDS: tuple[str, ...] = ("webapp", "cli", "library", "api", "service")
 BROWNFIELD_MODES: tuple[str, ...] = ("baseline", "target")
 AUDIT_FIXTURE_KINDS: tuple[str, ...] = ("user", "channel", "follow", "data")
 SCHEMAS_DIR = Path(__file__).parent / "spec_schemas"
+_AGENT_TIMEOUT_RE = re.compile(r"Timed out after \d+(?:\.\d+)?s")
 
 
 # Per-kind default evidence kinds for new Features (research §2.7).
@@ -95,6 +102,7 @@ DEFAULT_EVIDENCE_KINDS_PER_KIND: dict[str, tuple[str, ...]] = {
     "api": ("ApiProbe", "StateInvariant", "RepoTestCheck"),
     "library": ("ImportCheck", "TypeCheck", "RepoTestCheck"),
     "cli": ("CLIProbe", "RepoTestCheck"),
+    "service": ("ApiProbe", "StateInvariant", "RepoTestCheck"),
 }
 
 _WEBAPP_SCAFFOLD_SCOPE_PATHS: tuple[str, ...] = (
@@ -426,6 +434,12 @@ class BehaviorJourney:
     description: str = ""
     surface: str = "web"
     deterministic: bool = True
+    start_state: str = ""
+    entry_route: str = ""
+    api_only: bool = False
+    verification_level: str = ""
+    probe_kind: str = ""
+    pass_model: dict[str, Any] = field(default_factory=dict)
     feature_ids: list[str] = field(default_factory=list)
     steps: list[BehaviorStep] = field(default_factory=list)
 
@@ -2252,6 +2266,14 @@ def _behavior_journey_from_dict(payload: dict[str, Any]) -> BehaviorJourney:
         description=str(payload.get("description") or ""),
         surface=str(payload.get("surface") or "web"),
         deterministic=bool(payload.get("deterministic", True)),
+        start_state=str(payload.get("start_state") or ""),
+        entry_route=str(payload.get("entry_route") or ""),
+        api_only=bool(payload.get("api_only") is True),
+        verification_level=str(payload.get("verification_level") or ""),
+        probe_kind=str(payload.get("probe_kind") or ""),
+        pass_model=dict(payload.get("pass_model") or {})
+        if isinstance(payload.get("pass_model"), dict)
+        else {},
         feature_ids=[str(item) for item in (payload.get("feature_ids") or [])],
         steps=steps,
     )
@@ -2264,9 +2286,42 @@ def _behavior_journey_to_dict(journey: BehaviorJourney) -> dict[str, Any]:
         "description": journey.description,
         "surface": journey.surface,
         "deterministic": journey.deterministic,
+        "start_state": journey.start_state,
+        "entry_route": journey.entry_route,
+        "api_only": journey.api_only,
+        "verification_level": journey.verification_level,
+        "probe_kind": journey.probe_kind,
+        "pass_model": dict(journey.pass_model),
         "feature_ids": list(journey.feature_ids),
         "steps": [dataclasses.asdict(step) for step in journey.steps],
     }
+
+
+def _normalize_behavior_journey_contracts(
+    spec: Spec,
+    collector: WarningCollector | None = None,
+) -> None:
+    payload = {
+        "schema_version": spec.schema_version,
+        "project_kind": spec.project_kind,
+        "behavior_journeys": [_behavior_journey_to_dict(j) for j in spec.behavior_journeys],
+    }
+    try:
+        normalized = normalize_journey_contracts(
+            payload,
+            current_schema_version=SCHEMA_VERSION,
+        )
+    except VerificationContractError as exc:
+        if collector is not None:
+            collector.add(code=exc.code, path=exc.path, message=exc.message)
+            return
+        raise
+    spec.schema_version = int(normalized.get("schema_version") or SCHEMA_VERSION)
+    spec.behavior_journeys = [
+        _behavior_journey_from_dict(item)
+        for item in normalized.get("behavior_journeys") or []
+        if isinstance(item, dict)
+    ]
 
 
 def _shared_contract_from_dict(payload: dict[str, Any]) -> SharedContract:
@@ -3170,6 +3225,7 @@ def parse_spec(data: Any) -> tuple[Spec, list[ValidationWarning]]:
         behavior_journeys=behavior_journeys_parsed,
         shared_contracts=shared_contracts_parsed,
     )
+    _normalize_behavior_journey_contracts(spec, collector)
     return spec, list(collector.warnings)
 
 
@@ -3310,10 +3366,22 @@ def _ensure_webapp_behavior_journeys(spec: Spec) -> list[str]:
             ),
             surface="web",
             deterministic=True,
+            start_state="empty_workspace",
+            entry_route="/",
             feature_ids=feature_ids,
             steps=steps,
         )
     )
+    spec.behavior_journeys[-1].pass_model = synthesize_ui_pass_model(
+        {
+            "id": spec.behavior_journeys[-1].id,
+            "description": spec.behavior_journeys[-1].description,
+            "start_state": spec.behavior_journeys[-1].start_state,
+            "entry_route": spec.behavior_journeys[-1].entry_route,
+            "covers_primary_actions": feature_ids,
+        }
+    )
+    spec.behavior_journeys[-1].verification_level = "ui"
     return [
         "webapp behavior journeys normalized: synthesized planned-main-user-flow "
         "from feature acceptance details"
@@ -3785,6 +3853,148 @@ class SpecValidationError(ValueError):
     """Raised when a Spec is malformed (parse-time)."""
 
 
+class SpecCompileTimeoutExhaustedError(SpecValidationError):
+    """Raised when bounded spec compile timeout retries are exhausted."""
+
+    def __init__(
+        self,
+        *,
+        attempts: int,
+        per_attempt_timeouts: list[int],
+        elapsed_s: float,
+        attempt_errors: list[dict[str, Any]],
+    ) -> None:
+        self.structured_reason = {
+            "kind": "spec_compile_timeout_exhausted",
+            "attempts": attempts,
+            "per_attempt_timeouts": per_attempt_timeouts,
+            "elapsed_s": round(max(0.0, elapsed_s), 3),
+            "attempt_errors": attempt_errors,
+            "_written_at": _iso_now(),
+        }
+        total_cost = sum(
+            float(item["total_cost_usd"])
+            for item in attempt_errors
+            if isinstance(item.get("total_cost_usd"), int | float)
+        )
+        if total_cost > 0:
+            self.structured_reason["known_cost_usd"] = round(total_cost, 6)
+        super().__init__(
+            "spec compile timed out after "
+            f"{attempts} attempts; per-attempt timeouts were "
+            f"{', '.join(str(timeout) + 's' for timeout in per_attempt_timeouts)}"
+        )
+
+
+class SpecCompileBudgetExhaustedError(SpecValidationError):
+    """Raised when no run budget remains for spec compile dispatch."""
+
+    def __init__(
+        self,
+        *,
+        attempts: int,
+        per_attempt_timeouts: list[int],
+        elapsed_s: float,
+        remaining_s: float,
+        detail: str,
+    ) -> None:
+        self.structured_reason = {
+            "kind": "spec_compile_budget_exhausted",
+            "attempts": attempts,
+            "per_attempt_timeouts": per_attempt_timeouts,
+            "elapsed_s": round(max(0.0, elapsed_s), 3),
+            "remaining_s": round(max(0.0, remaining_s), 3),
+            "_written_at": _iso_now(),
+        }
+        super().__init__(detail)
+
+
+def _is_compile_agent_timeout(exc: BaseException) -> bool:
+    """Return true only for Otto's bounded agent-call timeout error."""
+    try:
+        from otto.agent import AgentCallError
+    except Exception:  # pragma: no cover - import should always be available.
+        return False
+    if not isinstance(exc, AgentCallError):
+        return False
+    reason = str(getattr(exc, "reason", "") or "").strip()
+    target = reason or str(exc).strip()
+    return bool(_AGENT_TIMEOUT_RE.fullmatch(target))
+
+
+def _spec_compile_timeout_for_attempt(
+    *,
+    spec_cap: int,
+    attempt: int,
+    remaining_budget_s: int | None,
+) -> int:
+    requested = max(1, int(spec_cap)) * max(1, int(attempt))
+    if remaining_budget_s is None:
+        return requested
+    return min(int(remaining_budget_s), requested)
+
+
+def _compile_timeout_attempt_error(
+    *,
+    attempt: int,
+    timeout_s: int,
+    exc: BaseException,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "attempt": attempt,
+        "timeout_s": timeout_s,
+        "message": str(exc),
+    }
+    session_id = str(getattr(exc, "session_id", "") or "")
+    if session_id:
+        payload["session_id"] = session_id
+    total_cost = getattr(exc, "total_cost_usd", None)
+    if isinstance(total_cost, int | float):
+        payload["total_cost_usd"] = float(total_cost)
+    return payload
+
+
+def record_compile_failure_terminal(session_dir: Path, exc: SpecValidationError) -> None:
+    """Best-effort structured terminal journal entry for compile failures."""
+    from otto.spec_state import emit
+
+    structured_reason = getattr(exc, "structured_reason", None)
+    extra: dict[str, Any] = {
+        "verdict": "blocked",
+        "phase": "compile",
+    }
+    if isinstance(structured_reason, dict):
+        extra["structured_reason"] = structured_reason
+        kind = str(structured_reason.get("kind") or "").strip()
+        if kind:
+            extra["reason_kind"] = kind
+    try:
+        emit(session_dir, "run.finished", detail=str(exc), **extra)
+    except Exception as emit_exc:  # noqa: BLE001 - terminal recording is best-effort.
+        logger.warning("failed to record compile failure terminal: %s", emit_exc)
+
+
+def raise_compile_budget_exhausted_if_needed(
+    budget: "RunBudget | None",
+    *,
+    detail: str,
+) -> None:
+    """Raise a structured compile terminal when no run budget remains."""
+    if budget is None:
+        return
+    exhausted = budget.exhausted()
+    remaining_s = budget.remaining()
+    remaining_for_call = 0 if exhausted else int(budget.for_call())
+    if exhausted or remaining_for_call <= 0:
+        raise SpecCompileBudgetExhaustedError(
+            attempts=0,
+            per_attempt_timeouts=[],
+            elapsed_s=budget.elapsed(),
+            remaining_s=remaining_s,
+            detail=detail,
+        )
+
+
 _GROUP_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
@@ -3799,7 +4009,7 @@ def _load_kind_schema(project_kind: str) -> dict[str, Any] | None:
         return None
 
 
-def _validate_against_schema(payload: dict[str, Any], schema: dict[str, Any], path: str = "") -> list[str]:
+def _validate_against_schema(payload: Any, schema: dict[str, Any], path: str = "") -> list[str]:
     """Tiny schema validator — supports the subset we use.
 
     Skips the `jsonschema` package dependency on purpose; the schemas we
@@ -3946,6 +4156,12 @@ def validate_spec(spec: Spec, *, strict: bool = False) -> ValidationResult:
                 "does not match a group/component id"
             )
         warnings.extend(_shared_contract_owned_path_overlap_warnings(contract, spec))
+
+    if spec.behavior_journeys:
+        try:
+            _normalize_behavior_journey_contracts(spec)
+        except VerificationContractError as exc:
+            errors.append(str(exc))
 
     for journey in spec.behavior_journeys:
         if not journey.steps:
@@ -4990,9 +5206,10 @@ async def compile_spec(
         base_spec: Reserved for A6.4 additive mode (delta vs base spec).
             Currently surfaces a warning if non-None and ignored.
 
-    `AgentCallError` from budget-exhaustion or timeout propagates
-    UNWRAPPED so callers can write a paused checkpoint, matching the
-    contract in `otto/spec.py:259`.
+    Non-timeout `AgentCallError` from budget exhaustion or provider failure
+    propagates unwrapped. Bounded agent-call timeouts re-enter compile with
+    progressively larger caps and exhaust as a structured `SpecValidationError`
+    terminal.
     """
     from otto.agent import (
         is_transient_provider_error,
@@ -5086,9 +5303,11 @@ async def compile_spec(
     if getattr(options, "provider", "") != "codex-app-server":
         _assign_output_format(options, _spec_output_format())
     spec_cap = get_spec_timeout(config)
-    timeout: int = min(budget.for_call(), spec_cap) if budget is not None else spec_cap
 
-    async def _run_compile_agent(attempt: int) -> tuple[str, float, str, dict[str, Any]]:
+    async def _run_compile_agent(
+        attempt: int,
+        timeout: int,
+    ) -> tuple[str, float, str, dict[str, Any]]:
         log_subdir = run_dir / (
             "compile-agent" if attempt == 1 else f"compile-agent-retry-{attempt:02d}"
         )
@@ -5103,16 +5322,87 @@ async def compile_spec(
             project_dir=project_dir,
         )
 
-    try:
-        text, _cost, _session_id, _breakdown = await _run_compile_agent(1)
-    except Exception as exc:
-        if not is_transient_provider_error(exc):
-            raise
-        logger.warning(
-            "compile agent hit transient provider error; retrying once: %s",
-            exc,
+    compile_started = time.monotonic()
+    transient_retry_used = False
+    timeout_attempts: list[int] = []
+    timeout_errors: list[dict[str, Any]] = []
+    attempt = 1
+    while True:
+        remaining_budget_s: int | None = None
+        if budget is not None:
+            exhausted = budget.exhausted()
+            remaining_s = budget.remaining()
+            remaining_budget_s = 0 if exhausted else int(budget.for_call())
+            if exhausted or remaining_budget_s <= 0:
+                raise SpecCompileBudgetExhaustedError(
+                    attempts=len(timeout_attempts),
+                    per_attempt_timeouts=timeout_attempts,
+                    elapsed_s=time.monotonic() - compile_started,
+                    remaining_s=remaining_s,
+                    detail=(
+                        "spec compile run budget exhausted before dispatching "
+                        f"attempt {attempt}; no agent call was started"
+                    ),
+                )
+        timeout = _spec_compile_timeout_for_attempt(
+            spec_cap=spec_cap,
+            attempt=attempt,
+            remaining_budget_s=remaining_budget_s,
         )
-        text, _cost, _session_id, _breakdown = await _run_compile_agent(2)
+        if timeout <= 0:
+            remaining_s = budget.remaining() if budget is not None else 0.0
+            raise SpecCompileBudgetExhaustedError(
+                attempts=len(timeout_attempts),
+                per_attempt_timeouts=timeout_attempts,
+                elapsed_s=time.monotonic() - compile_started,
+                remaining_s=remaining_s,
+                detail=(
+                    "spec compile computed a non-positive timeout before "
+                    f"attempt {attempt}; no agent call was started"
+                ),
+            )
+        try:
+            text, _cost, _session_id, _breakdown = await _run_compile_agent(attempt, timeout)
+            break
+        except Exception as exc:
+            if _is_compile_agent_timeout(exc):
+                timeout_attempts.append(timeout)
+                timeout_errors.append(
+                    _compile_timeout_attempt_error(
+                        attempt=attempt,
+                        timeout_s=timeout,
+                        exc=exc,
+                    )
+                )
+                if attempt >= SPEC_COMPILE_AGENT_MAX_ATTEMPTS:
+                    raise SpecCompileTimeoutExhaustedError(
+                        attempts=attempt,
+                        per_attempt_timeouts=timeout_attempts,
+                        elapsed_s=time.monotonic() - compile_started,
+                        attempt_errors=timeout_errors,
+                    ) from exc
+                logger.warning(
+                    "compile agent timed out after %ss; retrying with extended cap "
+                    "(attempt %d/%d)",
+                    timeout,
+                    attempt + 1,
+                    SPEC_COMPILE_AGENT_MAX_ATTEMPTS,
+                )
+                attempt += 1
+                continue
+            if (
+                is_transient_provider_error(exc)
+                and not transient_retry_used
+                and attempt < SPEC_COMPILE_AGENT_MAX_ATTEMPTS
+            ):
+                transient_retry_used = True
+                logger.warning(
+                    "compile agent hit transient provider error; retrying once: %s",
+                    exc,
+                )
+                attempt += 1
+                continue
+            raise
 
     payload = _structured_spec_payload_from_breakdown(_breakdown)
     if payload is not None:

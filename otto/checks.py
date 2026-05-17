@@ -42,6 +42,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from otto.browser_testing import (
+    BrowserToolFamily,
+    classify_browser_command,
     declared_browser_evidence_missing,
     validate_agent_browser_command,
 )
@@ -210,7 +212,7 @@ def _run_repo_test(
     if raw_log_path is not None:
         _write_raw(raw_log_path, output)
     passed = completed.returncode == 0
-    raw = {
+    raw: dict[str, Any] = {
         "command": list(check.command),
         "resolved_command": resolved_command,
         "exit_code": completed.returncode,
@@ -449,7 +451,7 @@ def _run_browser_journey(
     artifact_diagnostics = _browser_artifact_diagnostics(artifacts)
     if not passed and any(item.get("appears_blank") for item in artifact_diagnostics):
         detail += " blank screenshot evidence"
-    raw = {
+    raw: dict[str, Any] = {
         "command": list(check.command),
         "resolved_command": resolved_command,
         "exit_code": completed.returncode,
@@ -705,19 +707,7 @@ def _playwright_browser_journey_preflight(
 
 
 def _browser_command_uses_playwright(command: tuple[str, ...] | list[str], cwd: Path) -> bool:
-    lowered = [part.lower() for part in command]
-    if any("playwright" in part for part in lowered):
-        return True
-    if len(lowered) >= 3 and lowered[0] in {"npm", "pnpm", "yarn"} and lowered[1] == "run":
-        script_name = lowered[2]
-        package_json = cwd / "package.json"
-        try:
-            package_data = json.loads(package_json.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False
-        script = str(package_data.get("scripts", {}).get(script_name, "")).lower()
-        return "playwright" in script
-    return False
+    return classify_browser_command(command, cwd=cwd) == BrowserToolFamily.PLAYWRIGHT
 
 
 def _playwright_command_entrypoint_preflight(
@@ -740,7 +730,9 @@ def _playwright_command_entrypoint_preflight(
         return None
     scripts = package_data.get("scripts", {})
     browser_script = scripts.get("browser") if isinstance(scripts, dict) else None
-    if not isinstance(browser_script, str) or "playwright" not in browser_script.lower():
+    if not isinstance(browser_script, str):
+        return None
+    if classify_browser_command(["npm", "run", "browser"], cwd=cwd) != BrowserToolFamily.PLAYWRIGHT:
         return None
 
     joined_command = " ".join(str(part) for part in command).lower()
@@ -928,8 +920,8 @@ def _playwright_command_runs_overbroad_suite(
         script = str(package_data.get("scripts", {}).get(script_name, "")).lower()
         if any(_command_part_selects_test(script, test_paths, cwd) for _ in (0,)):
             return False
-        return "playwright" in script
-    if "playwright" in lowered and "test" in lowered:
+        return classify_browser_command(command, cwd=cwd) == BrowserToolFamily.PLAYWRIGHT
+    if classify_browser_command(command, cwd=cwd) == BrowserToolFamily.PLAYWRIGHT and "test" in lowered:
         test_index = lowered.index("test")
         return not any(
             part and not part.startswith("-")
@@ -994,7 +986,7 @@ def _allocate_browser_journey_port(cwd: Path) -> int:
         port = base + offset
         if _port_available(port):
             return port
-    return _ephemeral_port()
+    return _ephemeral_port(fallback=base + 200)
 
 
 def _port_available(port: int) -> bool:
@@ -1007,9 +999,14 @@ def _port_available(port: int) -> bool:
     return True
 
 
-def _ephemeral_port() -> int:
+def _ephemeral_port(*, fallback: int | None = None) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
+        try:
+            probe.bind(("127.0.0.1", 0))
+        except OSError:
+            if fallback is not None:
+                return fallback
+            raise
         return int(probe.getsockname()[1])
 
 
@@ -1187,6 +1184,10 @@ def _run_state_invariant(
             duration_s=time.monotonic() - t0,
             detail=f"{detail} → informational ({type(exc).__name__}: {exc})",
             raw={
+                "malformed": True,
+                "malformed_check": True,
+                "evidence_quality": "malformed",
+                "proof_usable": False,
                 "expression": expression,
                 "description": check.description,
                 "result": None,
@@ -2004,7 +2005,13 @@ def _malformed_check_evidence(started: str, t0: float, detail: str) -> Evidence:
         started_at=started,
         duration_s=time.monotonic() - t0,
         detail=detail,
-        raw={"malformed_check": True, "diagnostic": detail},
+        raw={
+            "malformed": True,
+            "malformed_check": True,
+            "evidence_quality": "malformed",
+            "proof_usable": False,
+            "diagnostic": detail,
+        },
     )
 
 
@@ -2041,6 +2048,8 @@ def run_checks(
             base_url=base_url,
             raw_log_path=raw_log_path,
         )
+        if raw_log_path is not None and raw_log_path.exists() and raw_log_path not in evidence.artifacts:
+            evidence.artifacts.append(raw_log_path)
         results.append((check, evidence))
     return results
 

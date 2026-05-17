@@ -1,15 +1,17 @@
 """Repair-gate policy for audit findings.
 
-Layer 2 repair should spend agent retries only on reproducible product
-failures. Proof gaps, weak visual-only observations, and curl-only checks for
-browser UI surfaces should stay visible to the user without automatically
-dispatching code repair.
+Layer 2 repair is driven by actionable failing evidence, not by status names
+alone. A non-passing feature verdict can mean either "the auditor found a real
+product failure" or "the auditor could not evaluate this feature"; only the
+former should spend a repair attempt.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+
+from otto.repair_evidence import repair_evidence_from_payload
 
 
 @dataclass(frozen=True)
@@ -20,128 +22,66 @@ class RepairGateDecision:
 
 
 REPAIR_NOW = "repair_now"
-PROOF_GAP_ONLY = "proof_gap_only"
-NEEDS_BROWSER_REPRO = "needs_browser_repro"
 NO_REPAIR = "no_repair"
 
-_UI_SURFACE_TERMS = {
-    "page",
-    "dom",
-    "dashboard",
-    "filter",
-    "link",
-    "form",
-    "button",
-    "modal",
-    "browser",
-    "navigation",
-    "screenshot",
-    "video",
-}
+_NON_REPAIRABLE_CODE_KEYS = (
+    "non_repairable_reason",
+    "failure_kind",
+    "error_kind",
+    "blocker_kind",
+    "provider_error_kind",
+    "reason_code",
+)
 
-_HARD_FAILURE_TERMS = {
-    "crash",
-    "exception",
-    "traceback",
-    "500",
-    "404",
-    "cannot",
-    "can't",
-    "does not",
-    "doesn't",
-    "missing",
-    "not implemented",
-    "broken",
-    "fails",
-    "failed",
-    "data loss",
-    "lost",
-    "corrupt",
-    "clipped",
-    "overlap",
-    "overflow",
-    "unreachable",
-    "hidden",
-    "disabled",
-}
-
-_VISUAL_MEASURABLE_FAILURE_TERMS = {
-    "clipped",
-    "overlap",
-    "overflow",
-    "unreachable",
-    "hidden",
-    "disabled",
+_NON_REPAIRABLE_REASONS_BY_CODE = {
+    "provider_auth_exhausted": "provider authentication is exhausted; a coding agent cannot refresh credentials",
+    "provider_auth_missing": "provider authentication is missing; a coding agent cannot create credentials",
+    "provider_permission_denied": "provider permissions deny the request; code repair cannot grant access",
+    "provider_quota_exhausted": "provider quota is exhausted; code repair cannot add quota",
 }
 
 
 def repair_gate_for_verdict(verdict_payload: dict[str, Any]) -> RepairGateDecision:
     """Classify whether an audit feature verdict should trigger repair."""
-    verdict = _clean(verdict_payload.get("verdict"))
+    evidence = repair_evidence_from_payload(verdict_payload)
+    verdict = evidence.raw_verdict
     if verdict in {"", "passed"}:
         return RepairGateDecision(NO_REPAIR, False, "feature already passed")
 
-    detail = _clean(verdict_payload.get("detail"))
-    methodology = _clean(verdict_payload.get("methodology"))
-    surface = _clean(verdict_payload.get("surface"))
-    evidence_completeness = _clean(verdict_payload.get("evidence_completeness"))
-    coverage_confidence = _clean(verdict_payload.get("coverage_confidence"))
-    refs = " ".join(str(ref).casefold() for ref in verdict_payload.get("evidence_refs") or [])
+    non_repairable_reason = _typed_non_repairable_reason(verdict_payload)
+    if non_repairable_reason is not None:
+        return RepairGateDecision(NO_REPAIR, False, non_repairable_reason)
 
-    if not detail and not refs:
-        return RepairGateDecision(PROOF_GAP_ONLY, False, "audit verdict has no concrete evidence")
+    if evidence.is_actionable_for_repair:
+        return RepairGateDecision(REPAIR_NOW, True, "audit finding is actionable")
 
-    if evidence_completeness in {"partial", "proxy_only"}:
-        return RepairGateDecision(
-            NEEDS_BROWSER_REPRO,
-            False,
-            f"evidence completeness is {evidence_completeness}; collect stronger proof before repair",
-        )
-    if coverage_confidence == "low":
-        return RepairGateDecision(
-            NEEDS_BROWSER_REPRO,
-            False,
-            "coverage confidence is low; collect reproducible evidence before repair",
-        )
-
-    if methodology == "visual-only" and not _has_visual_measurable_failure(detail, refs):
-        return RepairGateDecision(
-            NEEDS_BROWSER_REPRO,
-            False,
-            "visual-only evidence is not enough to trigger product repair",
-        )
-
-    if methodology == "http-request" and _looks_like_browser_ui_surface(surface, detail):
-        return RepairGateDecision(
-            NEEDS_BROWSER_REPRO,
-            False,
-            "curl/http evidence is not enough for a browser UI story",
-        )
-
-    if methodology in {"source-review", "other"} and not _has_hard_failure_signal(detail, refs):
-        return RepairGateDecision(
-            PROOF_GAP_ONLY,
-            False,
-            f"{methodology} evidence lacks a reproducible product failure",
-        )
-
-    return RepairGateDecision(REPAIR_NOW, True, "audit evidence is actionable")
+    return RepairGateDecision(
+        NO_REPAIR,
+        False,
+        "audit verdict has no actionable failing evidence",
+    )
 
 
 def _clean(value: Any) -> str:
     return str(value or "").strip().casefold()
 
 
-def _has_hard_failure_signal(detail: str, refs: str) -> bool:
-    haystack = f"{detail} {refs}"
-    return any(term in haystack for term in _HARD_FAILURE_TERMS)
+def _typed_non_repairable_reason(payload: dict[str, Any]) -> str | None:
+    for key in _NON_REPAIRABLE_CODE_KEYS:
+        reason = _non_repairable_reason_for_code(payload.get(key))
+        if reason is not None:
+            return reason
+    provider_error = payload.get("provider_error")
+    if isinstance(provider_error, dict):
+        for key in ("kind", "code", "error_kind", "failure_kind"):
+            reason = _non_repairable_reason_for_code(provider_error.get(key))
+            if reason is not None:
+                return reason
+    return None
 
 
-def _has_visual_measurable_failure(detail: str, refs: str) -> bool:
-    haystack = f"{detail} {refs}"
-    return any(term in haystack for term in _VISUAL_MEASURABLE_FAILURE_TERMS)
-
-
-def _looks_like_browser_ui_surface(surface: str, detail: str) -> bool:
-    haystack = f"{surface} {detail}"
-    return any(term in haystack for term in _UI_SURFACE_TERMS)
+def _non_repairable_reason_for_code(value: Any) -> str | None:
+    code = _clean(value)
+    if not code:
+        return None
+    return _NON_REPAIRABLE_REASONS_BY_CODE.get(code)

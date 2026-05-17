@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from otto.build import (
     BuildAgentInput,
@@ -249,7 +250,7 @@ def test_run_merge_queue_lands_single_slice_when_checks_pass(tmp_path: Path) -> 
     assert result.landed_ids == ["s1"]
 
 
-def test_run_merge_queue_lands_degraded_slice_despite_behavior_check_failure(
+def test_run_merge_queue_blocks_degraded_slice_with_failed_behavior_check(
     tmp_path: Path,
 ) -> None:
     _init_git(tmp_path)
@@ -293,12 +294,12 @@ def test_run_merge_queue_lands_degraded_slice_despite_behavior_check_failure(
         run_merge_queue(spec, build_result, project_dir=tmp_path, session_dir=session_dir)
     )
 
-    assert result.landed_ids == ["s1"]
+    assert result.landed_ids == []
     assert result.results[0].group_recheck_evidence[0].passed is False
-    assert "degraded_continue" in result.results[0].failure_narrative
-    assert result.blocked_ids == []
-    assert result.results[0].status == MergeStatus.LANDED
-    assert result.results[0].landed_commit  # short hash present
+    assert "post-merge verification failed" in result.results[0].failure_narrative
+    assert result.blocked_ids == ["s1"]
+    assert result.results[0].status == MergeStatus.BLOCKED
+    assert result.results[0].landed_commit == ""
 
 
 def test_run_merge_queue_blocks_degraded_slice_on_structural_check_failure(
@@ -399,8 +400,8 @@ def test_build_and_merge_use_active_branch_in_linked_worktree(tmp_path: Path) ->
     session_dir = task / "_session"
     session_dir.mkdir()
 
-    async def writing_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        (input_.worktree / "alpha.txt").write_text("alpha\n", encoding="utf-8")
+    async def writing_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
+        (agent_input.worktree / "alpha.txt").write_text("alpha\n", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.0)
 
     spec = _spec(
@@ -954,18 +955,18 @@ def test_run_merge_queue_repairs_via_agent_then_lands(tmp_path: Path) -> None:
         ],
     )
 
-    seen_configs: list[dict] = []
+    seen_configs: list[dict[str, Any]] = []
     seen_timeouts: list[int | None] = []
     seen_context_packets: list[Path | None] = []
     seen_contract_deltas: list[tuple[ContractDelta, ...]] = []
 
-    async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        seen_configs.append(dict(input_.config))
-        seen_timeouts.append(input_.timeout_s)
-        seen_context_packets.append(input_.context_packet_path)
-        seen_contract_deltas.append(input_.contract_deltas)
+    async def repair_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
+        seen_configs.append(dict(agent_input.config))
+        seen_timeouts.append(agent_input.timeout_s)
+        seen_context_packets.append(agent_input.context_packet_path)
+        seen_contract_deltas.append(agent_input.contract_deltas)
         # Repair by creating the missing marker.
-        (input_.worktree / "marker.txt").write_text("ok", encoding="utf-8")
+        (agent_input.worktree / "marker.txt").write_text("ok", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.05)
 
     result = asyncio.run(
@@ -1018,7 +1019,7 @@ def test_run_merge_queue_blocks_when_repair_retries_exhausted(tmp_path: Path) ->
         ],
     )
 
-    async def useless_agent(_input: BuildAgentInput) -> BuildAgentOutput:
+    async def useless_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
         return BuildAgentOutput(succeeded=True)
 
     result = asyncio.run(
@@ -1086,11 +1087,11 @@ if marker.read_text(encoding="utf-8").strip() != "beta":
     )
     calls = 0
 
-    async def progressive_repair(input_: BuildAgentInput) -> BuildAgentOutput:
+    async def progressive_repair(agent_input: BuildAgentInput) -> BuildAgentOutput:
         nonlocal calls
         calls += 1
         value = "alpha" if calls == 1 else "beta"
-        (input_.worktree / "marker.txt").write_text(f"{value}\n", encoding="utf-8")
+        (agent_input.worktree / "marker.txt").write_text(f"{value}\n", encoding="utf-8")
         return BuildAgentOutput(succeeded=True)
 
     result = asyncio.run(
@@ -1133,12 +1134,12 @@ def test_run_merge_queue_handles_agent_crash_during_repair(tmp_path: Path) -> No
     )
     counter = {"n": 0}
 
-    async def crash_then_fix(input_: BuildAgentInput) -> BuildAgentOutput:
+    async def crash_then_fix(agent_input: BuildAgentInput) -> BuildAgentOutput:
         counter["n"] += 1
         if counter["n"] == 1:
             raise RuntimeError("boom")
         # On retry: actually fix it.
-        (input_.worktree / "marker.txt").write_text("ok", encoding="utf-8")
+        (agent_input.worktree / "marker.txt").write_text("ok", encoding="utf-8")
         return BuildAgentOutput(succeeded=True)
 
     result = asyncio.run(
@@ -1517,18 +1518,18 @@ def test_merge_repair_reproduces_conflict_markers_on_slice_branch(
     )
     seen_unmerged: list[str] = []
 
-    async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+    async def repair_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
         unmerged = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=U"],
-            cwd=input_.worktree,
+            cwd=agent_input.worktree,
             capture_output=True,
             text=True,
             check=True,
         ).stdout.strip()
         seen_unmerged.append(unmerged)
-        assert "<<<<<<<" in (input_.worktree / "shared.txt").read_text(encoding="utf-8")
-        assert "Unmerged paths: shared.txt" in input_.last_failure_narrative
-        (input_.worktree / "shared.txt").write_text("target\nslice\n", encoding="utf-8")
+        assert "<<<<<<<" in (agent_input.worktree / "shared.txt").read_text(encoding="utf-8")
+        assert "Unmerged paths: shared.txt" in agent_input.last_failure_narrative
+        (agent_input.worktree / "shared.txt").write_text("target\nslice\n", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
 
     result = asyncio.run(
@@ -1585,11 +1586,11 @@ def test_merge_repair_salvages_committable_edits_after_agent_error(
     )
     calls = 0
 
-    async def flaky_repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+    async def flaky_repair_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
         nonlocal calls
         calls += 1
-        assert "<<<<<<<" in (input_.worktree / "shared.txt").read_text(encoding="utf-8")
-        (input_.worktree / "shared.txt").write_text("target\nslice\n", encoding="utf-8")
+        assert "<<<<<<<" in (agent_input.worktree / "shared.txt").read_text(encoding="utf-8")
+        (agent_input.worktree / "shared.txt").write_text("target\nslice\n", encoding="utf-8")
         return BuildAgentOutput(succeeded=False, detail="provider stream ended after edits")
 
     result = asyncio.run(
@@ -1657,11 +1658,11 @@ def test_merge_repair_handles_linked_slice_worktree_conflict(
     )
     seen_worktrees: list[Path] = []
 
-    async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
-        seen_worktrees.append(input_.worktree)
-        assert input_.worktree == slice_worktree
-        assert "<<<<<<<" in (input_.worktree / "shared.txt").read_text(encoding="utf-8")
-        (input_.worktree / "shared.txt").write_text("target\nslice\n", encoding="utf-8")
+    async def repair_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
+        seen_worktrees.append(agent_input.worktree)
+        assert agent_input.worktree == slice_worktree
+        assert "<<<<<<<" in (agent_input.worktree / "shared.txt").read_text(encoding="utf-8")
+        (agent_input.worktree / "shared.txt").write_text("target\nslice\n", encoding="utf-8")
         return BuildAgentOutput(succeeded=True)
 
     result = asyncio.run(
@@ -1757,16 +1758,16 @@ def test_merge_repair_runs_on_slice_branch_not_base(tmp_path: Path) -> None:
     seen_branches: list[str] = []
     seen_merge_repair_modes: list[bool] = []
 
-    async def repair_agent(input_: BuildAgentInput) -> BuildAgentOutput:
+    async def repair_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
         # Record what branch is checked out at the moment the agent runs.
         proc = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=input_.worktree, capture_output=True, text=True, check=True,
+            cwd=agent_input.worktree, capture_output=True, text=True, check=True,
         )
         seen_branches.append(proc.stdout.strip())
-        seen_merge_repair_modes.append(input_.merge_repair)
+        seen_merge_repair_modes.append(agent_input.merge_repair)
         # "Repair" by aligning shared.txt with main.
-        (input_.worktree / "shared.txt").write_text("A", encoding="utf-8")
+        (agent_input.worktree / "shared.txt").write_text("A", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
 
     asyncio.run(
@@ -1850,9 +1851,9 @@ def test_merge_repair_blocks_out_of_scope_changes(tmp_path: Path) -> None:
         ],
     )
 
-    async def overreaching_repair(input_: BuildAgentInput) -> BuildAgentOutput:
-        (input_.worktree / "owned.txt").write_text("main\n", encoding="utf-8")
-        (input_.worktree / "peer.txt").write_text("overreach\n", encoding="utf-8")
+    async def overreaching_repair(agent_input: BuildAgentInput) -> BuildAgentOutput:
+        (agent_input.worktree / "owned.txt").write_text("main\n", encoding="utf-8")
+        (agent_input.worktree / "peer.txt").write_text("overreach\n", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
 
     result = asyncio.run(
@@ -1949,12 +1950,12 @@ def test_merge_repair_ignores_generated_playwright_artifact_conflicts(
         ],
     )
 
-    async def repair(input_: BuildAgentInput) -> BuildAgentOutput:
-        (input_.worktree / "src" / "App.tsx").write_text(
+    async def repair(agent_input: BuildAgentInput) -> BuildAgentOutput:
+        (agent_input.worktree / "src" / "App.tsx").write_text(
             "main app\nslice app\n",
             encoding="utf-8",
         )
-        (input_.worktree / "test-results" / "playwright-report" / "index.html").write_text(
+        (agent_input.worktree / "test-results" / "playwright-report" / "index.html").write_text(
             "<html>latest generated report</html>\n",
             encoding="utf-8",
         )
@@ -2071,14 +2072,14 @@ def test_merge_repair_scope_ignores_preexisting_target_branch_changes(
         ],
     )
 
-    async def resolving_repair(input_: BuildAgentInput) -> BuildAgentOutput:
-        assert input_.merge_repair
-        assert (input_.worktree / "peer.txt").read_text(encoding="utf-8") == "landed peer\n"
-        owned = (input_.worktree / "owned.txt").read_text(encoding="utf-8")
+    async def resolving_repair(agent_input: BuildAgentInput) -> BuildAgentOutput:
+        assert agent_input.merge_repair
+        assert (agent_input.worktree / "peer.txt").read_text(encoding="utf-8") == "landed peer\n"
+        owned = (agent_input.worktree / "owned.txt").read_text(encoding="utf-8")
         assert "<<<<<<<" in owned
         assert "target" in owned
         assert "slice" in owned
-        (input_.worktree / "owned.txt").write_text("target\nslice\n", encoding="utf-8")
+        (agent_input.worktree / "owned.txt").write_text("target\nslice\n", encoding="utf-8")
         return BuildAgentOutput(succeeded=True, cost_usd=0.01)
 
     result = asyncio.run(

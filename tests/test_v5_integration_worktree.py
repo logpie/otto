@@ -1,0 +1,920 @@
+"""Regression tests for v5 integration worktree branch discipline."""
+
+from __future__ import annotations
+
+import json
+import socket
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from otto.lead import LeadResult, _render_prompt
+from otto.queue.task_graph import record_task, set_verdict
+from otto.spec_compile_flat import FlatSpec
+from otto.v5_branching import (
+    child_branch_name,
+    integration_branch_name,
+    merge_child_into_integration,
+)
+from otto.v5_preflight import PreflightIssue
+from otto.v5_preflight_repair import OracleRepairResult
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir(parents=True, exist_ok=True)
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@e.st")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text(
+        ".worktrees/\notto_logs/\nuploads/\n*.db\n*.db.bak\n"
+    )
+    (repo / "README.md").write_text("init\n")
+    _git(repo, "add", ".gitignore", "README.md")
+    _git(repo, "commit", "-q", "-m", "init")
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _repair_packet_path_from_prompt(prompt: str) -> Path:
+    for line in prompt.splitlines():
+        if line.startswith("Repair packet: "):
+            return Path(line.split(": ", 1)[1])
+    raise AssertionError(f"repair prompt did not include packet path: {prompt}")
+
+
+def _seed_integration_task(repo: Path, task_id: str) -> str:
+    own_integration = integration_branch_name(task_id)
+    record_task(repo, task_id="root", intent="root", parent_task_id=None)
+    record_task(
+        repo,
+        task_id=task_id,
+        intent="integrate product",
+        parent_task_id="root",
+        integration_branch="main",
+    )
+    return own_integration
+
+
+def _smoke_payload(
+    *,
+    path: Path,
+    task_id: str,
+    phase: str,
+    issues: list[PreflightIssue],
+) -> dict[str, Any]:
+    return {
+        "check": "smoke_clean_deploy",
+        "task_id": task_id,
+        "phase": phase,
+        "cwd": str(path),
+        "passed": not issues,
+        "issues": [
+            {
+                "kind": issue.kind,
+                "severity": issue.severity,
+                "message": issue.message,
+            }
+            for issue in issues
+        ],
+        "error": None if not issues else "; ".join(issue.message for issue in issues),
+    }
+
+
+async def _passing_smoke_preflight(**_kwargs: Any) -> dict[str, Any]:
+    return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
+
+
+def test_integration_prompt_renders_smoke_preflight_payload(tmp_path: Path) -> None:
+    rendered = _render_prompt(
+        kind="integration",
+        task_id="v5-integrate",
+        intent="integrate product",
+        session_dir=tmp_path / "session",
+        integration_branch="i2p/integ/v5-integrate",
+        child_summaries=[],
+        integration_packet_path="/tmp/session/integration_packet.json",
+        preflight_result={
+            "check": "smoke_clean_deploy",
+            "cwd": "/tmp/merged-worktree",
+            "passed": False,
+            "issues": [
+                {
+                    "kind": "clean_deploy_start_failed",
+                    "severity": "block",
+                    "message": "start.sh failed",
+                }
+            ],
+        },
+    )
+
+    assert "PRE-INTEGRATION PREFLIGHT" in rendered
+    assert "smoke_clean_deploy" in rendered
+    assert "/tmp/merged-worktree" in rendered
+    assert "clean_deploy_start_failed" in rendered
+    assert "start.sh failed" in rendered
+    assert "First read `/tmp/session/integration_packet.json`" in rendered
+
+
+def test_lead_prompt_renders_decomp_runtime_context(tmp_path: Path) -> None:
+    rendered = _render_prompt(
+        kind="plan_or_inline",
+        task_id="root",
+        intent="build tracker",
+        session_dir=tmp_path / "session",
+        integration_branch=None,
+        child_summaries=[],
+        decomp_runtime_context={
+            "max_parallel": 3,
+            "run_budget_seconds": 3600,
+            "cost_model_s": {"worktree_setup_s": 60},
+            "queue_state": {"ready": 0, "free_slots": 3},
+            "spec_profile": {"core_entities": 4},
+        },
+    )
+
+    assert "DECOMP_RUNTIME_CONTEXT" in rendered
+    assert '"max_parallel": 3' in rendered
+    assert "FE waiting on BE is fake parallelism" in rendered
+    assert "vertical capability leaves" in rendered
+    assert "budget_usd" not in rendered
+
+
+def test_lead_tier_prompt_encourages_flat_decomposition(tmp_path: Path) -> None:
+    rendered = _render_prompt(
+        kind="plan_or_inline",
+        task_id="root",
+        intent="build full stack todo",
+        session_dir=tmp_path / "session",
+        integration_branch=None,
+        child_summaries=[],
+        tier="lead",
+    )
+
+    assert "Tier preset: lead" in rendered
+    assert "shallow architect/scaffold task plus parallel vertical build leaves" in rendered
+    assert "Keep the tree flat" in rendered
+
+
+def test_modular_tier_prompt_requires_root_architecture_first(tmp_path: Path) -> None:
+    rendered = _render_prompt(
+        kind="plan_or_inline",
+        task_id="root",
+        intent="build mini crm",
+        session_dir=tmp_path / "session",
+        integration_branch=None,
+        child_summaries=[],
+        tier="modular",
+    )
+
+    assert "Tier preset: modular" in rendered
+    assert "You MUST use architecture-first decomposition" in rendered
+    assert "Do not build the whole product inline at the root" in rendered
+    assert "recursive decomposition" in rendered
+
+
+def test_modular_tier_prompt_allows_nested_child_when_explicit(tmp_path: Path) -> None:
+    rendered = _render_prompt(
+        kind="plan_or_inline",
+        task_id="v5-blog-pipeline",
+        intent="recursively decompose static blog outputs",
+        session_dir=tmp_path / "session",
+        integration_branch="i2p/integ/root",
+        child_summaries=[],
+        tier="modular",
+    )
+
+    assert "Honor the architecture-first shape from the parent" in rendered
+    assert "explicitly asks for recursive sub-decomposition" in rendered
+    assert "emit a small nested subtree" in rendered
+
+
+def test_child_merge_uses_existing_integration_worktree_owner(tmp_path: Path) -> None:
+    """Grandchildren merge into the integration branch's owning worktree."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+
+    parent_task = "v5-parent"
+    integration = integration_branch_name(parent_task)
+    _git(repo, "branch", integration, "main")
+
+    integration_worktree = repo / ".worktrees" / f"integ-{parent_task}"
+    integration_worktree.parent.mkdir()
+    add_integration = _git(
+        repo,
+        "worktree",
+        "add",
+        "-q",
+        str(integration_worktree),
+        integration,
+    )
+    assert add_integration.returncode == 0, add_integration.stderr
+    assert _git(integration_worktree, "branch", "--show-current").stdout.strip() == integration
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "main"
+
+    child_task = "v5-grandchild"
+    child_worktree = repo / ".worktrees" / child_task
+    add_child = _git(
+        repo,
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        child_branch_name(child_task),
+        str(child_worktree),
+        integration,
+    )
+    assert add_child.returncode == 0, add_child.stderr
+    (child_worktree / "grandchild.txt").write_text("nested child output\n", encoding="utf-8")
+    _git(child_worktree, "add", "grandchild.txt")
+    commit = _git(child_worktree, "commit", "-q", "-m", "grandchild")
+    assert commit.returncode == 0, commit.stderr
+
+    ok, detail = merge_child_into_integration(
+        project_dir=repo,
+        child_task_id=child_task,
+        parent_integration_branch=integration,
+    )
+
+    assert ok, detail
+    assert "already used by worktree" not in detail
+    assert (integration_worktree / "grandchild.txt").read_text(encoding="utf-8") == (
+        "nested child output\n"
+    )
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "main"
+
+
+@pytest.mark.asyncio
+async def test_merge_conflict_composite_gate_failure_reenters_repair_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean-deploy pass is not enough when the composite landing gate blocks.
+
+    This drives the real child merge path through:
+    merge_child_into_integration -> conflict packet -> merge repair packet ->
+    composite gate -> same durable repair loop.
+    """
+    from otto import v5_runner
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    port = _free_port()
+    (repo / "CHARTER.md").write_text(f"# Tiny fixture\n\nPort: {port}\n", encoding="utf-8")
+    (repo / "start.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"PORT=\"${{PORT:-{port}}}\"\n"
+        "python3 -m http.server \"$PORT\" --bind 127.0.0.1\n",
+        encoding="utf-8",
+    )
+    (repo / "start.sh").chmod(0o755)
+    (repo / "backend").mkdir()
+    (repo / "backend" / "main.py").write_text(
+        "def route() -> str:\n"
+        "    return 'base'\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+    seed = _git(repo, "commit", "-q", "-m", "tiny clean-deploy fixture")
+    assert seed.returncode == 0, seed.stderr
+
+    parent_branch = integration_branch_name("parent")
+    child_task_id = "v5-child"
+    child_branch = child_branch_name(child_task_id)
+    _git(repo, "branch", parent_branch, "main")
+    _git(repo, "checkout", "-q", parent_branch)
+    (repo / "backend" / "main.py").write_text(
+        "def route() -> str:\n"
+        "    return 'parent'\n",
+        encoding="utf-8",
+    )
+    parent_commit = _git(repo, "commit", "-am", "parent edits shared route")
+    assert parent_commit.returncode == 0, parent_commit.stderr
+
+    child_worktree = tmp_path / "child-wt"
+    add_child = _git(repo, "worktree", "add", "-q", "-b", child_branch, str(child_worktree), "main")
+    assert add_child.returncode == 0, add_child.stderr
+    (child_worktree / "backend" / "main.py").write_text(
+        "def route() -> str:\n"
+        "    return 'child'\n",
+        encoding="utf-8",
+    )
+    _git(child_worktree, "add", "backend/main.py")
+    child_commit = _git(child_worktree, "commit", "-q", "-m", "child edits shared route")
+    assert child_commit.returncode == 0, child_commit.stderr
+
+    record_task(repo, task_id="root", intent="root", parent_task_id=None)
+    record_task(
+        repo,
+        task_id=child_task_id,
+        intent="edit shared route",
+        parent_task_id="root",
+        integration_branch=parent_branch,
+    )
+    set_verdict(repo, child_task_id, "pass", cost_usd=0.1)
+
+    agent_packets: list[dict[str, Any]] = []
+
+    async def fake_run_agent_with_timeout(
+        prompt: str,
+        options: Any,
+        **kwargs: Any,
+    ) -> tuple[str, float, str, dict[str, Any]]:
+        del options, kwargs
+        from otto.v5_clean_verify import verify_from_clean_oracle
+        from otto.v5_preflight_repair import append_repair_packet_oracle_event
+
+        packet_path = _repair_packet_path_from_prompt(prompt)
+        packet_payload = json.loads(packet_path.read_text(encoding="utf-8"))
+        agent_packets.append(packet_payload)
+
+        if len(agent_packets) == 1:
+            merge = _git(child_worktree, "merge", "--no-ff", "--no-commit", parent_branch)
+            assert merge.returncode != 0, merge.stdout + merge.stderr
+            (child_worktree / "backend" / "main.py").write_text(
+                "def route() -> str:\n"
+                "    return 'parent+child'\n",
+                encoding="utf-8",
+            )
+            _git(child_worktree, "add", "backend/main.py")
+            (child_worktree / "docs").mkdir()
+            (child_worktree / "docs" / "stray.md").write_text(
+                "unrelated composite-gate violation\n",
+                encoding="utf-8",
+            )
+            oracle = verify_from_clean_oracle(child_worktree, scope="subtree")
+            assert oracle.passed is True
+            append_repair_packet_oracle_event(packet_path, oracle, source="agent-test")
+            return "resolved markers but left an unrelated file", 0.01, "sess-conflict", {}
+
+        gate = packet_payload["current_state"].get("latest_composite_gate")
+        assert gate is not None
+        assert gate["passed"] is False
+        assert gate["reasons"]
+        assert "docs/" in json.dumps(gate, sort_keys=True)
+        (child_worktree / "docs" / "stray.md").unlink()
+        oracle = verify_from_clean_oracle(child_worktree, scope="subtree")
+        assert oracle.passed is True
+        append_repair_packet_oracle_event(packet_path, oracle, source="agent-test")
+        return "removed unrelated file after composite feedback", 0.01, "sess-conflict", {}
+
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr("otto.agent.run_agent_with_timeout", fake_run_agent_with_timeout)
+    monkeypatch.setattr(
+        v5_runner,
+        "_run_integration_smoke_preflight_with_repair",
+        _passing_smoke_preflight,
+    )
+
+    result = LeadResult(task_id=child_task_id, verdict="pass", cost_usd=0.1)
+    await v5_runner._merge_child_branch(
+        project_dir=repo,
+        child_task_id=child_task_id,
+        child_worktree=child_worktree,
+        child_session_dir=tmp_path / "session",
+        parent_integration_branch=parent_branch,
+        result=result,
+        config={
+            "default_branch": "main",
+            "merge_repair_agent_turns": 2,
+            "merge_repair_oracle_invocations": 6,
+            "merge_repair_oracle_timeout_s": 30,
+        },
+        on_event=events.append,
+    )
+
+    assert result.verdict == "pass"
+    assert len(agent_packets) == 2
+    assert _git(repo, "show", f"{parent_branch}:backend/main.py").stdout == (
+        "def route() -> str:\n"
+        "    return 'parent+child'\n"
+    )
+    assert _git(repo, "cat-file", "-e", f"{parent_branch}:docs/stray.md").returncode != 0
+
+    start_event = next(e for e in events if e.get("event") == "merge_conflict_repair_agent_start")
+    packet_path = Path(start_event["repair_packet"])
+    packet_events = [
+        json.loads(line)
+        for line in (packet_path.parent / "repair_packet.events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    composite_events = [
+        row for row in packet_events if row["event"].get("type") == "composite_gate"
+    ]
+    assert composite_events
+    assert composite_events[0]["event"]["passed"] is False
+    assert composite_events[0]["event"]["reasons"]
+    assert "docs/" in json.dumps(composite_events[0]["event"], sort_keys=True)
+    agent_turns = [row for row in packet_events if row["event"].get("type") == "agent_turn"]
+    assert len(agent_turns) == 2
+    assert composite_events[0]["seq"] < agent_turns[1]["seq"]
+
+
+@pytest.mark.asyncio
+async def test_nested_integration_restores_project_dir_to_parent_branch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested integration may run from project_dir, but must restore main."""
+    from otto import v5_runner
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    task_id = "v5-child"
+    own_integration = integration_branch_name(task_id)
+    _git(repo, "branch", own_integration, "main")
+    _git(repo, "checkout", "-q", own_integration)
+
+    record_task(repo, task_id="root", intent="root", parent_task_id=None)
+    record_task(
+        repo,
+        task_id=task_id,
+        intent="child with grandchildren",
+        parent_task_id="root",
+        integration_branch="main",
+    )
+
+    branches_seen: list[str] = []
+
+    async def fake_run_lead(**kwargs: Any) -> LeadResult:
+        branches_seen.append(_git(repo, "branch", "--show-current").stdout.strip())
+        return LeadResult(
+            task_id=kwargs["task_id"],
+            verdict="pass",
+            cost_usd=0.1,
+            decomposition="inline",
+        )
+
+    monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+    monkeypatch.setattr(
+        v5_runner,
+        "_run_integration_smoke_preflight_with_repair",
+        _passing_smoke_preflight,
+    )
+
+    result = await v5_runner._run_integration(
+        project_dir=repo,
+        task_id=task_id,
+        intent="integrate child subtree",
+        config={"default_branch": "main"},
+        child_results={},
+        integration_results={},
+    )
+
+    assert result.verdict == "pass"
+    assert branches_seen == [own_integration]
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "main"
+
+
+@pytest.mark.asyncio
+async def test_root_integration_starts_on_main_even_after_prior_worktree_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root integration checks out main even if child processing left another branch."""
+    from otto import v5_runner
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    stale_branch = integration_branch_name("v5-stale")
+    _git(repo, "branch", stale_branch, "main")
+    _git(repo, "checkout", "-q", stale_branch)
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_compile_flat_spec(**kwargs: Any) -> FlatSpec:
+        del kwargs
+        return FlatSpec(intent="build a thing", behavior_journeys=[])
+
+    async def fake_process_children(**kwargs: Any) -> None:
+        project_dir = kwargs["project_dir"]
+        child_results = kwargs["child_results"]
+        _git(project_dir, "checkout", "-q", stale_branch)
+        record_task(
+            project_dir,
+            task_id="v5-child",
+            intent="child",
+            parent_task_id="root",
+            integration_branch="main",
+        )
+        set_verdict(project_dir, "v5-child", "pass")
+        child_results["v5-child"] = LeadResult(
+            task_id="v5-child",
+            verdict="pass",
+            cost_usd=0.1,
+            decomposition="inline",
+        )
+
+    async def fake_run_lead(**kwargs: Any) -> LeadResult:
+        kind = kwargs.get("kind", "plan_or_inline")
+        calls.append((kind, _git(repo, "branch", "--show-current").stdout.strip()))
+        if kind == "integration":
+            return LeadResult(
+                task_id=kwargs["task_id"],
+                verdict="pass",
+                cost_usd=0.2,
+                decomposition="inline",
+            )
+        return LeadResult(
+            task_id=kwargs["task_id"],
+            verdict="pending_children",
+            cost_usd=0.3,
+            decomposition="emit",
+            emitted_subtask_ids=["v5-child"],
+        )
+
+    monkeypatch.setattr(v5_runner, "compile_flat_spec", fake_compile_flat_spec)
+    monkeypatch.setattr(v5_runner, "_process_children", fake_process_children)
+    monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+
+    result = await v5_runner.run_v5_pipeline(
+        project_dir=repo,
+        intent="build a thing",
+        config={"default_branch": "main"},
+    )
+
+    assert result.verdict == "pass"
+    assert ("plan_or_inline", "main") in calls
+    assert ("integration", "main") in calls
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "main"
+
+
+@pytest.mark.asyncio
+async def test_root_integration_repairs_clean_deploy_preflight_before_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from otto import v5_runner
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    lead_kwargs: list[dict[str, Any]] = []
+
+    async def fake_compile_flat_spec(**kwargs: Any) -> FlatSpec:
+        del kwargs
+        return FlatSpec(intent="build a thing", behavior_journeys=[])
+
+    async def fake_process_children(**kwargs: Any) -> None:
+        project_dir = kwargs["project_dir"]
+        child_results = kwargs["child_results"]
+        record_task(
+            project_dir,
+            task_id="v5-child",
+            intent="child",
+            parent_task_id="root",
+            integration_branch="main",
+        )
+        set_verdict(project_dir, "v5-child", "pass")
+        child_results["v5-child"] = LeadResult(
+            task_id="v5-child",
+            verdict="pass",
+            cost_usd=0.1,
+            decomposition="inline",
+        )
+
+    async def fake_run_lead(**kwargs: Any) -> LeadResult:
+        lead_kwargs.append(kwargs)
+        if kwargs.get("kind") == "integration":
+            return LeadResult(
+                task_id=kwargs["task_id"],
+                verdict="pass",
+                cost_usd=0.2,
+                decomposition="inline",
+                verify_called=True,
+                verify_result={"verdict": "pass", "summary": "ok"},
+            )
+        return LeadResult(
+            task_id=kwargs["task_id"],
+            verdict="pending_children",
+            cost_usd=0.3,
+            decomposition="emit",
+            emitted_subtask_ids=["v5-child"],
+        )
+    repair_packets: list[Any] = []
+
+    async def fake_oracle_repair_agent(repair_packet: Any, **_kwargs: Any) -> OracleRepairResult:
+        repair_packets.append(repair_packet)
+        return OracleRepairResult(verdict="pass", summary="repaired", cost_usd=0.05)
+
+    smoke_results = [
+        [
+            PreflightIssue(
+                kind="clean_deploy_start_failed",
+                severity="block",
+                message="root start failed",
+            )
+        ],
+        [],
+        [],
+    ]
+
+    def fake_smoke_preflight(
+        *,
+        worktree_path: Path,
+        task_id: str,
+        phase: str,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        assert worktree_path == repo
+        return _smoke_payload(
+            path=worktree_path,
+            task_id=task_id,
+            phase=phase,
+            issues=smoke_results.pop(0),
+        )
+
+    monkeypatch.setattr(v5_runner, "compile_flat_spec", fake_compile_flat_spec)
+    monkeypatch.setattr(v5_runner, "_process_children", fake_process_children)
+    monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight", fake_smoke_preflight)
+
+    result = await v5_runner.run_v5_pipeline(
+        project_dir=repo,
+        intent="build a thing",
+        config={"default_branch": "main"},
+    )
+
+    assert result.verdict == "pass"
+    assert len(repair_packets) == 1
+    assert "root start failed" in json.dumps(repair_packets[0].latest_oracle_result)
+
+    integration_calls = [call for call in lead_kwargs if call.get("kind") == "integration"]
+    assert len(integration_calls) == 1
+    payload = integration_calls[0]["preflight_result"]
+    assert payload["check"] == "smoke_clean_deploy"
+    assert payload["task_id"] == "root"
+    assert payload["passed"] is True
+    assert payload["issues"] == []
+    assert payload["repair"]["terminal_state"] == "continued"
+    assert payload["repair"]["attempts"][0]["repair_phase"] == "integration_smoke"
+
+
+@pytest.mark.asyncio
+async def test_runner_commits_integration_product_files_and_excludes_runtime_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Integration edits are committed by the runner with runtime paths excluded."""
+    from otto import v5_runner
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    task_id = "v5-integrate"
+    own_integration = integration_branch_name(task_id)
+    _git(repo, "branch", own_integration, "main")
+    _git(repo, "checkout", "-q", own_integration)
+
+    record_task(repo, task_id="root", intent="root", parent_task_id=None)
+    record_task(
+        repo,
+        task_id=task_id,
+        intent="integrate product",
+        parent_task_id="root",
+        integration_branch="main",
+    )
+
+    async def fake_run_lead(**kwargs: Any) -> LeadResult:
+        del kwargs
+        (repo / "frontend" / "src").mkdir(parents=True)
+        (repo / "frontend" / "src" / "App.tsx").write_text("export const ok = true;\n")
+        (repo / "api").mkdir()
+        (repo / "api" / "main.py").write_text("print('api')\n")
+        (repo / "otto_logs" / "sessions" / "s1").mkdir(parents=True)
+        (repo / "otto_logs" / "sessions" / "s1" / "noise.log").write_text("runtime\n")
+        (repo / "uploads" / "images").mkdir(parents=True)
+        (repo / "uploads" / "images" / "x.png").write_bytes(b"not product")
+        (repo / "data.db.bak").write_bytes(b"sqlite")
+        return LeadResult(
+            task_id=task_id,
+            verdict="pass",
+            cost_usd=0.1,
+            decomposition="inline",
+        )
+
+    monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+    monkeypatch.setattr(
+        v5_runner,
+        "_run_integration_smoke_preflight_with_repair",
+        _passing_smoke_preflight,
+    )
+
+    result = await v5_runner._run_integration(
+        project_dir=repo,
+        task_id=task_id,
+        intent="integrate product",
+        config={"default_branch": "main"},
+        child_results={},
+        integration_results={},
+    )
+
+    assert result.verdict == "pass"
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "main"
+    assert _git(repo, "status", "--porcelain").stdout.strip() == ""
+
+    tracked = _git(repo, "ls-tree", "-r", "--name-only", own_integration).stdout.splitlines()
+    assert "frontend/src/App.tsx" in tracked
+    assert "api/main.py" in tracked
+    assert "otto_logs/sessions/s1/noise.log" not in tracked
+    assert "uploads/images/x.png" not in tracked
+    assert "data.db.bak" not in tracked
+
+    subject = _git(repo, "log", "-1", "--pretty=%s", own_integration).stdout.strip()
+    assert subject == f"integration: {task_id} runner-managed changes"
+
+
+@pytest.mark.asyncio
+async def test_integration_smoke_failure_runs_repair_on_resolved_worktree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from otto import v5_runner
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    task_id = "v5-integrate"
+    own_integration = _seed_integration_task(repo, task_id)
+
+    smoke_calls: list[Path] = []
+    smoke_results = [
+        [
+            PreflightIssue(
+                kind="clean_deploy_start_failed",
+                severity="block",
+                message="start.sh failed before repair",
+            )
+        ],
+        [],
+        [],
+    ]
+    lead_kwargs: list[dict[str, Any]] = []
+
+    def fake_smoke_preflight(
+        *,
+        worktree_path: Path,
+        task_id: str,
+        phase: str,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        smoke_calls.append(Path(worktree_path))
+        return _smoke_payload(
+            path=worktree_path,
+            task_id=task_id,
+            phase=phase,
+            issues=smoke_results.pop(0),
+        )
+
+    async def fake_run_lead(**kwargs: Any) -> LeadResult:
+        lead_kwargs.append(kwargs)
+        return LeadResult(
+            task_id=kwargs["task_id"],
+            verdict="pass",
+            cost_usd=0.1,
+            decomposition="inline",
+            verify_called=True,
+            verify_result={"verdict": "pass", "summary": "fixed"},
+        )
+    repair_packets: list[Any] = []
+
+    async def fake_oracle_repair_agent(repair_packet: Any, **kwargs: Any) -> OracleRepairResult:
+        packet = repair_packet
+        repair_packets.append(packet)
+        worktree = Path(packet.repair_unit["worktree"])
+        (worktree / "start.sh").write_text(
+            "#!/usr/bin/env bash\npython3 -m http.server ${PORT:-9000}\n",
+            encoding="utf-8",
+        )
+        ok, detail = await kwargs["commit_hook"](packet, packet.latest_oracle_result)
+        assert ok, detail
+        return OracleRepairResult(verdict="pass", summary="fixed start.sh", cost_usd=0.05)
+
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight", fake_smoke_preflight)
+    monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
+
+    result = await v5_runner._run_integration(
+        project_dir=repo,
+        task_id=task_id,
+        intent="integrate product",
+        config={"default_branch": "main"},
+        child_results={},
+        integration_results={},
+    )
+
+    assert result.verdict == "pass"
+    assert len(smoke_calls) == 3
+    assert all(path != repo for path in smoke_calls)
+    assert all(path.exists() for path in smoke_calls)
+    assert smoke_calls[0] == smoke_calls[1] == smoke_calls[2]
+    assert _git(smoke_calls[0], "branch", "--show-current").stdout.strip() == own_integration
+
+    assert len(repair_packets) == 1
+    assert "start.sh failed before repair" in json.dumps(repair_packets[0].latest_oracle_result)
+    assert (
+        _git(repo, "show", f"{own_integration}:start.sh").stdout
+        == "#!/usr/bin/env bash\npython3 -m http.server ${PORT:-9000}\n"
+    )
+
+    integration_calls = [call for call in lead_kwargs if call.get("kind") == "integration"]
+    assert len(integration_calls) == 1
+    payload = integration_calls[0]["preflight_result"]
+    assert payload["check"] == "smoke_clean_deploy"
+    assert payload["cwd"] == str(smoke_calls[0])
+    assert payload["passed"] is True
+    assert payload["issues"] == []
+    assert payload["repair"]["attempts"][0]["repair_phase"] == "integration_smoke"
+    packet_path = Path(integration_calls[0]["integration_packet_path"])
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert packet["parent_task_id"] == task_id
+    assert packet["integration_branch"] == own_integration
+    assert packet["preflight_results"]["pre_agent"]["repair"]["terminal_state"] == "continued"
+
+    assert result.verify_result is not None
+    assert result.verify_result["post_integration_preflight"]["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_integration_repeat_smoke_failure_downgrades_merge_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from otto import v5_runner
+    from otto.queue.task_graph import get_task
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    task_id = "v5-integrate"
+    _seed_integration_task(repo, task_id)
+
+    blocking_issue = PreflightIssue(
+        kind="clean_deploy_start_failed",
+        severity="block",
+        message="start.sh still fails",
+    )
+    smoke_calls: list[Path] = []
+
+    def fake_smoke_preflight(
+        *,
+        worktree_path: Path,
+        task_id: str,
+        phase: str,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        smoke_calls.append(Path(worktree_path))
+        return _smoke_payload(
+            path=worktree_path,
+            task_id=task_id,
+            phase=phase,
+            issues=[blocking_issue],
+        )
+
+    async def fake_run_lead(**kwargs: Any) -> LeadResult:
+        return LeadResult(
+            task_id=kwargs["task_id"],
+            verdict="pass",
+            cost_usd=0.1,
+            decomposition="inline",
+            verify_called=True,
+            verify_result={"verdict": "pass", "summary": "claimed fixed"},
+        )
+    async def fake_oracle_repair_agent(_repair_packet: Any, **_kwargs: Any) -> OracleRepairResult:
+        return OracleRepairResult(verdict="pass", summary="claimed fixed", cost_usd=0.1)
+
+    events: list[dict[str, Any]] = []
+    monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight", fake_smoke_preflight)
+    monkeypatch.setattr(v5_runner, "run_lead", fake_run_lead)
+    monkeypatch.setattr(v5_runner, "run_oracle_repair_agent", fake_oracle_repair_agent)
+
+    result = await v5_runner._run_integration(
+        project_dir=repo,
+        task_id=task_id,
+        intent="integrate product",
+        config={"default_branch": "main"},
+        child_results={},
+        integration_results={},
+        on_event=events.append,
+    )
+
+    assert len(smoke_calls) >= 2
+    assert result.verdict == "merge_blocked"
+    assert "start.sh still fails" in result.failure_reason
+    assert (get_task(repo, task_id) or {}).get("verdict") == "merge_blocked"
+    assert result.verify_result is not None
+    assert result.verify_result["verdict"] == "merge_blocked"
+    assert result.verify_result["post_integration_preflight"]["passed"] is False
+    assert any(e.get("event") == "integration_smoke_failed" for e in events)

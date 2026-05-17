@@ -24,6 +24,12 @@ qkrem*.md
 summary.json
 audits/
 bench/
+!bench/
+bench/*
+!bench/field-tests/
+!bench/field-tests/**
+bench/field-tests/runs/*
+!bench/field-tests/runs/.gitignore
 demo-project/
 
 # Otto runtime (auto-managed; safe to edit comments)

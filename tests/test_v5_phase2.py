@@ -25,14 +25,13 @@ from otto.lead import LeadResult
 from otto.queue.subtask import enqueue_subtask
 from otto.queue.task_graph import (
     aggregate_verdict,
-    children_of,
     get_task,
     record_task,
     set_decomposition,
     set_verdict,
 )
 from otto.v5_runner import (
-    V5RunResult,
+    _DispatchLease,
     _build_child_summaries,
     _is_descendant_of,
     _process_children,
@@ -77,6 +76,55 @@ class TestTopologyHelpers:
         assert c1["cost_usd"] == 0.5
         c2 = next(s for s in summaries if s["task_id"] == "c2")
         assert c2["verdict"] == "partial"
+
+    def test_build_child_summaries_reconstructs_decomposed_child(
+        self, project: Path
+    ) -> None:
+        record_task(project, task_id="root", intent="r")
+        record_task(project, task_id="c1", intent="decomposed child", parent_task_id="root")
+        record_task(project, task_id="g1", intent="grandchild", parent_task_id="c1")
+        set_decomposition(project, "c1", "emit")
+        set_verdict(project, "c1", "pending_children")
+        set_verdict(project, "g1", "pass")
+
+        child_results = {
+            "c1": LeadResult(
+                task_id="c1",
+                verdict="pending_children",
+                cost_usd=0.5,
+                final_text="planned grandchildren",
+            ),
+            "g1": LeadResult(task_id="g1", verdict="pass", cost_usd=0.2),
+        }
+        integration_results = {
+            "c1": LeadResult(
+                task_id="c1",
+                verdict="partial",
+                cost_usd=0.7,
+                final_text="integrated grandchildren with one skipped item",
+                verify_called=True,
+                verify_result={
+                    "verdict": "partial",
+                    "intent_coverage": {
+                        "built": ["grandchild feature"],
+                        "partial": [],
+                        "skipped": [{"feature": "export", "reason": "not in subtree"}],
+                    },
+                },
+            )
+        }
+
+        summaries = _build_child_summaries(
+            project,
+            "root",
+            child_results,
+            integration_results,
+        )
+
+        c1 = next(s for s in summaries if s["task_id"] == "c1")
+        assert c1["verdict"] == "partial"
+        assert c1["reconstructed_from"] == "subtree_integration"
+        assert c1["intent_coverage"]["skipped"][0]["feature"] == "export"
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +262,74 @@ class TestProcessChildren:
             )
         # No children dispatched because cap was already hit.
         assert dispatched == []
+
+    @pytest.mark.asyncio
+    async def test_shared_dispatch_lease_caps_concurrent_schedulers(
+        self,
+        project: Path,
+    ) -> None:
+        record_task(project, task_id="root", intent="r")
+        task_ids = [
+            enqueue_subtask(
+                project_dir=project,
+                parent_task_id="root",
+                parent_session_dir=project / "session",
+                intent=f"task {index}",
+            )
+            for index in range(6)
+        ]
+        for tid in task_ids:
+            record_task(project, task_id=tid, intent=tid, parent_task_id="root")
+
+        lock = asyncio.Lock()
+        active: set[str] = set()
+        max_seen = 0
+        dispatch_counts: dict[str, int] = {tid: 0 for tid in task_ids}
+
+        async def fake_run_child(**kwargs: Any) -> LeadResult:
+            nonlocal max_seen
+            tid = kwargs["entry"]["task_id"]
+            async with lock:
+                dispatch_counts[tid] += 1
+                active.add(tid)
+                max_seen = max(max_seen, len(active))
+            await asyncio.sleep(0.02)
+            set_verdict(project, tid, "pass")
+            async with lock:
+                active.remove(tid)
+            return LeadResult(task_id=tid, verdict="pass", cost_usd=0.1)
+
+        lease = _DispatchLease(max_parallel=3)
+        child_results: dict[str, LeadResult] = {}
+        integration_results: dict[str, LeadResult] = {}
+
+        with patch("otto.v5_runner._run_child", new=fake_run_child):
+            await asyncio.gather(
+                _process_children(
+                    project_dir=project,
+                    parent_task_id="root",
+                    config={},
+                    max_parallel=3,
+                    tree_budget_usd=10.0,
+                    child_results=child_results,
+                    integration_results=integration_results,
+                    dispatch_lease=lease,
+                ),
+                _process_children(
+                    project_dir=project,
+                    parent_task_id="root",
+                    config={},
+                    max_parallel=3,
+                    tree_budget_usd=10.0,
+                    child_results=child_results,
+                    integration_results=integration_results,
+                    dispatch_lease=lease,
+                ),
+            )
+
+        assert max_seen <= 3
+        assert dispatch_counts == {tid: 1 for tid in task_ids}
+        assert set(child_results) == set(task_ids)
 
 
 # ---------------------------------------------------------------------------

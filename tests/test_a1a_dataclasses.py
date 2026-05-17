@@ -9,6 +9,8 @@ Feature is the value/verdict unit.
 
 from __future__ import annotations
 
+import pytest
+
 from otto.spec_compile import (
     AuditFixture,
     BehaviorJourney,
@@ -1160,8 +1162,18 @@ def test_select_failing_features_picks_repair_candidates() -> None:
         {"feature_id": "auth", "verdict": "passed", "detail": "ok"},
         {"feature_id": "profile", "verdict": "failed", "detail": "404"},
         {"feature_id": "search", "verdict": "partial", "detail": "slow"},
-        {"feature_id": "comments", "verdict": "blocked", "detail": "no merge"},
-        {"feature_id": "polish", "verdict": "missing", "detail": "no walkthrough"},
+        {
+            "feature_id": "comments",
+            "verdict": "blocked",
+            "detail": "no merge",
+            "evidence_refs": ["walkthrough.jsonl#L3"],
+        },
+        {
+            "feature_id": "polish",
+            "verdict": "missing",
+            "detail": "no walkthrough",
+            "evidence_refs": ["walkthrough.jsonl#L4"],
+        },
     ]
     failing = select_failing_features(verdicts)
     ids = [f.feature_id for f in failing]
@@ -1246,11 +1258,16 @@ def test_features_to_repair_respects_explicit_cap() -> None:
         {"feature_id": f"f{i}", "verdict": "failed", "detail": "x"}
         for i in range(5)
     ]
-    candidates = features_to_repair(spec, verdicts, max_attempts_per_run=3)
+    candidates = features_to_repair(
+        spec,
+        verdicts,
+        max_attempts_per_run=3,
+        ensure_each_group_first_attempt=False,
+    )
     assert len(candidates) == 3
 
 
-def test_features_to_repair_excludes_orphans() -> None:
+def test_features_to_repair_rejects_orphans() -> None:
     from otto.audit_loop import features_to_repair
 
     spec = Spec(
@@ -1271,11 +1288,8 @@ def test_features_to_repair_excludes_orphans() -> None:
         {"feature_id": "orphan", "verdict": "failed", "detail": "x"},
         {"feature_id": "bad-group", "verdict": "failed", "detail": "x"},
     ]
-    candidates = features_to_repair(spec, verdicts, max_attempts_per_run=10)
-    ids = [c.feature_id for c in candidates]
-    assert "owned" in ids
-    assert "orphan" not in ids   # no group_id → no repair routing
-    assert "bad-group" not in ids  # group_id refers to non-existent group
+    with pytest.raises(ValueError, match="without repair group: orphan"):
+        features_to_repair(spec, verdicts, max_attempts_per_run=10)
 
 
 def test_can_run_another_audit_pass_within_cap() -> None:

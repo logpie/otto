@@ -1,7 +1,7 @@
 """In-process MCP server holding Otto's custom tools for v5 Leads.
 
 Tools (all in-process, no IPC):
-    submit_subtask(intent, depends_on=[]) -> {task_id}
+    submit_subtask(intent, depends_on=[], owned_paths=[], action_ids=[]) -> {task_id}
         Emit a child task to the project's queue. Returns task_id immediately.
         Lead's calling task is recorded as parent_task_id.
 
@@ -33,7 +33,10 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+from otto.journey_scope_policy import ExecutionScope
+from otto.queue.task_graph import TASK_ROLES
 
 logger = logging.getLogger("otto.mcp_tools")
 
@@ -97,7 +100,7 @@ async def _run_scaffold_certification(
     if exit_code != 0:
         tail = "\n".join((text or "").strip().splitlines()[-5:])
         payload = {
-            "verdict": "unverified",
+            "verdict": "partial",
             "journeys": [],
             "evidence": [str(log_path)],
             "summary": f"scaffold build failed (exit {exit_code}): {tail[:200]}",
@@ -156,12 +159,169 @@ def _coerce_id_list(raw: Any) -> list[str]:
     return cleaned
 
 
+def _coerce_task_role(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    role = str(raw).strip()
+    return role if role in TASK_ROLES else "feature"
+
+
+def _coerce_foundation_contracts(raw: Any) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    parsed = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or text in {"[]", "{}", "null", "None"}:
+            return []
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(parsed, list):
+        return []
+    contracts: list[dict[str, Any]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip().lstrip("./")
+        owner_task_id = str(item.get("owner_task_id") or "").strip()
+        check = str(item.get("check") or "").strip()
+        if not path or not owner_task_id or check not in {"literal", "semantic"}:
+            continue
+        contract: dict[str, Any] = {
+            "path": path,
+            "owner_task_id": owner_task_id,
+            "check": check,
+        }
+        if isinstance(item.get("required_exports"), list):
+            contract["required_exports"] = [str(v) for v in item["required_exports"] if str(v).strip()]
+        if isinstance(item.get("behavior_probes"), list):
+            contract["behavior_probes"] = [str(v) for v in item["behavior_probes"] if str(v).strip()]
+        contracts.append(contract)
+    return contracts
+
+
+def _terminal_verdict(value: Any) -> bool:
+    return value in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}
+
+
+def _structured_err(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
+        "isError": True,
+    }
+
+
+def submit_subtask_for_lead(
+    *,
+    project_dir: Path,
+    session_dir: Path,
+    task_id: str,
+    intent: str,
+    depends_on: list[str] | None = None,
+    owned_paths: list[str] | None = None,
+    action_ids: list[str] | None = None,
+    task_role: str | None = None,
+    foundation_contracts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Record one emitted subtask, preserving corrected S0 ownership metadata."""
+    intent = (intent or "").strip()
+    if not intent:
+        return {"error": "submit_subtask: 'intent' is required and must be non-empty."}
+
+    role = _coerce_task_role(task_role)
+    idem_key = _intent_hash(task_id, intent)
+    from otto.queue.task_graph import read_graph, record_task, set_decomposition, update_task_metadata
+    from otto.queue.subtask import (
+        _locked_append,
+        _pending_entry,
+        append_pending_entry,
+        v5_pending_path,
+    )
+
+    requested_owned_paths = list(owned_paths or [])
+    path = v5_pending_path(project_dir)
+    with _locked_append(path):
+        graph = read_graph(project_dir)
+        for tid, entry in graph.get("tasks", {}).items():
+            if (
+                isinstance(entry, dict)
+                and entry.get("parent_task_id") == task_id
+                and _intent_hash(task_id, entry.get("intent") or "") == idem_key
+            ):
+                existing_role = _coerce_task_role(entry.get("task_role")) or "feature"
+                existing_owned_paths = list(entry.get("owned_paths") or [])
+                role_changed = role is not None and existing_role != role
+                changed = (
+                    role_changed
+                    or existing_owned_paths != requested_owned_paths
+                )
+                if changed and _terminal_verdict(entry.get("verdict")):
+                    return {
+                        "error": "submit_subtask: duplicate task has stale finalized ownership metadata",
+                        "kind": "stale_duplicate_scope_refusal",
+                        "task_id": tid,
+                        "existing": {
+                            "task_role": existing_role,
+                            "owned_paths": existing_owned_paths,
+                        },
+                        "requested": {
+                            "task_role": role if role is not None else existing_role,
+                            "owned_paths": requested_owned_paths,
+                        },
+                    }
+                if changed:
+                    record_task(
+                        project_dir,
+                        task_id=tid,
+                        intent=intent,
+                        parent_task_id=task_id,
+                        depends_on=depends_on,
+                        owned_paths=requested_owned_paths,
+                        action_ids=action_ids,
+                        task_role=cast(Any, role),
+                    )
+                if foundation_contracts:
+                    update_task_metadata(project_dir, task_id, foundation_contracts=foundation_contracts)
+                return {"task_id": tid, "duplicate": True, "metadata_updated": changed}
+
+        entry = _pending_entry(
+            project_dir=project_dir,
+            parent_task_id=task_id,
+            parent_session_dir=session_dir,
+            intent=intent,
+            depends_on=depends_on,
+            owned_paths=owned_paths,
+            action_ids=action_ids,
+            task_role=role or "feature",
+            parent_integration_branch=None,
+        )
+        append_pending_entry(path, entry)
+        child_task_id = str(entry["task_id"])
+        record_task(
+            project_dir,
+            task_id=child_task_id,
+            intent=intent,
+            parent_task_id=task_id,
+            depends_on=depends_on,
+            owned_paths=owned_paths,
+            action_ids=action_ids,
+            task_role=cast(Any, role),
+        )
+        if foundation_contracts:
+            update_task_metadata(project_dir, task_id, foundation_contracts=foundation_contracts)
+        set_decomposition(project_dir, task_id, "emit")
+        return {"task_id": child_task_id, "duplicate": False}
+
+
 def create_otto_mcp_server(
     *,
     task_id: str,
     project_dir: Path,
     session_dir: Path,
     integration_branch: str | None,
+    execution_scope: str = "leaf",
 ):
     """Build the in-process MCP server for one Lead session.
 
@@ -174,12 +334,7 @@ def create_otto_mcp_server(
     # Imports here so this module is importable without claude_agent_sdk
     # at static-analysis time (some tests stub the SDK).
     from claude_agent_sdk import create_sdk_mcp_server, tool
-
-    from otto.queue.task_graph import (
-        add_cost,
-        record_task,
-        set_decomposition,
-    )
+    from otto.queue.task_graph import set_decomposition
 
     # ------------------------------------------------------------------
     # submit_subtask
@@ -191,11 +346,20 @@ def create_otto_mcp_server(
             "Use this when this Lead's intent contains MULTIPLE strategic areas. "
             "Each call produces one child task with its own Lead. The CALLING "
             "Lead's task_id is automatically recorded as parent_task_id; you do "
-            "NOT pass it. If a child must run after another, pass depends_on=[task_id, ...]."
+            "NOT pass it. If a child must run after another, pass depends_on=[task_id, ...]. "
+            "When known, pass owned_paths=[...] and action_ids=[...] so Otto can "
+            "safely scope child context. Omit task_role when unchanged; use "
+            "task_role='foundation' for the architect/scaffold child and an "
+            "explicit task_role='feature' only when correcting a child back to "
+            "ordinary feature ownership."
         ),
         {
             "intent": str,
             "depends_on": list[str],
+            "owned_paths": list[str],
+            "action_ids": list[str],
+            "task_role": str | None,
+            "foundation_contracts": list[dict[str, Any]],
         },
     )
     async def submit_subtask(args: dict[str, Any]) -> dict[str, Any]:
@@ -204,56 +368,28 @@ def create_otto_mcp_server(
         # comma-joined string, a single task id, or a JSON literal like "[]".
         # Coerce all shapes to a clean list of plausible task ids.
         depends_on = _coerce_id_list(args.get("depends_on"))
-        if not intent:
-            return _err("submit_subtask: 'intent' is required and must be non-empty.")
-
-        # Idempotency: same (parent, intent_hash) returns the same task_id.
-        # Prevents resume-after-crash duplication.
-        idem_key = _intent_hash(task_id, intent)
-        from otto.queue.task_graph import read_graph
-
-        graph = read_graph(project_dir)
-        for tid, entry in graph.get("tasks", {}).items():
-            if (
-                entry.get("parent_task_id") == task_id
-                and _intent_hash(task_id, entry.get("intent") or "") == idem_key
-            ):
-                return _ok({"task_id": tid, "duplicate": True})
-
-        # Create the child's task entry. The actual queue spawn is the watcher's
-        # job; we just record the relationship so the watcher can pick it up.
-        from otto.queue.subtask import enqueue_subtask
-
-        # Children of THIS Lead merge into THIS Lead's own integration branch
-        # (i2p/<task_id>/integration), NOT the branch this Lead itself merges
-        # back into. Passing None lets enqueue_subtask compute the namespaced
-        # default; passing this Lead's outer integration_branch would put
-        # children on the wrong branch and break worktree isolation when an
-        # integration Lead later tries to check out the same branch the
-        # project_dir is already on.
+        owned_paths = _coerce_id_list(args.get("owned_paths"))
+        action_ids = _coerce_id_list(args.get("action_ids"))
+        task_role = _coerce_task_role(args.get("task_role"))
+        foundation_contracts = _coerce_foundation_contracts(args.get("foundation_contracts"))
         try:
-            child_task_id = enqueue_subtask(
+            payload = submit_subtask_for_lead(
                 project_dir=project_dir,
-                parent_task_id=task_id,
-                parent_session_dir=session_dir,
+                session_dir=session_dir,
+                task_id=task_id,
                 intent=intent,
                 depends_on=depends_on,
-                parent_integration_branch=None,
+                owned_paths=owned_paths,
+                action_ids=action_ids,
+                task_role=task_role,
+                foundation_contracts=foundation_contracts,
             )
         except Exception as exc:  # noqa: BLE001 — best-effort: report to Lead
             logger.warning("submit_subtask failed: %s", exc)
             return _err(f"submit_subtask: enqueue failed: {exc}")
-
-        record_task(
-            project_dir,
-            task_id=child_task_id,
-            intent=intent,
-            parent_task_id=task_id,
-            depends_on=depends_on,
-        )
-        # Mark this Lead's decomposition as 'emit' once the first subtask lands.
-        set_decomposition(project_dir, task_id, "emit")
-        return _ok({"task_id": child_task_id, "duplicate": False})
+        if "error" in payload:
+            return _structured_err(payload)
+        return _ok(payload)
 
     # ------------------------------------------------------------------
     # begin_inline
@@ -297,6 +433,7 @@ def create_otto_mcp_server(
                 project_dir=project_dir,
                 session_dir=session_dir,
                 feature_scope_ids=scope_ids,
+                execution_scope=cast(ExecutionScope, execution_scope),
             )
             return _ok(result)
         except Exception as exc:  # noqa: BLE001 — best-effort

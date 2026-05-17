@@ -1392,3 +1392,63 @@ Two independent issues amplified the long run: check execution used structured s
 - Verified the existing current-head fix for `RepoTestCheck` path-glob expansion against the archived failed composer worktree.
 - Tightened the audit evidence packet and prompt to avoid broad reads of `node_modules`, generated bundles, coverage, and test-results.
 - Compacted Codex provider nonzero-exit error summaries and truncated huge command-output log blocks so one bad inspection cannot flood Mission Control artifacts or follow-on crash details.
+
+---
+
+# Modular Decomposition Field-Test Debug
+
+Date: 2026-05-15T02:05:47Z
+
+## Observations
+
+- Round 2 04 and 05 both had root `decomposition=emit`, three children, and all child verdicts `pass`.
+- 04 final failure was not a source merge conflict. It was clean-deploy preflight:
+  - `clean_deploy_port_busy`: declared port 19301 already bound.
+  - `clean_deploy_start_failed`: `start.sh exited 127`; output included `python: command not found`.
+- 05 final failure was clean-deploy preflight:
+  - `clean_deploy_start_failed`: `http.server` raised `OSError: [Errno 48] Address already in use`.
+- In current code, `_run_integration_smoke_preflight()` records blocking smoke issues but does not invoke `PreflightRepairController`.
+- Existing `PreflightRepairController` defaults unknown blocking preflight issues to an agent and auto-fixes `port_busy`.
+- Existing preflight repair agent dispatch does not runner-commit successful repair edits.
+- Archived 04/05 repositories show all `i2p/build/*` branch tips are ancestors of `main`; 04 FE branch has no unique FE commit because the agent found frontend already complete.
+
+## Hypotheses
+
+### H1: Clean-deploy smoke failures bypass repair (ROOT HYPOTHESIS)
+
+- Supports: blocking `clean_deploy_start_failed` appears in logs; code only passes it to integration Lead context and downgrades after repeat smoke failure.
+- Supports: the repair controller would classify `clean_deploy_start_failed` as `agent`, but it is not called.
+- Conflicts: a normal integration Lead could theoretically fix it, but Round 2 shows it did not.
+- Test: wrap smoke preflight in repair loop and simulate first smoke failing then repair agent changing `start.sh`; assert repair result is recorded and final integration continues.
+
+### H2: Port cleanup is not available when ports become known
+
+- Supports: pre-run cleanup happens before `CHARTER.md`/`start.sh` exist, so declared ports are unknown.
+- Supports: both 04 and 05 encountered stale port symptoms.
+- Conflicts: some address-in-use failures can be caused by `start.sh` starting duplicate servers, not external zombies.
+- Test: port-busy smoke issue should run cleanup and rerun smoke; cleanup should not kill unrelated listeners.
+
+### H3: Branch propagation lacks a graph-level invariant
+
+- Supports: older v6e bug class; existing tests do not cover all graph children through `_process_children`.
+- Supports: confusing "FE branch missing" report came from lack of explicit branch ancestry reporting.
+- Conflicts: archived 04/05 child branch tips are ancestors of main.
+- Test: run `_process_children()` with three pass children and assert every pass child branch tip is an ancestor of main.
+
+## Experiments
+
+- Verified `git merge-base --is-ancestor` for every archived 04 and 05 `i2p/build/*` branch against `main`; all returned yes.
+- Inspected 04 FE branch `i2p/build/v5-6825f5f82ade`; its tip is a merge commit of the architect branch and no unique frontend commit.
+- Inspected `_run_integration_smoke_preflight`, root integration, subtree integration, and `_run_preflight_repair_agent`; confirmed no smoke repair wrapper or repair commit path exists.
+
+## Root Cause
+
+The modular path had a repair loop, but the load-bearing clean-deploy smoke gate was outside it. Blocking `start.sh` and port-busy failures were serialized as context, then allowed to become terminal `merge_blocked` after a repeat smoke. Successful focused preflight repairs also lacked a runner-managed commit path, so even when repair edits were made they were not guaranteed to propagate through integration branches.
+
+## Fix Plan
+
+- Add an async smoke-preflight repair wrapper around `smoke_clean_deploy()` in v5 integration paths.
+- Commit successful focused preflight repair edits with `commit_integration_worktree()`.
+- Let `clean_deploy_start_failed` default to agent repair; keep only tiny deterministic shortcuts such as port cleanup.
+- Tighten port cleanup to kill only project/Otto-owned listeners.
+- Add graph-level branch ancestry checks/tests for all direct children after propagation.

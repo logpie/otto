@@ -8,7 +8,6 @@ review modal can be driven via CLI).
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -47,11 +46,11 @@ class TestMarkPendingReview:
         assert {p["task_id"] for p in pending} == {a, b}
 
     def test_mark_only_targets_specified_parent(self, project: Path) -> None:
-        a = enqueue_subtask(
+        enqueue_subtask(
             project_dir=project, parent_task_id="root",
             parent_session_dir=project, intent="A",
         )
-        b = enqueue_subtask(
+        enqueue_subtask(
             project_dir=project, parent_task_id="other",
             parent_session_dir=project, intent="B",
         )
@@ -65,10 +64,10 @@ class TestMarkPendingReview:
 
 class TestApprove:
     def test_approve_all_under_parent(self, project: Path) -> None:
-        a = enqueue_subtask(project_dir=project, parent_task_id="root",
-                            parent_session_dir=project, intent="A")
-        b = enqueue_subtask(project_dir=project, parent_task_id="root",
-                            parent_session_dir=project, intent="B")
+        enqueue_subtask(project_dir=project, parent_task_id="root",
+                        parent_session_dir=project, intent="A")
+        enqueue_subtask(project_dir=project, parent_task_id="root",
+                        parent_session_dir=project, intent="B")
         mark_pending_review(project, parent_task_id="root")
         n = approve(project, parent_task_id="root")
         assert n == 2
@@ -155,8 +154,8 @@ class TestWaitForReviewTimeout:
         """Per plan-v5 §13: every layer terminates. Review timeout auto-approves."""
         from otto.v5_runner import _wait_for_review
 
-        a = enqueue_subtask(project_dir=project, parent_task_id="root",
-                            parent_session_dir=project, intent="A")
+        enqueue_subtask(project_dir=project, parent_task_id="root",
+                        parent_session_dir=project, intent="A")
         mark_pending_review(project, parent_task_id="root")
         # Start with very short timeout.
         events: list[dict] = []
@@ -177,8 +176,8 @@ class TestWaitForReviewTimeout:
         """Wait returns cleanly when user approves via the CLI/API."""
         from otto.v5_runner import _wait_for_review
 
-        a = enqueue_subtask(project_dir=project, parent_task_id="root",
-                            parent_session_dir=project, intent="A")
+        enqueue_subtask(project_dir=project, parent_task_id="root",
+                        parent_session_dir=project, intent="A")
         mark_pending_review(project, parent_task_id="root")
 
         # Spawn the waiter; have a sibling approve after a small delay.

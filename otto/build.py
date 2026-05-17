@@ -42,9 +42,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from collections.abc import Iterable, Mapping
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 
 from otto.checks import Evidence, run_checks
+from otto.path_ownership import path_matches_any_ownership_pattern
 from otto.prompts import render_prompt
 from otto.setup_gitignore import (
     is_common_build_artifact_path,
@@ -440,11 +441,10 @@ class BuildResult:
 class BuildAgentInput:
     """Input passed to a build-agent callable for one attempt on one slice.
 
-    ``feature_id`` is the Layer 2 narrowing hook: when non-empty, the
-    rendered prompt includes a "FIX ONLY THIS FEATURE" preamble pointing
-    the build agent at one Feature inside the Group instead of the whole
-    Group surface. Empty (default) means "build/repair the whole Group"
-    — the original Phase A behaviour.
+    ``feature_id`` is the Layer 2 audit-repair hook: when non-empty, the
+    rendered prompt names the failing acceptance cluster inside the Group.
+    Empty (default) means "build/repair the whole Group" — the original
+    Phase A behaviour.
     """
 
     spec: Spec
@@ -455,7 +455,7 @@ class BuildAgentInput:
     attempt: int  # 1-indexed
     last_failure_narrative: str = ""  # empty on first attempt
     log_dir: Path | None = None  # if set, agent writes narrative there
-    feature_id: str = ""  # Layer 2 narrowing: fix only this feature in the slice
+    feature_id: str = ""  # Layer 2 audit repair representative feature
     related_feature_ids: tuple[str, ...] = ()  # Layer 2 cluster repair scope
     agent_session_id: str = ""  # resume same provider conversation across attempts
     config: dict[str, Any] = field(default_factory=dict)
@@ -463,6 +463,7 @@ class BuildAgentInput:
     full_spec_path: Path | None = None
     merge_repair: bool = False  # true when merge_queue asks this slice to integrate
     contract_deltas: tuple[ContractDelta, ...] = ()
+    failure_artifact_paths: tuple[Path, ...] = ()
     timeout_s: int | None = None  # wall timeout for this provider attempt
 
 
@@ -480,7 +481,7 @@ class BuildAgentOutput:
 class BuildAgentCallable(Protocol):
     """Async callable signature for the per-slice build agent."""
 
-    async def __call__(self, agent_input: BuildAgentInput) -> BuildAgentOutput:
+    async def __call__(self, agent_input: BuildAgentInput, /) -> BuildAgentOutput:
         ...
 
 
@@ -599,6 +600,15 @@ def detect_scope_violations(
             peer_globs.extend(c.owned_paths or [])
 
     violations: list[str] = []
+    critical_contract_paths: list[str] = []
+    for contract in (getattr(spec, "shared_contracts", []) or []):
+        if (
+            getattr(contract, "critical", False)
+            and getattr(contract, "owner_id", "") != group_obj.id
+        ):
+            critical_contract_paths.extend(
+                str(path) for path in (getattr(contract, "paths", []) or [])
+            )
     for raw in modified_paths:
         path = str(raw or "").strip()
         if not path:
@@ -608,6 +618,9 @@ def detect_scope_violations(
             or is_otto_owned_path(path)
             or is_common_build_artifact_path(path)
         ):
+            continue
+        if _matches_any(path, critical_contract_paths):
+            violations.append(path)
             continue
         if _matches_any(path, own_globs):
             continue
@@ -788,36 +801,7 @@ def _transitive_deps(group_id: str, spec: Spec) -> set[str]:
 
 
 def _matches_any(path: str, globs: list[str]) -> bool:
-    from fnmatch import fnmatch
-
-    for g in globs:
-        text = str(g or "").strip()
-        if not text:
-            continue
-        if fnmatch(path, text):
-            return True
-        # `**` recursive globs: fnmatch does not handle them; expand to two
-        # patterns "x/**/y" → "x/*/y" + "x/y" + "x/*/*/y" up to 4 levels.
-        # Pragmatic v1 — tests cover the common cases.
-        if "**" in text:
-            parts = text.split("**")
-            # Pattern "a/**/b" matches a/b, a/*/b, a/*/*/b, etc.
-            if len(parts) == 2:
-                left, right = parts
-                left = left.rstrip("/")
-                right = right.lstrip("/")
-                # ``a/**`` means descendants under ``a``, not ``a`` itself.
-                # For ``a/**/b`` keep the usual zero-or-more middle segment
-                # behavior so it still matches ``a/b``.
-                min_depth = 1 if not right else 0
-                for depth in range(min_depth, 6):
-                    middle = "/".join(["*"] * depth) if depth else ""
-                    candidate = "/".join(
-                        part for part in (left, middle, right) if part
-                    )
-                    if fnmatch(path, candidate):
-                        return True
-    return False
+    return path_matches_any_ownership_pattern(path, globs)
 
 
 # Path-segment patterns excluded from the no-progress hash. Pattern A
@@ -1361,6 +1345,8 @@ def _configured_group_concurrent(config: dict[str, Any] | None) -> int:
     if not isinstance(build, dict):
         return 1
     raw = build.get("group_concurrent")
+    if not isinstance(raw, (int, str)):
+        return 1
     try:
         parsed = int(raw)
     except (TypeError, ValueError):
@@ -1693,6 +1679,7 @@ async def run_build(
         # primary parent doesn't include sibling deps. Merge the rest
         # in via `_setup_group_branch_with_deps` so the slice branch
         # contains the integrated state of ALL its deps.
+        setup_narrative = ""
         if additional_dep_refs:
             dep_setup = _setup_group_branch_with_deps(
                 group_worktree, branch=group_branch,
@@ -1701,6 +1688,7 @@ async def run_build(
                 allow_conflict_context=True,
             )
             branch_real = dep_setup.ok
+            setup_narrative = dep_setup.conflict_context
             # Fall back to single-parent setup if the dep-merge produced a
             # conflict — preserves the build run instead of failing the
             # slice purely from V12. The slice will then fail at merge time
@@ -1753,7 +1741,7 @@ async def run_build(
             branch=group_branch,
             worktree=group_worktree,
             branch_real=branch_real,
-            setup_narrative=dep_setup.conflict_context if additional_dep_refs else "",
+            setup_narrative=setup_narrative,
         )
 
     while True:
@@ -1804,6 +1792,7 @@ async def run_build(
                     },
                 )
                 continue
+            setup_narrative_c = ""
             if additional_dep_refs_c:
                 dep_setup_c = _setup_group_branch_with_deps(
                     comp_worktree, branch=comp_branch,
@@ -1812,6 +1801,7 @@ async def run_build(
                     allow_conflict_context=True,
                 )
                 branch_real_c = dep_setup_c.ok
+                setup_narrative_c = dep_setup_c.conflict_context
                 if not branch_real_c:
                     narrative = _dependency_branch_setup_failure(
                         unit_id=next_component.id,
@@ -1859,9 +1849,7 @@ async def run_build(
                 config=config,
                 base_url=base_url,
                 budget=budget,
-                initial_failure_narrative=(
-                    dep_setup_c.conflict_context if additional_dep_refs_c else ""
-                ),
+                initial_failure_narrative=setup_narrative_c,
                 initial_agent_session_id=resume_agent_sessions.get(next_component.id, ""),
             )
             if branch_real_c and comp_result.status == ComponentStatus.PASSING:
@@ -1967,7 +1955,7 @@ async def run_build(
                     ),
                 )
             else:
-                slice_result = raw_result
+                slice_result = cast(GroupResult, raw_result)
 
             # Pattern D: commit the slice's work to its branch so merge_queue
             # can do a real `git merge`. Only run when branch setup succeeded.
@@ -2124,6 +2112,7 @@ async def _run_slice(
     """
     slice_t0 = time.monotonic()
     last_failure = initial_failure_narrative
+    last_failure_artifact_paths: tuple[Path, ...] = ()
     last_evidence: list[Evidence] = []
     accumulated_scope_warnings: list[str] = []
     accumulated_contract_deltas: list[ContractDelta] = []
@@ -2181,7 +2170,11 @@ async def _run_slice(
         if invalidation_reason:
             return GroupResult(
                 group_id=group_obj.id,
-                status=GroupStatus.BLOCKED,
+                status=(
+                    GroupStatus.FAILED_SCOPE
+                    if accumulated_scope_warnings
+                    else GroupStatus.BLOCKED
+                ),
                 attempts=attempt - 1,
                 branch=branch,
                 worktree=worktree,
@@ -2226,7 +2219,11 @@ async def _run_slice(
                 )
             return GroupResult(
                 group_id=group_obj.id,
-                status=GroupStatus.BLOCKED,
+                status=(
+                    GroupStatus.FAILED_SCOPE
+                    if accumulated_scope_warnings
+                    else GroupStatus.BLOCKED
+                ),
                 attempts=attempt - 1,
                 branch=branch,
                 worktree=worktree,
@@ -2328,6 +2325,7 @@ async def _run_slice(
             config=config,
             context_packet_path=prompt_dir / "context-packet.json",
             full_spec_path=full_spec_path if full_spec_path.exists() else None,
+            failure_artifact_paths=last_failure_artifact_paths,
             timeout_s=max(1, int(math.ceil(budget.per_group_wall_s - elapsed))),
         )
 
@@ -2465,12 +2463,9 @@ async def _run_slice(
                 )
 
         # Scope check: detect modifications outside the slice's declared
-        # owned_paths + transitive deps + shared_scaffold. Soft-warning
-        # mode: don't block the slice — just log the warnings and let
-        # the slice's own checks + cross-slice checks + audit catch any
-        # actual behavior regressions. A modification that crossed a
-        # declared scope boundary is interesting documentation, not
-        # automatically harmful.
+        # owned_paths + transitive deps + shared_scaffold. The amendment
+        # side-channel above can legitimately broaden ownership; remaining
+        # violations are blocking repair feedback, not mergeable warnings.
         # B3 fix: try git first; if it returns no paths (likely because
         # we're in single-worktree fallback or not a repo), fall back
         # to filesystem-snapshot diff. Without a fallback, the first
@@ -2493,12 +2488,9 @@ async def _run_slice(
         scope_warnings = detect_scope_violations(
             group_obj, spec, modified, project_root=worktree
         )
-        for path in detect_dependency_scope_extensions(group_obj, spec, modified):
-            if path not in scope_warnings:
-                scope_warnings.append(path)
         if scope_warnings:
             logger.info(
-                "group %s: scope warnings (%d path(s) outside own scope): %s",
+                "group %s: scope violation (%d path(s) outside own scope): %s",
                 group_obj.id,
                 len(scope_warnings),
                 ", ".join(scope_warnings[:5]),
@@ -2513,7 +2505,7 @@ async def _run_slice(
                 group_id=group_obj.id,
                 attempt=attempt,
                 detail=(
-                    f"scope warning (non-blocking): modified {len(scope_warnings)} "
+                    f"scope violation (blocking): modified {len(scope_warnings)} "
                     f"path(s) outside the slice's own owned_paths: "
                     f"{', '.join(scope_warnings[:5])}"
                 ),
@@ -2522,6 +2514,21 @@ async def _run_slice(
             for w in scope_warnings:
                 if w not in accumulated_scope_warnings:
                     accumulated_scope_warnings.append(w)
+            last_failure = (
+                "scope violation: modified path(s) outside declared ownership: "
+                + ", ".join(scope_warnings[:5])
+                + ". Request a contract amendment via `.otto/amendment_request.json` "
+                "or revert the out-of-scope write before declaring success."
+            )
+            emit(
+                session_dir,
+                "group.attempt.failed",
+                group_id=group_obj.id,
+                attempt=attempt,
+                detail=last_failure,
+            )
+            current_diff_hash = _hash_worktree_diff(worktree)
+            continue
 
         contract_deltas = collect_critical_shared_contract_deltas(
             group_obj,
@@ -2662,6 +2669,7 @@ async def _run_slice(
             evidence_pairs,
             raw_log_dir / f"attempt-{attempt:02d}",
         )
+        last_failure_artifact_paths = _failed_check_artifact_paths(evidence_pairs)
         emit(
             session_dir,
             "group.check.feedback",
@@ -2692,6 +2700,21 @@ async def _run_slice(
         )
 
     # Out of retries.
+    if accumulated_scope_warnings:
+        return GroupResult(
+            group_id=group_obj.id,
+            status=GroupStatus.FAILED_SCOPE,
+            attempts=attempt,
+            branch=branch,
+            worktree=worktree,
+            last_evidence=last_evidence,
+            failure_narrative=last_failure or "scope violation remained after repair attempts",
+            scope_warnings=list(accumulated_scope_warnings),
+            contract_deltas=list(accumulated_contract_deltas),
+            self_check=dict(self_check),
+            cost_usd=cost_total,
+            wall_s=time.monotonic() - slice_t0,
+        )
     if _result_can_continue_degraded(
         evidence_pairs=last_evidence_pairs,
         worktree=worktree,
@@ -2881,7 +2904,10 @@ def _write_build_context_packet(
         "model": build_routing.get("model"),
         "effort": build_routing.get("effort"),
         "agent_routing": routing_snapshot,
-        "repair_feature_ids": list(agent_input.related_feature_ids),
+        "repair_feature_ids": list(
+            agent_input.related_feature_ids
+            or ((agent_input.feature_id,) if agent_input.feature_id else ())
+        ),
         "full_spec_path": str(agent_input.full_spec_path or ""),
         "group": group,
         "features_for_group": features,
@@ -2894,6 +2920,9 @@ def _write_build_context_packet(
         "shared_contracts": spec_dict.get("shared_contracts", []),
         "contract_deltas": [
             delta.to_dict() for delta in (agent_input.contract_deltas or ())
+        ],
+        "failure_artifact_paths": [
+            str(path) for path in agent_input.failure_artifact_paths
         ],
         "behavior_journeys": spec_dict.get("behavior_journeys", []),
         "cross_group_checks": spec_dict.get("cross_group_checks", []),
@@ -2963,29 +2992,33 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
         ]
         if narrowed_features:
             cluster_repair = len(repair_feature_ids) > 1
-            lines.append(
-                "## FIX THE FAILING FEATURE CLUSTER"
-                if cluster_repair
-                else "## FIX ONLY THE FAILING FEATURE"
-            )
+            lines.append("## Repair the failing acceptance cluster")
             lines.append("")
             if cluster_repair:
                 lines.append(
                     f"This is a Layer 2 repair dispatch for {len(repair_feature_ids)} "
                     f"currently failing features inside group `{s.id}`. Repair the "
-                    "shared group behavior coherently in one pass. Preserve unrelated "
-                    "or already-working behavior, but do not treat failing sibling "
-                    "features as off-limits."
+                    "shared acceptance cluster coherently in one pass. Preserve "
+                    "unrelated or already-working behavior, but do not treat failing "
+                    "sibling features as off-limits."
                 )
             else:
                 narrowed = narrowed_features[0]
                 lines.append(
                     f"This is a Layer 2 repair dispatch for feature "
                     f"`{narrowed.name}` (id=`{narrowed.id}`) inside group "
-                    f"`{s.id}`. Touch only the code paths required to make this "
-                    "feature pass its acceptance criteria while preserving unrelated "
-                    "behavior."
+                    f"`{s.id}`. Repair the failing acceptance cluster represented "
+                    "by this feature while preserving unrelated behavior. The root "
+                    "cause may be shared group behavior, so do not over-narrow the "
+                    "fix to a single assertion when the evidence points at a shared "
+                    "contract or workflow."
                 )
+            lines.append(
+                "shared-contract edits are allowed when this group's contract, "
+                "owned paths, shared scaffold, or recorded contract deltas permit "
+                "them; preserve the declared scope and document why the shared "
+                "surface had to change."
+            )
             lines.append("")
             lines.append("**Repair feature scope:**")
             for feature in narrowed_features:
@@ -3569,6 +3602,19 @@ def _result_can_continue_degraded(
     return _worktree_has_product_changes(worktree) and _failed_checks_are_non_structural(evidence_pairs)
 
 
+def _failed_check_artifact_paths(
+    evidence_pairs: list[tuple[CheckKind, Evidence]],
+) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for _check, evidence in evidence_pairs:
+        if evidence.passed:
+            continue
+        for artifact in evidence.artifacts:
+            if artifact not in paths:
+                paths.append(artifact)
+    return tuple(paths)
+
+
 def _failed_check_repair_narrative(
     attempt: int,
     evidence_pairs: list[tuple[CheckKind, Evidence]],
@@ -3623,8 +3669,8 @@ def _failed_check_repair_narrative(
                 lines.append(f"    - {path}: {dimensions}{metrics_text}; {diagnostic}")
         excerpt = _failed_check_log_excerpt(raw_log_path)
         if excerpt:
-            lines.append(f"  Otto check log: `{raw_log_path}`")
-            lines.append("  Log excerpt:")
+            lines.append(f"  Otto check log: `{raw_log_path}` (authoritative full artifact)")
+            lines.append("  Advisory log excerpt:")
             for log_line in excerpt.splitlines():
                 lines.append(f"    {log_line}")
     return "\n".join(lines)
@@ -3686,7 +3732,7 @@ async def default_build_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
     # silently becomes {} causes the build agent to run with default
     # options instead of the project's configured venv/test_command —
     # the run "succeeds" but produces wrong output.
-    config: dict = dict(agent_input.config or {})
+    config: dict[str, Any] = dict(agent_input.config or {})
     if not config and config_path.exists():
         try:
             config = load_config(config_path)

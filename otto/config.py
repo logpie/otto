@@ -47,7 +47,7 @@ DEFAULTS: dict[str, Any] = {
 
     # Budgets & caps
     "run_budget_seconds":     3600,
-    "spec_timeout":           600,
+    "spec_timeout":           1200,
     "max_certify_rounds":     8,
     "max_turns_per_call":     200,
 
@@ -428,7 +428,7 @@ def get_run_budget(config: dict[str, Any]) -> int:
 
 
 def get_spec_timeout(config: dict[str, Any]) -> int:
-    """Read `spec_timeout` from config. Default 600."""
+    """Read `spec_timeout` from config. Default 1200."""
     import logging
     _logger = logging.getLogger("otto.config")
     default = int(DEFAULT_CONFIG["spec_timeout"])
@@ -1237,8 +1237,9 @@ def first_touch_bookkeeping(project_dir: Path, config: dict[str, Any]) -> None:
         if ".gitattributes" in preexisting_dirty_paths:
             log.warning("skipped first-touch .gitattributes setup: file already has user changes")
         else:
+            from otto.setup_gitattributes import GitAttributesConflict, install as install_gitattributes
+
             try:
-                from otto.setup_gitattributes import GitAttributesConflict, install as install_gitattributes
                 if install_gitattributes(project_dir):
                     changed_paths.append(".gitattributes")
             except GitAttributesConflict as exc:
@@ -1517,7 +1518,8 @@ def detect_project_kind(project_dir: Path) -> str:
                 raw = pkg.get(key)
                 if isinstance(raw, dict):
                     deps.update(raw)
-            scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
+            scripts_raw = pkg.get("scripts")
+            scripts: dict[str, Any] = scripts_raw if isinstance(scripts_raw, dict) else {}
             web_markers = {
                 "react", "vue", "svelte", "next", "nuxt", "vite",
                 "@angular/core", "astro", "webpack",
@@ -1643,7 +1645,8 @@ def create_config(project_dir: Path) -> Path:
     Only called by ``otto setup`` — never auto-invoked from build/
     certify/improve.
     """
-    default_branch = detect_default_branch(project_dir) or "main"
+    detected_default_branch = detect_default_branch(project_dir)
+    default_branch = detected_default_branch if detected_default_branch else "main"
     test_command = detect_test_command(project_dir) or "null"
 
     config_path = project_dir / "otto.yaml"

@@ -38,12 +38,15 @@ the schema above, not every numeric literal.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger("otto.defaults")
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +271,11 @@ def _load_yaml_overrides(project_dir: Path) -> dict[str, Any]:
     try:
         text = yaml_path.read_text()
         data = yaml.safe_load(text)
-    except (OSError, yaml.YAMLError):
+    except OSError as exc:
+        logger.warning("could not read otto.yaml defaults override %s: %s", yaml_path, exc)
+        return {}
+    except yaml.YAMLError as exc:
+        logger.warning("ignoring malformed otto.yaml defaults override %s: %s", yaml_path, exc)
         return {}
     if not isinstance(data, dict):
         return {}

@@ -6,7 +6,8 @@ When debugging otto runs, ALWAYS read real logs. Never guess.
 
 ### Quick diagnosis
 ```bash
-otto run "<intent>"                                   # Unified i2p entrypoint: compile → build → merge → audit → render
+otto v5 run "<intent>"                                # i2p entrypoint (flat compile, schema v4) — USE THIS for i2p runs
+otto run "<intent>"                                   # LEGACY pipeline (groups/features compile-spec.md); does NOT converge on large intents — prefer `otto v5 run`
 otto history                                          # Build history with results
 otto pow                                              # Open latest proof-of-work report
 cat otto_logs/cross-sessions/history.jsonl            # Machine-readable history

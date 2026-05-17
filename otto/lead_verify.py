@@ -25,12 +25,18 @@ import asyncio
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
+
+from otto.journey_api_executor import run_api_journey_executor
+from otto.journey_scope_policy import ExecutionScope, applicability_for
+from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdicts
+from otto.observability import iso_timestamp
+from otto.spec_compile_flat import StructuredSpecValidationError, load_flat_spec
 
 logger = logging.getLogger("otto.lead_verify")
 
@@ -44,6 +50,7 @@ async def run_verify_for_lead(
     project_dir: Path,
     session_dir: Path,
     feature_scope_ids: list[str],
+    execution_scope: ExecutionScope = "leaf",
     timeout_s: int = 600,
 ) -> dict[str, Any]:
     """Run real verification against the running product.
@@ -82,14 +89,12 @@ async def run_verify_for_lead(
             f"spec has {len(spec.get('behavior_journeys') or [])} total)"
         )
 
-    journey_results: list[dict[str, Any]] = []
     evidence: list[str] = []
 
     # ---- Layer 1: native test runner (npm test / pytest / cargo test / ...) ----
     test_outcome = await _run_native_tests(
         project_dir=verify_dir, log_dir=log_dir, timeout_s=timeout_s,
     )
-    test_evidence_path = log_dir / "test-output.log"
     if test_outcome["log_path"]:
         evidence.append(str(test_outcome["log_path"]))
 
@@ -108,66 +113,88 @@ async def run_verify_for_lead(
         if browser_outcome.get("artifacts"):
             evidence.extend([str(p) for p in browser_outcome["artifacts"]])
 
-    # ---- Layer 3: map outcomes to per-journey pass/fail ----
-    # In v5, the test agent (Phase 2 build/test split) writes tests named after
-    # journey ids. For now, we use a simpler heuristic: ALL native tests must
-    # pass for journey verdicts to be `pass`. Any browser failure flags the
-    # journeys it touched.
-    overall_native_passed = test_outcome["status"] == "pass"
-    overall_browser_passed = (
-        browser_outcome is None or browser_outcome.get("status") == "pass"
+    api_journeys = [
+        journey
+        for journey in journeys_in_scope
+        if isinstance(journey, dict)
+        and str(journey.get("verification_level") or "").strip() == "api"
+        and applicability_for(execution_scope, "api") == "run"
+    ]
+    api_executor_results: list[dict[str, Any]] = []
+    if api_journeys:
+        api_run = run_api_journey_executor(
+            journeys=api_journeys,
+            project_dir=verify_dir,
+            artifact_dir=log_dir / "api-journeys",
+            base_url=_api_base_url(),
+            timeout_s=timeout_s,
+        )
+        api_executor_results = api_run.executor_results
+        evidence.extend(str(path) for path in api_run.artifact_paths)
+        (log_dir / "api-executor-results.json").write_text(
+            json.dumps(
+                {
+                    "_written_at": iso_timestamp(),
+                    "source": "api_executor",
+                    "executor_results": api_executor_results,
+                    "artifact_paths": [str(path) for path in api_run.artifact_paths],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    journey_results = resolve_journey_verdicts(
+        journeys=journeys_in_scope,
+        execution_scope=execution_scope,
+        executor_results=api_executor_results,
+        registered_executor_levels={"ui", "api"},
     )
+    api_ids = {str(journey.get("id") or "") for journey in api_journeys}
+    api_results = [item for item in journey_results if str(item.get("id") or "") in api_ids]
+    api_failed = failed_journey_ids(api_results)
+    api_passed = sum(1 for item in api_results if item.get("passed") is True)
+    native_status = str(test_outcome.get("status") or "")
+    native_passed = native_status == "pass"
+    native_failed = native_status in {"fail", "timeout", "error"}
+    browser_failed = browser_outcome is not None and browser_outcome.get("status") not in {"pass", "no_tests"}
+    browser_passed = browser_outcome is None or browser_outcome.get("status") == "pass"
 
-    for journey in journeys_in_scope:
-        jid = journey.get("id") or "<unnamed>"
-        # If both layers passed, journey passes. Otherwise it's flagged.
-        if overall_native_passed and overall_browser_passed:
-            journey_results.append({
-                "id": jid,
-                "passed": True,
-                "detail": (
-                    f"native tests passed ({test_outcome.get('summary', '?')})"
-                    + (
-                        f"; browser journey passed ({browser_outcome.get('summary', '?')})"
-                        if browser_outcome else ""
-                    )
-                ),
-            })
-        else:
-            failure_reasons: list[str] = []
-            if not overall_native_passed:
-                failure_reasons.append(
-                    f"native tests {test_outcome.get('status', '?')}: "
-                    f"{test_outcome.get('summary', '?')}"
-                )
-            if not overall_browser_passed and browser_outcome:
-                failure_reasons.append(
-                    f"browser journey {browser_outcome.get('status', '?')}: "
-                    f"{browser_outcome.get('summary', '?')}"
-                )
-            journey_results.append({
-                "id": jid,
-                "passed": False,
-                "detail": "; ".join(failure_reasons),
-            })
-
-    passed = sum(1 for r in journey_results if r["passed"])
-    total = len(journey_results)
-    if test_outcome["status"] == "no_tests" and (
-        browser_outcome is None or browser_outcome.get("status") == "no_runner"
-    ):
-        # Nothing to verify against — honest: unverified.
-        verdict: VerifyVerdict = "unverified"
-        summary = "no test runner detected; cannot verify"
-    elif passed == total:
+    verdict: VerifyVerdict
+    if browser_failed or native_failed or api_failed:
+        verdict = "partial" if (native_passed or api_passed) else "unverified"
+    elif api_results:
+        verdict = "pass" if api_passed == len(api_results) else "unverified"
+    elif native_passed and browser_passed:
         verdict = "pass"
-        summary = f"{total}/{total} journeys passed"
-    elif passed > 0:
-        verdict = "partial"
-        summary = f"{passed}/{total} journeys passed; {total - passed} failed"
     else:
         verdict = "unverified"
-        summary = "no journey passed verification"
+
+    deferred = [
+        str(item.get("id"))
+        for item in journey_results
+        if str(item.get("status") or "").strip().lower() in {"defer", "deferred"}
+    ]
+    skipped = [
+        str(item.get("id"))
+        for item in journey_results
+        if str(item.get("status") or "").strip().lower() in {"skip", "skipped"}
+    ]
+    summary_parts = [f"native tests {test_outcome.get('status')}"]
+    if api_results:
+        summary_parts.append(f"{api_passed}/{len(api_results)} api journeys passed")
+    else:
+        summary_parts.append("no applicable api journeys for this execution scope")
+    if deferred:
+        summary_parts.append(f"deferred ui journeys: {', '.join(deferred)}")
+    if skipped:
+        summary_parts.append(f"skipped journeys: {', '.join(skipped)}")
+    if browser_failed:
+        browser_status = browser_outcome.get("status") if browser_outcome is not None else "unknown"
+        summary_parts.append(f"browser runner {browser_status}")
+    summary = "; ".join(summary_parts)
 
     duration = time.monotonic() - started
     result = {
@@ -375,10 +402,8 @@ def _load_flat_spec_for_session(session_dir: Path) -> dict[str, Any] | None:
     if not spec_path.exists():
         return None
     try:
-        with spec_path.open(encoding="utf-8") as f:
-            data: dict[str, Any] = json.load(f)
-        return data
-    except (OSError, json.JSONDecodeError):
+        return asdict(load_flat_spec(spec_path))
+    except (OSError, json.JSONDecodeError, StructuredSpecValidationError):
         return None
 
 
@@ -386,11 +411,28 @@ def _filter_journeys(
     journeys: list[dict[str, Any]],
     scope_ids: list[str],
 ) -> list[dict[str, Any]]:
-    """Filter journeys to those in scope. Empty scope = all journeys."""
+    """Filter journeys to those owned by this leaf scope. Empty scope = all."""
     if not scope_ids:
         return list(journeys)
     scope_set = set(scope_ids)
-    return [j for j in journeys if (j.get("id") or "") in scope_set]
+    filtered: list[dict[str, Any]] = []
+    for journey in journeys:
+        ids = {
+            str(journey.get("id") or ""),
+            *[str(item) for item in journey.get("feature_ids") or []],
+            *[str(item) for item in journey.get("covers_primary_actions") or []],
+        }
+        if ids & scope_set:
+            filtered.append(journey)
+    return filtered
+
+
+def _api_base_url() -> str | None:
+    for name in ("OTTO_API_BASE_URL", "OTTO_BROWSER_BASE_URL", "API_BASE_URL"):
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return None
 
 
 def _unverified(reason: str) -> dict[str, Any]:

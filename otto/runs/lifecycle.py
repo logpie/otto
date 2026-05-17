@@ -321,7 +321,8 @@ def _append_session_history(
 def _read_json_dict(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning("ignoring unreadable lifecycle JSON %s: %s", path, exc)
         return {}
     return payload if isinstance(payload, dict) else {}
 

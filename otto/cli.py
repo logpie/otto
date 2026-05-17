@@ -9,7 +9,7 @@ import sys
 import time
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # Clear CLAUDECODE at startup so otto can run from inside Claude Code sessions.
 # Without this, agent SDK query() spawns a Claude Code subprocess that detects
@@ -281,6 +281,88 @@ def web_command(
         projects_root=projects_root,
         cwd_project=cwd_project,
     )
+
+
+@main.command("clean-verify", context_settings=CONTEXT_SETTINGS)
+@click.option("--json", "json_output", is_flag=True, help="Emit JSON oracle result.")
+@click.option(
+    "--verify-scope",
+    type=click.Choice(["scaffold", "subtree", "full"]),
+    default="subtree",
+    show_default=True,
+    help="Clean verifier depth; independent from repair-unit id or phase.",
+)
+@click.option(
+    "--repair-packet",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Repair packet snapshot path; also read from OTTO_REPAIR_PACKET_PATH.",
+)
+@click.option(
+    "--spec-path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Flat spec path containing behavior_journeys for journey probes.",
+)
+@click.option(
+    "--journey-scope",
+    type=click.Choice(["leaf", "subtree_integration", "root_integration"]),
+    default=None,
+    help="Behavior journey execution scope for clean-oracle probes.",
+)
+@click.option(
+    "--journey-artifact-dir",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Directory for UI journey probe artifacts.",
+)
+def clean_verify_command(
+    json_output: bool,
+    verify_scope: str,
+    repair_packet: Path | None,
+    spec_path: Path | None,
+    journey_scope: str | None,
+    journey_artifact_dir: Path | None,
+) -> None:
+    """Run the deterministic clean-deploy oracle for this worktree."""
+    from otto.v5_clean_verify import Scope, verify_from_clean_oracle
+
+    env_spec = os.environ.get("OTTO_CLEAN_VERIFY_SPEC_PATH", "").strip()
+    env_journey_scope = os.environ.get("OTTO_CLEAN_VERIFY_JOURNEY_SCOPE", "").strip()
+    env_artifact_dir = os.environ.get("OTTO_CLEAN_VERIFY_JOURNEY_ARTIFACT_DIR", "").strip()
+    packet_path = repair_packet
+    if packet_path is None:
+        env_packet = os.environ.get("OTTO_REPAIR_PACKET_PATH", "").strip()
+        packet_path = Path(env_packet) if env_packet else None
+    env_worktree = os.environ.get("OTTO_CLEAN_VERIFY_WORKTREE", "").strip()
+    project_dir = Path(env_worktree) if packet_path is not None and env_worktree else Path.cwd()
+    result = verify_from_clean_oracle(
+        project_dir,
+        scope=cast(Scope, verify_scope),
+        spec_path=spec_path or (Path(env_spec) if env_spec else None),
+        journey_scope=cast(
+            Any,
+            journey_scope or env_journey_scope or "subtree_integration",
+        ),
+        journey_artifact_dir=(
+            journey_artifact_dir
+            or (Path(env_artifact_dir) if env_artifact_dir else None)
+        ),
+    )
+    if packet_path is not None:
+        from otto.v5_preflight_repair import append_repair_packet_oracle_event
+
+        append_repair_packet_oracle_event(packet_path, result, source="cli")
+    payload = result.to_jsonable()
+    if json_output:
+        click.echo(json.dumps(payload, sort_keys=True))
+    else:
+        click.echo("pass" if result.passed else "fail")
+        if not result.passed:
+            for issue in result.issues:
+                click.echo(f"{issue.kind}: {issue.message}", err=True)
+    if not result.passed:
+        sys.exit(1)
 
 
 def _run_web_command(
@@ -715,7 +797,7 @@ def _render_config_value(value: Any, source: str, *, show_default_suffix: bool) 
 
 def _print_config_banner(
     console_: Any,
-    config: dict,
+    config: dict[str, Any],
     cli_sources: dict[str, str],
     config_path: Path,
     *,
@@ -748,7 +830,9 @@ def _print_config_banner(
     table.add_column(justify="left", no_wrap=True)
     table.add_column(justify="left", no_wrap=True)
 
-    pairs = list(zip(rows[::2], rows[1::2], strict=False))
+    pairs: list[tuple[tuple[str, Any, str], tuple[str, Any, str] | None]] = list(
+        zip(rows[::2], rows[1::2], strict=False)
+    )
     if len(rows) % 2 == 1:
         pairs.append((rows[-1], None))
 

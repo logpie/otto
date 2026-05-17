@@ -70,6 +70,10 @@ evidence, or token accounting.
   Avoid assuming `localhost` or `python run.py` resolves to the intended app.
 - Treat zero-diff focused `improve` tasks as suspicious. Inspect the diff and
   verify the requested delta, not just adjacent existing behavior.
+- Compile/spec agents can emit structured JSON larger than the bounded
+  assistant transcript accumulator. For structured compile outputs, recover the
+  final success `result` from `messages.jsonl` before parsing instead of
+  trusting the accumulated transcript text.
 
 ## Web Build And Test Order
 

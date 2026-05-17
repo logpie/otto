@@ -104,7 +104,7 @@ def _agent_emits_three_features() -> dict[str, object]:
         groups=[
             Group(
                 id="cli-commands",
-                title="CLI commands",
+                name="CLI commands",
                 owned_paths=["src/sample_cli/**"],
             ),
         ],
@@ -234,7 +234,7 @@ def test_brownfield_compile_additive_preserves_verdicts(
         groups=[
             Group(
                 id="cli-commands",
-                title="CLI commands",
+                name="CLI commands",
                 owned_paths=["src/sample_cli/**"],
             ),
         ],

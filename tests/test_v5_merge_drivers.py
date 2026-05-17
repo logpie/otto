@@ -155,7 +155,8 @@ def test_merge_resolves_package_json_conflict_end_to_end(tmp_path: Path) -> None
     _git(repo, "config", "user.email", "t@e.st")
     _git(repo, "config", "user.name", "t")
     (repo / "package.json").write_text(json.dumps({"name": "app", "dependencies": {}}))
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "init")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
 
     integration = "i2p/integ/parent"
     _git(repo, "branch", integration, "main")
@@ -164,12 +165,14 @@ def test_merge_resolves_package_json_conflict_end_to_end(tmp_path: Path) -> None
     child_a = "v5-feat-a"
     _git(repo, "checkout", "-q", "-b", child_branch_name(child_a), "main")
     (repo / "package.json").write_text(json.dumps({"name": "app", "dependencies": {"zustand": "^5"}}))
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "feat A: add zustand")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "feat A: add zustand")
 
     # Integration branch (with a sibling already merged) has recharts.
     _git(repo, "checkout", "-q", integration)
     (repo / "package.json").write_text(json.dumps({"name": "app", "dependencies": {"recharts": "^2"}}))
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "sibling B: add recharts")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "sibling B: add recharts")
 
     ok, detail = merge_branch_into(
         project_dir=repo,
@@ -194,7 +197,8 @@ def test_merge_discards_lockfile_conflict(tmp_path: Path) -> None:
     _git(repo, "config", "user.name", "t")
     (repo / "package.json").write_text('{"name":"app"}')
     (repo / "package-lock.json").write_text('{"lockfileVersion":1,"name":"v1"}')
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "init")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
 
     integration = "i2p/integ/parent"
     _git(repo, "branch", integration, "main")
@@ -202,11 +206,13 @@ def test_merge_discards_lockfile_conflict(tmp_path: Path) -> None:
     child = "v5-feat"
     _git(repo, "checkout", "-q", "-b", child_branch_name(child), "main")
     (repo / "package-lock.json").write_text('{"lockfileVersion":1,"name":"v2"}')
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "child lockfile drift")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "child lockfile drift")
 
     _git(repo, "checkout", "-q", integration)
     (repo / "package-lock.json").write_text('{"lockfileVersion":1,"name":"v3"}')
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "integration lockfile drift")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "integration lockfile drift")
 
     ok, detail = merge_branch_into(
         project_dir=repo,
@@ -226,7 +232,8 @@ def test_real_source_conflict_still_blocks(tmp_path: Path) -> None:
     _git(repo, "config", "user.email", "t@e.st")
     _git(repo, "config", "user.name", "t")
     (repo / "src.py").write_text("a = 1\n")
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "init")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
 
     integration = "i2p/integ/parent"
     _git(repo, "branch", integration, "main")
@@ -234,11 +241,13 @@ def test_real_source_conflict_still_blocks(tmp_path: Path) -> None:
     child = "v5-feat"
     _git(repo, "checkout", "-q", "-b", child_branch_name(child), "main")
     (repo / "src.py").write_text("a = 2\n")
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "child")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "child")
 
     _git(repo, "checkout", "-q", integration)
     (repo / "src.py").write_text("a = 3\n")
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "integ")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "integ")
 
     ok, detail = merge_branch_into(
         project_dir=repo,

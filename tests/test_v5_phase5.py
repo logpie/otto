@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -13,13 +11,10 @@ import pytest
 from otto.lead_verify import (
     _detect_browser_runner,
     _detect_test_command,
-    _filter_journeys,
-    _unverified,
     run_verify_for_lead,
 )
 from otto.v5_branching import (
     child_branch_name,
-    child_worktree_path,
     commit_worktree,
     ensure_branch_exists,
     integration_branch_name,
@@ -144,7 +139,7 @@ class TestRunVerifyForLead:
         assert result["verdict"] == "unverified"
 
     @pytest.mark.asyncio
-    async def test_npm_passing_test_yields_pass(self, npm_project: Path) -> None:
+    async def test_webapp_leaf_ui_journey_is_deferred_and_native_tests_can_pass(self, npm_project: Path) -> None:
         session_dir = npm_project / "otto_logs" / "sessions" / "s1"
         spec_dir = session_dir / "spec"
         spec_dir.mkdir(parents=True, exist_ok=True)
@@ -152,7 +147,16 @@ class TestRunVerifyForLead:
             json.dumps({
                 "schema_version": 1,
                 "intent": "x",
-                "behavior_journeys": [{"id": "j1", "description": "tests pass"}],
+                "project_kind": "webapp",
+                "behavior_journeys": [
+                    {
+                        "id": "j1",
+                        "description": "tests pass",
+                        "covers_primary_actions": ["test.pass"],
+                        "start_state": "empty_workspace",
+                        "entry_route": "/",
+                    }
+                ],
             }),
             encoding="utf-8",
         )
@@ -165,8 +169,9 @@ class TestRunVerifyForLead:
         )
         assert result["verdict"] == "pass"
         assert result["test_outcome"]["status"] == "pass"
-        assert len(result["journeys"]) == 1
-        assert result["journeys"][0]["passed"] is True
+        assert result["journeys"][0]["id"] == "j1"
+        assert result["journeys"][0]["status"] == "defer"
+        assert "deferred ui journeys: j1" in result["summary"]
 
 
 # ---------------------------------------------------------------------------

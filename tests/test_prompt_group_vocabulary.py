@@ -194,3 +194,11 @@ def test_compile_spec_browser_journeys_are_agent_browser_first() -> None:
     assert '"command": ["pytest", "tests/browser/test_shell.py"]' not in text
     assert "`npm run test:browser -- tests/browser/<feature>.spec.ts`" in text
     assert "typically a Playwright" not in text
+
+
+def test_lead_prompt_contains_v6_dag_quality_rules() -> None:
+    text = (PROMPTS_DIR / "lead.md").read_text(encoding="utf-8")
+    assert "3-5 build leaves" in text
+    assert "Avoid recursive decomposition" in text
+    assert "Do not create a\nseparate integration child" in text
+    assert "Every\nextra session pays setup" in text

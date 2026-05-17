@@ -3,6 +3,96 @@
 Source of truth: [`research.md`](research.md). Conversation transcript:
 [`docs/otto-redesign-conversation.md`](docs/otto-redesign-conversation.md).
 
+## P0 Verdict/Merge Integrity Hardening (2026-05-15)
+
+Goal: detector findings must trigger agent repair/oracle verification or block.
+Raw `partial`/`unverified` results, vague pass blobs, failed runner oracles,
+degraded failed checks, empty compile contracts, and unknown preflight kinds must
+not silently flow into merge/land/pass paths.
+
+Plan Gate: local `codex-gate` checklist APPROVED.
+
+- Objective and owned files: `otto/v5_runner.py`, `otto/lead.py`,
+  `otto/merge_queue.py`, `otto/spec_compile_flat.py`,
+  `otto/v5_preflight.py`, `otto/queue/task_graph.py`, and focused `tests/`.
+- Worktree/branch confirmed: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+  on branch `cc-i2p-2`.
+- Riskiest assumptions:
+  - `review_state=reviewed_partial` is sufficient as the minimal durable state.
+    Verify: tests distinguish raw `partial` from reviewed partial.
+  - Reusing the child worktree for one verify/repair dispatch preserves branch
+    ownership and lets existing child merge code commit the final result.
+    Verify: regression stubs prove raw `unverified` does not merge before the
+    second pass.
+  - Compile failure should raise rather than write an empty spec. Verify:
+    compile test asserts no `spec.json` after repeated invalid output.
+- Existing patterns reused: `LeadResult`, `run_lead`/`_run_lead_with_fallback`,
+  `PreflightRepairController`, task graph metadata, and merge queue repair loop.
+- System-level verification:
+  - Verify: red/green proof for items 1, 2, 3, 5, and 6 by stashing production
+    changes and running the focused tests.
+  - Verify: `uv run python scripts/test_tiers.py smoke`.
+  - Verify: `uv run --extra dev python -m pytest tests/test_v5_leaf_runtime_invariants.py tests/smoke -q`.
+  - Verify: focused pytest for new P0 tests.
+  - Verify: `uv run ruff check` and `basedpyright --level error` on touched files.
+- Docs/artifacts: update `review.md` with implementation gate status and any
+  unavailable external review notes.
+
+Steps:
+
+1. Add reviewed-partial metadata support in the task graph and helper gates in
+   the runner. Raw `partial`/`unverified` triggers one verify/repair Lead in the
+   same child worktree, then a smoke oracle; only `pass` or recorded
+   reviewed-partial can merge.
+   Verify: child test fails on old code because merge happens after the first
+   `unverified`, then passes after repair-first behavior.
+2. Tighten verdict canonicalization so `pass` requires structured evidence.
+   Vague success/status blobs without evidence canonicalize as `unverified`.
+   Verify: direct canonicalization tests cover bare success/status and a
+   canonical evidence-bearing pass.
+3. Downgrade self-reported pass when runner verification-plan execution raises.
+   Verify: a fake runner verifier exception yields `unverified` in result,
+   summary, and task graph.
+4. Remove degraded merge landing on failed non-structural checks unless an
+   explicit reviewed-partial marker is present.
+   Verify: merge queue regression blocks the old degraded-failed-check path.
+5. Fail loudly when flat spec compile never produces usable JSON/schema.
+   Verify: compile regression raises and leaves no empty spec artifact.
+6. Make unknown preflight kinds blocking so they route into repair/redispach.
+   Verify: scaffold and clean-deploy unknown-kind tests return block severity.
+
+Implementation Gate: pending until diff review and tests complete.
+
+## Leaf Runtime Invariant Poisoning Fix (2026-05-15)
+
+Goal: prevent stale runtime hints inside child INTENT text from overriding the
+leaf's real runtime values, and recover valid verdict writes when the old prompt
+bug made an agent write to a discoverable wrong session path.
+
+Plan Gate: local `codex-gate` checklist APPROVED. External Codex MCP gate is
+not available in this session.
+
+Steps:
+
+1. Sanitize agent-submitted intent lines with runtime-looking prefixes such as
+   `SESSION_DIR`, `Session dir`, `TASK_ID`, parent/root session paths, and
+   worktree/project paths before prompt interpolation.
+   Verify: rendered leaf prompt has no stale root session path and exactly one
+   canonical `SESSION_DIR:` value for the leaf session.
+2. Render a delimited runtime block immediately after the intent block and make
+   it the sole concrete task/session source.
+   Verify: the required ignore sentence is present and task/session values come
+   from the canonical runtime block.
+3. Extend `_read_agent_verdict()` to inspect Write tool inputs in
+   `lead/messages.jsonl` for canonical-shaped verdict JSON, copy a valid payload
+   to `<leaf_session>/verdict.json`, and append a structured warning to the
+   narrative log.
+   Verify: a simulated root-session Write payload resolves to `pass`, creates
+   the leaf canonical verdict file, and emits a warning.
+4. Run focused tests, smoke tests, and changed-file lint/type checks.
+   Verify: requested pytest commands plus `ruff check` and basedpyright on the
+   changed Python surface.
+
 This plan supersedes the V21 detail-panel framing and the prior
 intent-to-product plan at `~/.claude/plans/plan-based-on-this-soft-cloud.md`.
 Per CLAUDE.md, **Codex Plan Gate review is mandatory** before
@@ -705,3 +795,293 @@ Per CLAUDE.md mandatory protocol:
   `~/.claude/plans/plan-based-on-this-soft-cloud.md` step 11.
 - Concurrent-Run support (research §11.6): out of scope; single
   project lock retained.
+
+---
+
+# Plan: Make Modular Decomposition Repairable
+
+Date: 2026-05-15T02:05:47Z
+
+## Objective
+
+Make v5 modular decomposition useful in field tests by fixing the runner-level failures that turned all-green child runs into `merge_blocked`.
+
+## Steps
+
+1. Route integration clean-deploy smoke through the repair controller.
+   - Why: `clean_deploy_start_failed` and `clean_deploy_port_busy` are currently observed but not repaired.
+   - Verify: focused async test where first smoke fails with `start.sh exited 127`, repair edits `start.sh`, second smoke passes, integration proceeds.
+
+2. Commit successful preflight repair edits.
+   - Why: a repair Lead can change `start.sh`, but runner-managed branch commits are what make fixes durable across integration/propagation.
+   - Verify: test committed `start.sh` change is present on the integration branch and worktree is clean.
+
+3. Move zombie-port handling into safe preflight repair.
+   - Why: the field-test driver should not encode product-run lifecycle policy; v5 clean deploy owns declared-port hygiene once ports exist.
+   - Verify: `port_busy` auto-fix kills only project/Otto-owned listeners and reruns smoke; unrelated listeners are left alone and escalate.
+
+4. Add branch ancestry invariant coverage.
+   - Why: all child branch tips reaching the parent/root integration branch is the product invariant; unique commit messages are insufficient.
+   - Verify: `_process_children()` test asserts every passing direct child build branch is an ancestor of main, including a no-op child branch.
+
+5. Run local gates.
+   - Verify: focused pytest, ruff on touched files, `git diff --check`.
+
+6. Rerun live field tests.
+   - Verify: 04 and 05 final verdict not `merge_blocked`/`catastrophic`; boot smoke HTTP 200; every child branch is ancestor of `main`.
+
+## Plan Gate Review
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is available in this session. Local `codex-gate` checklist applied:
+
+- Worktree confirmed: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`, branch `cc-i2p-2`.
+- Existing repo patterns found: `PreflightRepairController`, `commit_integration_worktree`, `merge_branch_into`, `_process_children` tests.
+- Riskiest assumption: treating clean-deploy start failures as repairable will not hide true product failures. Mitigation: repair attempts are capped and repeat failures still return `merge_blocked`.
+- Simpler alternative rejected: only changing field-test port allocation. That would avoid one environmental failure but would not fix `python` portability or any future agent-fixable `start.sh` failure.
+- Behavior docs/artifacts: append research/debug/plan/review trail; no user docs needed unless live rerun reveals UX-facing changes.
+
+---
+
+# Plan: P1 Agentic-Native Hardening
+
+Date: 2026-05-15
+
+## Objective
+
+Replace lenient router defaults with agent-repair-gated-by-oracle behavior for
+the P1 cohort without changing the P2 over-classification surface.
+
+## Steps
+
+1. Harden preflight failure mapping and retry semantics.
+   - Why: manifest-backed `no_npm`/`no_python` and timeouts are repairable
+     failures, not informational skips.
+   - Verify: tests show runtime-missing blocks, timeout retries once at a
+     larger budget, and failures still block with original output.
+
+2. Make deterministic preflight shortcuts honest.
+   - Why: a no-op rename/chmod must not be logged as repaired.
+   - Verify: tests show `renamed: []` and `chmod_x: []` fall through to agent
+     with no `auto_fix/repaired` log event.
+
+3. Return and consume honest stale-port cleanup state.
+   - Why: killed PIDs are not proof that the port is free.
+   - Verify: tests assert `killed_ports`, `freed_ports`, and
+     `still_bound_ports`; runner routes still-bound startup cleanup through the
+     repair loop.
+
+4. Remove integration worktree setup fallback to `project_dir`.
+   - Why: integration agents must run in the merged integration branch tree.
+   - Verify: setup failure triggers repair/retry or `merge_blocked`; no
+     integration Lead is dispatched with `project_dir` as fallback.
+
+5. Add v5 conflict-agent handoff and gate it.
+   - Why: deterministic merge conflicts should create an agent repair attempt
+     with both sides, then rerun merge and smoke before blocking.
+   - Verify: tests exercise conflict packet creation and a fake repair agent
+     resolving the source branch before clean re-merge.
+
+6. Fix audit-loop cap/orphan behavior.
+   - Why: arbitrary order and audit-pass caps should not starve first repair
+     attempts; spec/verdict mismatches are contract bugs.
+   - Verify: tests cover one attempt per failing group despite low cap, audit
+     cap reservation, and orphan mismatch raising.
+
+7. Make ambiguous context slicing explicit and resolver-ready.
+   - Why: full context fallback hides ID-resolution failures.
+   - Verify: tests cover resolver hook success and auditable last-resort full
+     fallback when no resolver is available.
+
+8. Make out-of-scope writes blocking unless amended or reverted.
+   - Why: sibling ownership corruption must not merge as a warning.
+   - Verify: tests show peer/dependency scope writes become
+     `failed_scope`/blocked while accepted amendments still clear scope.
+
+9. Run local gates.
+   - Verify: red proof via production-only patch rollback, requested pytest
+     commands, smoke tier, ruff, basedpyright on touched files, and
+     implementation gate review.
+
+## Plan Gate Review
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local `codex-gate` checklist applied:
+
+- Worktree confirmed: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`,
+  branch `cc-i2p-2`, clean before edits.
+- Owned files: `otto/v5_preflight.py`, `otto/v5_preflight_repair.py`,
+  `otto/v5_clean_verify.py`, `otto/v5_runner.py`, `otto/v5_branching.py`,
+  `otto/audit_loop.py`, `otto/v5_context_slicer.py`, `otto/build.py`, and
+  focused tests.
+- Riskiest assumptions: manifest presence is the right runtime-need signal;
+  conflict repair should edit the source branch, not the target branch; scope
+  blocking should retry once via the existing build loop rather than merge a
+  warning.
+- Simpler existing patterns: reuse `PreflightRepairController`,
+  `_run_preflight_repair_agent`, `commit_integration_worktree`,
+  amendment side-channel, and merge-queue conflict-context wording.
+- System checks: focused P1 tests, required P0/leaf/smoke tests, smoke tier,
+  ruff, basedpyright, and production-only rollback red proof.
+
+---
+
+# Plan: P2 Agentic-Native Over-Classification Hardening
+
+Date: 2026-05-15
+
+## Objective
+
+Remove over-classification gates that decide with string/regex/extension
+heuristics where Otto should instead rely on typed provider signals or dispatch
+agent repair behind an oracle.
+
+## Steps
+
+1. Replace repair-gate term lists with default-actionable behavior and a typed
+   non-repairable allowlist.
+   - Why: detector-found failures should enter repair unless a typed reason says
+     a coding agent cannot act, such as provider auth exhaustion.
+   - Verify: P2 tests show weak visual/http/source findings and empty details
+     route to repair, while a typed provider-auth code does not.
+
+2. Centralize BrowserJourney tool-family identity in a typed adapter.
+   - Why: substring matching command text misclassifies wrappers and silently
+     applies agent-browser preflight to non-agent commands.
+   - Verify: P2 tests show exact agent-browser commands still require sessions,
+     substring impostors are `other`, and unknown commands fall through.
+
+3. Make flat-spec structured-output extraction typed.
+   - Why: fuzzy tool-name aliases can select the wrong tool payload and replay
+     the provider-divergence bug class.
+   - Verify: P2 tests show returned `structured_output` wins without parsing
+     prose and alias tool names are ignored.
+
+4. Fail missing webapp structured IA contracts.
+   - Why: a webapp spec that should have PM/IA structure cannot be verified if
+     `spec.json` or CHARTER IA is missing.
+   - Verify: P2 tests show webapp missing-structure/missing-IA downgrades a pass
+     to partial, while non-webapp legacy specs remain skippable.
+
+5. Return scaffold build failures as `partial`.
+   - Why: `unverified` hides a concrete failed build from the repair routing
+     signal model.
+   - Verify: P2 tests show nonzero scaffold certification writes `partial` to
+     the return payload and `verify-result.json`.
+
+6. Run local gates and implementation review.
+   - Verify: red P2 proof before production patch, green P2 after, requested
+     regression suites, smoke tier, ruff, basedpyright, and diff review.
+
+## Plan Gate Review
+
+Codex MCP gate status: skipped because no `mcp__codex__codex` tool is
+available in this session. Local `codex-gate` checklist applied:
+
+- Worktree confirmed: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`,
+  branch `cc-i2p-2`, clean before edits.
+- Owned files: `otto/repair_gates.py`, `otto/browser_testing.py`,
+  `otto/checks.py`, `otto/spec_compile_flat.py`,
+  `otto/v5_verification_plan.py`, `otto/mcp_tools.py`, focused tests, and gate
+  trail artifacts.
+- Riskiest assumptions: exact `StructuredOutput` is the Claude typed tool
+  contract; v5 `webapp` is the product kind requiring IA; unknown browser
+  commands should still execute rather than getting preflight-skipped.
+- Simpler existing patterns: reuse canonical `partial`, existing
+  `structured_output` JSONL field, `BrowserJourney` typed check boundaries, and
+  `verification_plan.json` required-failure downgrade.
+- System checks: focused P2 tests, required P0/P1/leaf/smoke tests, smoke tier,
+  ruff, basedpyright, and production-only rollback red proof.
+
+---
+
+# Plan: Pass 4 Brittleness Containment
+
+Date: 2026-05-15
+
+## Objective
+
+Fix the remaining HIGH brittleness findings and add a standing AST guardrail
+that prevents new lenient-success, swallowed-state, substring-classifier,
+dependency-satisfaction, and identity-fallback regressions.
+
+## Steps
+
+1. Split non-runnable task verdicts from dependency-satisfied verdicts.
+   - Why: anti-thrash and dependency success are different semantics.
+   - Verify: a catastrophic upstream is not redispatched, and its dependent is
+     not ready; reviewed partial still satisfies dependency.
+
+2. Close audit walkthrough false-success paths.
+   - Why: a webapp audit cannot treat "no artifact" or synthesized
+     "not-applicable" as proof.
+   - Verify: synthesized no-shape webapp returns `succeeded=False`; a passing
+     judge is capped to partial when the configured walkthrough fails.
+
+3. Keep malformed check payloads non-blocking but machine-detectable.
+   - Why: v2.1 says malformed per-check payloads do not block slices, but they
+     must never be counted as real proof.
+   - Verify: malformed evidence has `malformed=True`,
+     `evidence_quality="malformed"`, `proof_usable=False`, and those fields
+     appear in the audit evidence packet.
+
+4. Remove child worktree setup fallback to `project_dir`.
+   - Why: running a child against the root worktree violates branch/worktree
+     identity and can corrupt unrelated state.
+   - Verify: setup failure marks the child `merge_blocked` and does not call
+     `run_lead`.
+
+5. Add `tests/test_brittleness_guardrail.py`.
+   - Why: the recurring class needs a structural CI tripwire.
+   - Verify: guardrail walks `otto/` AST, fails on synthetic/current
+     violations outside a reasoned allowlist, and passes after fixes.
+
+6. Run local gates and implementation review.
+   - Verify: red production-rollback proof for new behavior tests; focused
+     green tests; requested smoke/regression suites; ruff and basedpyright on
+     touched files.
+
+## Plan Gate Review
+
+Codex MCP gate status: unavailable in this session. Local `codex-gate`
+checklist applied:
+
+- Worktree confirmed:
+  `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`, branch `cc-i2p-2`.
+- Owned files: `otto/queue/subtask.py`, `otto/v5_runner.py`,
+  `otto/audit.py`, `otto/checks.py`, `otto/v5_branching.py`, focused tests,
+  guardrail test, and review/research/plan artifacts.
+- Riskiest assumptions: malformed-check leniency remains safe only if audit
+  evidence is loud and missing walkthroughs cap verdicts; reviewed partial is
+  the only non-pass dependency-satisfied state.
+- Existing patterns reused: `mark_reviewed_partial`, `LeadResult`,
+  `set_verdict`, audit `verdict_cap_reasons`, and `_compact_evidence`.
+- System checks: new focused hardening tests, guardrail test, requested
+  P0/P1/P2/leaf/smoke suites, smoke tier, ruff, basedpyright, and diff review.
+
+## 2026-05-16T08:22:38Z - Spec Compile Timeout Re-entry Plan
+
+1. Add RED-first deterministic tests for compile timeout re-entry.
+   - Why: the failure must be reproduced without a long live LLM run.
+   - Verify: `uv run --extra dev pytest tests/test_spec_compile_timeout_reentry.py -q -p no:cacheprovider` fails on current code with raw timeout propagation or missing structured payload behavior.
+
+2. Add narrow timeout classification and structured timeout exhaustion.
+   - Why: timeout is retryable, but budget/max-turn/provider crashes must not be hidden.
+   - Verify: attempt-1 timeout re-enters and attempt-2 success returns a valid spec; non-timeout `AgentCallError` still propagates.
+
+3. Make compile timeout attempts progressive and budget-clamped.
+   - Why: retrying the same cap can deterministically fail again; the global run budget remains the outer guard.
+   - Verify: tests assert attempt 2 receives an increased timeout and budget-clamped calls never exceed remaining budget.
+
+4. Route timeout exhaustion through clean compile-terminal handling.
+   - Why: CLI/orchestrator code already treats `SpecValidationError` as a clean compile failure; timeout exhaustion needs the same terminal lane with machine-readable details.
+   - Verify: focused CLI test confirms `otto run --no-build` exits nonzero, emits `run.finished`, and records structured kind `spec_compile_timeout_exhausted`, not a raw catastrophic exception.
+
+5. Raise the spec timeout default and sync docs/template mirrors.
+   - Why: 600s is empirically too low for large product specs; the default should fit real capstone compile work while remaining overrideable.
+   - Verify: config unit expectations and grep confirm no stale "Default 600" or template inconsistency remains.
+
+6. Run acceptance gates and review the diff.
+   - Verify: requested focused test, spec/compile regression suite, and `uv run ruff check otto/` all pass.
+
+### Plan Gate Note
+- `/codex-gate` / Codex MCP review tools are not available in this session's tool list. I cannot invoke the mandatory external gate here; I will record implementation review in `review.md` and rely on the RED/GREEN repro plus requested regression commands.

@@ -8,10 +8,14 @@ Root claimed verdict=pass anyway. This is a correctness defect, not polish.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from otto.v5_branching import (
+    MergeWorktreeDirtyError,
     child_branch_name,
     integration_branch_name,
     merge_branch_into,
@@ -87,12 +91,14 @@ def test_propagation_blocks_on_real_source_conflict(tmp_path: Path) -> None:
     # Web subtree commits a shared App.tsx
     _git(repo, "checkout", "-q", parent_integ)
     (repo / "App.tsx").write_text("// web version\n")
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "web App.tsx")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "web App.tsx")
 
     # API task on main also writes App.tsx (unusual but exercises conflict).
     _git(repo, "checkout", "-q", "main")
     (repo / "App.tsx").write_text("// api version\n")
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "api App.tsx")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "api App.tsx")
 
     ok, detail = merge_branch_into(
         project_dir=repo,
@@ -118,7 +124,8 @@ def test_merge_child_into_integration_still_works(tmp_path: Path) -> None:
     child_id = "v5-feat"
     _git(repo, "checkout", "-q", "-b", child_branch_name(child_id), "main")
     (repo / "feature.txt").write_text("A\n")
-    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "feat A")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "feat A")
 
     ok, detail = merge_child_into_integration(
         project_dir=repo,
@@ -128,3 +135,91 @@ def test_merge_child_into_integration_still_works(tmp_path: Path) -> None:
     assert ok, detail
     _git(repo, "checkout", "-q", integ)
     assert (repo / "feature.txt").read_text() == "A\n"
+
+
+def test_merge_branch_into_raises_on_tracked_modified_worktree(tmp_path: Path) -> None:
+    """Tracked target worktree modifications fail before checkout."""
+    repo = tmp_path / "r"
+    _init_repo(repo)
+
+    source = integration_branch_name("v5-web")
+    _git(repo, "checkout", "-q", "-b", source, "main")
+    (repo / "web.txt").write_text("subtree\n")
+    _git(repo, "add", "web.txt")
+    _git(repo, "commit", "-q", "-m", "subtree")
+
+    _git(repo, "checkout", "-q", "main")
+    (repo / "README.md").write_text("uncommitted\n")
+
+    with pytest.raises(MergeWorktreeDirtyError) as excinfo:
+        merge_branch_into(
+            project_dir=repo,
+            source_branch=source,
+            target_branch="main",
+        )
+
+    detail = str(excinfo.value)
+    assert "current=main" in detail
+    assert f"source={source}" in detail
+    assert "target=main" in detail
+    assert "README.md" in detail
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "main"
+
+
+def test_merge_branch_into_allows_untracked_only_worktree(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repo = tmp_path / "r"
+    _init_repo(repo)
+
+    source = integration_branch_name("v5-web")
+    _git(repo, "checkout", "-q", "-b", source, "main")
+    (repo / "web.txt").write_text("subtree\n")
+    _git(repo, "add", "web.txt")
+    _git(repo, "commit", "-q", "-m", "subtree")
+
+    _git(repo, "checkout", "-q", "main")
+    stray = repo / "product-contract.json"
+    stray.write_text('{"unused": true}\n')
+
+    caplog.set_level(logging.WARNING, logger="otto.v5_branching")
+    ok, detail = merge_branch_into(
+        project_dir=repo,
+        source_branch=source,
+        target_branch="main",
+    )
+
+    assert ok, detail
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "main"
+    assert (repo / "web.txt").read_text() == "subtree\n"
+    assert stray.read_text() == '{"unused": true}\n'
+    assert "untracked files before checkout" in caplog.text
+    assert "?? product-contract.json" in caplog.text
+
+
+def test_merge_branch_into_tracked_dirty_wins_over_untracked(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    _init_repo(repo)
+
+    source = integration_branch_name("v5-web")
+    _git(repo, "checkout", "-q", "-b", source, "main")
+    (repo / "web.txt").write_text("subtree\n")
+    _git(repo, "add", "web.txt")
+    _git(repo, "commit", "-q", "-m", "subtree")
+
+    _git(repo, "checkout", "-q", "main")
+    (repo / "README.md").write_text("uncommitted\n")
+    (repo / "product-contract.json").write_text('{"unused": true}\n')
+
+    with pytest.raises(MergeWorktreeDirtyError) as excinfo:
+        merge_branch_into(
+            project_dir=repo,
+            source_branch=source,
+            target_branch="main",
+        )
+
+    detail = str(excinfo.value)
+    assert "README.md" in detail
+    assert "product-contract.json" in detail
+    assert _git(repo, "branch", "--show-current").stdout.strip() == "main"

@@ -3,18 +3,60 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from otto.v5_preflight import (
     PreflightIssue,
+    check_scaffold_compiles,
     filter_blocked_descendants,
     run_preflight,
+    smoke_clean_deploy,
 )
+from otto.v5_clean_verify import CleanOracleIssue, CleanOracleResult, CleanOracleStepResult, Scope
 
 
-def _graph(tasks: dict) -> dict:
+def _graph(tasks: dict[str, Any]) -> dict[str, Any]:
     return {"schema_version": 1, "tasks": tasks}
+
+
+def _clean_oracle_result(
+    tmp_path: Path,
+    *,
+    passed: bool,
+    scope: Scope,
+    kind: str = "build_failed",
+    message: str = "failed",
+) -> CleanOracleResult:
+    step = CleanOracleStepResult(
+        id="check",
+        status="passed" if passed else "failed",
+        return_code=0 if passed else 1,
+        command_identity="python -m otto.cli clean-verify",
+        command=["python", "-m", "otto.cli", "clean-verify"],
+        cwd=str(tmp_path),
+        env={},
+    )
+    issue = CleanOracleIssue(
+        kind=kind,
+        severity="block",
+        message=message,
+        step_id=step.id,
+        command_identity=step.command_identity,
+        return_code=step.return_code,
+    )
+    return CleanOracleResult.from_parts(
+        passed=passed,
+        scope=scope,
+        issues=[] if passed else [issue],
+        steps=[step],
+        artifact_path_refs=[],
+        command=step.command,
+        env=step.env,
+        project_dir=tmp_path,
+        temp_dir=None,
+    )
 
 
 def test_architect_sub_decomposed_flagged(tmp_path: Path):
@@ -173,3 +215,64 @@ def test_clean_graph_no_issues(tmp_path: Path):
     (tmp_path / "CHARTER.md").write_text("# x\n")
     issues = run_preflight(tmp_path, g, [])
     assert issues == []
+
+
+def test_check_scaffold_compiles_maps_script_valid_failure_to_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_verify_from_clean(*_args, **_kwargs) -> CleanOracleResult:
+        return _clean_oracle_result(
+            tmp_path,
+            passed=False,
+            scope="scaffold",
+            kind="script_valid_failed",
+            message="start.sh uses bash-4-only expansion",
+        )
+
+    monkeypatch.setattr(
+        "otto.v5_clean_verify.verify_from_clean_oracle",
+        fake_verify_from_clean,
+    )
+
+    issues = check_scaffold_compiles(tmp_path, architect_task_id="v5-arch")
+
+    assert issues == [
+        PreflightIssue(
+            kind="script_valid_failed",
+            severity="block",
+            message="start.sh uses bash-4-only expansion",
+            task_id="v5-arch",
+        )
+    ]
+
+
+def test_smoke_clean_deploy_maps_port_busy_to_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "start.sh").write_text("#!/usr/bin/env bash\necho ok\n")
+
+    def fake_verify_from_clean(*_args, **_kwargs) -> CleanOracleResult:
+        return _clean_oracle_result(
+            tmp_path,
+            passed=False,
+            scope="subtree",
+            kind="port_busy",
+            message="Declared ports [18080] already bound",
+        )
+
+    monkeypatch.setattr(
+        "otto.v5_clean_verify.verify_from_clean_oracle",
+        fake_verify_from_clean,
+    )
+
+    issues = smoke_clean_deploy(tmp_path)
+
+    assert issues == [
+        PreflightIssue(
+            kind="clean_deploy_port_busy",
+            severity="block",
+            message="Declared ports [18080] already bound",
+        )
+    ]

@@ -1,4 +1,343 @@
+# Agent-Native Repair Protocol Findings
+
+_written_at: 2026-05-15T00:00:00Z
+
+## Architect route-registration isolation pass 2 (2026-05-16)
+
+Scope: prevent the JV2 class where an architect scaffold creates one central
+route registry and every vertical leaf must edit that same file. Pass 1's
+integration union guard catches silent route drops after merge; this pass must
+fail the architect contract before leaves dispatch into deterministic conflicts.
+
+Relevant current paths:
+
+- `otto/prompts/lead.md` has the architect/scaffold instructions. It already
+  requires `CHARTER.md` and a webapp `## Information Architecture Contract`,
+  but does not yet require isolated registration extension points.
+- `otto/v5_capability_inventory.py` owns parsing/validating the CHARTER IA
+  JSON and runner coherence findings. This is the right place for a
+  machine-readable route-registration isolation clause and generic structural
+  detector helpers.
+- `otto/v5_runner.py` runs architect scaffold verification after the architect
+  task reaches `pass`, before feature leaves dispatch. Structural contract
+  invalidity currently re-enters the architect through `clear_verdict_for_retry`
+  and bounded `MAX_ARCHITECT_RETRIES`; terminal merge blocks use
+  `_record_task_merge_blocked_reason(..., structured_reason=...)`.
+- `tests/test_shared_route_registration_repro.py` is Pass 1's late union guard
+  regression. The new repro should be earlier and faster: root emits one
+  architect plus two route leaves; the architect pass is deterministic and the
+  runner blocks before the leaves run.
+
+Design constraints:
+
+- Detection must be structural and stack-generic. Do not special-case
+  `backend/main.py` or `frontend/src/App.tsx`; treat any file matched by more
+  than one route-like leaf's owned paths as suspicious when the file looks like
+  a registry/route composition surface by content, path, or CHARTER contract.
+- The CHARTER IA contract needs a parseable `registration_isolation` object:
+  policy, shared registry files, and leaf extension globs. Feature leaves should
+  add files under those extension globs, not edit the shared registry file.
+- Back-compat: this check should run only for a new architect-produced
+  decomposition with multiple route-like leaves. Existing brownfield or legacy
+  monolithic projects without an active architect gate are not retroactively
+  failed by coherence scanning alone.
+- Repair routing should reuse the existing architect retry/exhaustion and
+  structured reason machinery. No new verdict channel.
+
+## Current State
+
+- `otto/v5_preflight_repair.py` owns `RepairPacket`, the clean-oracle repair loop, packet journaling, composite gate evaluation, and baseline capture.
+- `run_oracle_repair_agent` reloaded an existing packet, persisted it, initialized `cost_usd`, `agent_turns_used`, and `oracle_invocations` to zero, then looped through agent turn -> controller oracle -> optional commit -> composite gate.
+- `_evaluate_composite_gate` derived changed paths from `git status --porcelain`. After a commit hook committed the repair, porcelain became clean, so committed out-of-scope changes and committed conflict markers were invisible.
+- `build_clean_verify_oracle_command` serialized `dict(os.environ)` into `CleanVerifyOracleCommand.env`; that env was copied into `RepairPacket.acceptance_oracle.env` and `CleanOracleResult.env`.
+- Agent-side `clean-verify --json --repair-packet ...` calls `append_repair_packet_oracle_event`, which writes the latest oracle result into the packet and appends an `oracle_run` event.
+- `otto/v5_runner.py` constructed repair packets in four places: integration preflight, child verify, scaffold, and merge-conflict repair. The construction shape was nearly identical but not centralized.
+
+## Constraints
+
+- Worktree is `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2` on branch `cc-i2p-2`.
+- Existing unrelated dirty files must be preserved.
+- No branch creation and no commits.
+- Packet events are append-only JSONL and already timestamped by `_append_repair_event`.
+- The composite gate must be strict both before and after commit hooks: pre-commit checks scope/conflict/unmerged state on dirty/staged changes; post-commit checks clean state plus committed changed paths from `pre_repair_head..HEAD`.
+- Serialized packet/result/CLI JSON must not contain raw ambient secret env keys or values.
+- Budget replay must occur under the per-unit lock before repair-loop decisions.
+
+## Open Decisions
+
+- Closeout reserve is feasible as a reserved outer agent invocation used only for an escalation prompt. The repair loop should subtract `closeout_agent_turns` from repair turns and only spend that reserve on closeout, not on another repair attempt.
+- Cost enforcement can use the runner-reported dollar cost and any cost-like fields found in breakdown payloads. There is no separate token budget field in `RepairBudget`, so token-only providers without an estimated cost cannot be hard-capped here beyond provider `max_turns`.
+
+## Verification Targets
+
+- New focused regressions should fail against the current production code before protocol edits.
+- Existing repair-protocol tests should remain green.
+- Required no-regress batch, smoke tier, ruff, and basedpyright should run after implementation.
+
 # Otto redesign — research
+
+## P0 verdict/merge integrity hardening (2026-05-15)
+
+Scope: enforce the pass-1 policy that detector findings route to agent repair
+or block; they must not downgrade to lenient merge, warn, skip, or empty
+contract fallback.
+
+Relevant current paths:
+
+- `otto/v5_runner.py` merges direct child worktrees into the parent branch when
+  the child verdict is `pass`, `partial`, or `unverified`; decomposed child
+  integration propagation uses the same permissive verdict set.
+- `otto/lead.py` canonicalizes non-canonical success/status blobs to `pass`
+  even when they carry no journey or evidence. Runner verification-plan
+  exceptions are only logged and preserve the agent's self-reported verdict.
+- `otto/merge_queue.py` lets degraded build slices land when failed checks are
+  classified as non-structural.
+- `otto/spec_compile_flat.py` accepts an empty fallback spec after all
+  compile attempts fail JSON/schema checks.
+- `otto/v5_preflight.py` maps scaffold unknown/internal failures to warning
+  severity; `smoke_clean_deploy` has the same unknown catch-all pattern.
+
+Constraints and decisions:
+
+- Represent explicitly reviewed partials with the minimal durable field
+  `review_state: "reviewed_partial"` plus optional `reviewed_partial_*`
+  metadata. Do not introduce a new terminal verdict string that would leak into
+  aggregate product verdict semantics.
+- A raw `partial` or `unverified` child is not mergeable. The runner may run one
+  verify/repair dispatch in the same child worktree; after that, only `pass` or
+  explicit reviewed-partial can merge. Otherwise mark the child
+  `merge_blocked` and emit a blocking event.
+- Keep compile hardening fail-loud: the existing compile retry loop is already
+  the repair/redelivery path. If it still cannot produce a usable structured
+  contract, raise instead of writing an empty `spec.json`.
+- For preflight unknowns, use blocking severity so existing repair machinery or
+  architect redispach sees the raw failure. Only named informational cases stay
+  warnings.
+
+Open question for later review:
+
+- `review_state=reviewed_partial` is intentionally narrow. If the product wants
+  a human UI workflow for approving partials, that should be a later pass.
+
+## Leaf runtime invariant poisoning fix (2026-05-15)
+
+Scope: fix the v5 modular-path failure where a leaf prompt could contain a
+stale `SESSION_DIR` from the parent-authored child intent plus Otto's correct
+runtime session dir. The leaf then wrote `verdict.json` to the wrong session.
+
+Relevant current paths:
+
+- `otto/lead.py` renders both normal Lead and integration prompts, saves the
+  rendered prompt, and reads `verdict.json` after the agent run.
+- `otto/prompts/lead.md` currently renders `TASK ID`, `INTENT`, and
+  `SESSION_DIR` as sibling input bullets; multiline intent can therefore
+  inject runtime-looking lines directly into the rendered prompt.
+- `_read_agent_verdict()` already recovers canonical verdicts from the
+  canonical path, worktree-misplaced `verdict.json`, legacy verify output, and
+  final assistant prose, but not from Write tool inputs in `lead/messages.jsonl`.
+- Existing regression style is focused private-helper tests under
+  `tests/test_v5_*.py`, including `tests/test_v5_verdict_recovery.py` and
+  prompt-rendering tests in `tests/test_v5_integration_worktree.py`.
+
+Constraints and decisions:
+
+- Keep the fix in `otto/lead.py`; avoid prompt-template churn.
+- Sanitize runtime-looking line prefixes before interpolating agent-authored
+  child intent, then render a clearly delimited runtime block after the intent.
+- Reuse `_canonicalize_verdict_payload()` for rescued Write payloads, but only
+  accept canonical-shaped verdict objects rather than bare status claims.
+
+## Field-test forced tier research (2026-05-15)
+
+Scope: update the v5 field-test rig so the next run exercises inline, flat
+decomposition, and recursive decomposition instead of letting every scenario
+default to auto/inline. No live Otto runs.
+
+Relevant current paths:
+
+- `scripts/run_field_tests.py` already parses `tier` from
+  `success_criteria.md` metadata and passes `--tier` in `otto_command()`, but
+  the scenario files all still set `tier: auto` and the result matrix does not
+  show the tier.
+- `bench/field-tests/*/expected_shape.md` describes the desired shape, but it
+  does not declare the forced tier. The generated project includes this text in
+  `FIELD_TEST.md`; the CLI `--tier` flag remains the actual enforcement path.
+- `otto/lead.py` currently gives special prompt text for `solo` and `modular`,
+  but not for `lead`. The `modular` text says to consider decomposition rather
+  than requiring the architecture-first shape advertised by the CLI help.
+- The root inline path in `otto/v5_runner.py` runs the root Lead and then
+  aggregates the verdict without a runner-owned commit. Child build branches
+  commit via `commit_worktree()`, and root integration commits via
+  `commit_integration_worktree()`.
+
+Decision:
+
+- Keep tier metadata in `success_criteria.md`; adding a new config file would
+  duplicate an existing parser path.
+- Use the proposed mapping: `01=solo`, `02=auto`, `03=lead`,
+  `04=modular`, `05=modular`. Tighten `04` for architect plus vertical leaves
+  and `05` for recursive output-pipeline decomposition.
+- Reuse `commit_worktree(..., message="v5 inline build")` for root inline
+  finalization. Root inline owns the full product, including top-level CLI
+  files such as `csv_to_json.py`, so the stricter integration allowlist would
+  reject legitimate greenfield output.
+
+Open constraints:
+
+- The external Codex MCP gate tool is not available in this session. I will
+  run the local `codex-gate` checklist and document plan/implementation gate
+  status in `plan-field-tests.md` / `review.md`.
+
+## Pre-v6c test coverage audit (2026-05-14)
+
+Scope: raise confidence before another live v6 run by reading the focused
+`tests/test_v5_*.py`, `tests/test_spec_compile*.py`, and branching coverage,
+then adding deterministic high-signal regressions. No live runs.
+
+Current focused coverage already includes:
+
+- Spec compile structure/lint/legacy parsing, StructuredOutput tool extraction,
+  result structured output extraction, cache reuse/miss by model, corrupt-cache
+  ignore, compile metrics, and root spec artifact cleanup.
+- V5 task graph, pending queue, dependency ordering, flat global dispatch lease,
+  root and subtree integration preflight payloads, Step 0b summary/prompt
+  helpers, skipped-report helper, clean-state verification, port cleanup,
+  install-dir propagation helpers, IA contract direct validation, matrix-scope
+  wiring, and branch merge/noise handling.
+- The landed v6b regression suite for decomposed child subtree propagation to
+  `main`, including shallow+deep mixed root children.
+
+Highest-leverage gaps selected:
+
+1. Provider divergence in Lead verdict recovery. Spec compile has explicit
+   StructuredOutput/result fallbacks, but Lead verdict rescue only checks
+   assistant text blocks. Codex-style inline final `result` records can
+   silently become `unverified` even when a valid verdict JSON is present.
+   Likelihood high, cost low, directly v6-relevant.
+2. Spec cache invariant tests beyond model changes. Cache key payload includes
+   prompt hash/schema version/provider/model/otto version, but focused tests
+   only prove identical reuse and model miss. Add prompt/schema mismatch and
+   legacy v2 cache-hit loading checks. Likelihood medium, cost low.
+3. Nested global dispatch lease stress. Existing lease test covers concurrent
+   flat schedulers; live failure involved nested decomposition and capacity
+   across recursive scheduler loops. Likelihood high, cost medium.
+4. Root integration sees real files from all root children. Existing tests show
+   child files reach `main`; add full `run_v5_pipeline` coverage that root
+   integration starts after four children and observes all product files before
+   final pass. Likelihood high, cost medium.
+5. Step 0b recovery in the full pipeline. Existing tests cover summary rendering
+   and reconcile helper directly; add full root integration behavior where the
+   integration agent merges a blocked child branch and final aggregate flips
+   back to pass. Likelihood high, cost medium.
+6. Skipped report through `run_lead`, not just helper. Existing test calls the
+   writer directly; add a fake agent session with `intent_coverage.skipped` and
+   verify `skipped_report.md` is append-written by the real finally path.
+   Likelihood medium-high, cost low.
+7. Architect-time IA coherence emission. Direct validator catches missing
+   `product_overview.top_level_pages` routes, but runner-time architect
+   preflight must emit that finding from the latest spec/CHARTER. Likelihood
+   medium-high, cost low.
+
+Not selected for this batch:
+
+- `otto v5 run --resume` smoke. The current `otto v5` CLI has no `--resume`
+  option; i2p resume coverage lives on the monolithic `build --resume` path,
+  which the dispatch explicitly says not to touch. This remains a product gap
+  to decide separately rather than a quick pre-v6c regression.
+- Multi-attempt generic child retry. The implemented retry machinery is
+  architect-preflight retry plus provider fallback, both covered at narrower
+  levels. A generic child retry/session-reattach feature is not present enough
+  to pin without changing product semantics.
+
+## v6 bugfix batch research (2026-05-14)
+
+Scope: fix P1/P2/P3 issues from the v6b audit in the `cc-i2p-2`
+worktree. No live Otto runs; validation is focused unit/regression tests plus
+the requested v5/spec_compile/runner/branching suite.
+
+Relevant current paths:
+
+- `otto/v5_runner.py` owns child dispatch, nested scheduling, subtree/root
+  integration, toolchain preflight propagation, and integration summaries.
+- `otto/queue/subtask.py` already skips graph-terminal tasks across recursive
+  schedulers, but `_process_children()` still has only per-loop in-flight
+  accounting and no shared lease.
+- `otto/lead.py` passes `verification_plan.matrix_scope` into
+  `validate_lead_verdict()`, so matrix scope is mostly present; this batch
+  needs an explicit runner-level regression proving leaf vs integration call
+  wiring.
+- `otto/v5_clean_verify.py` already treats busy declared ports as a clean
+  verification failure; `otto/v5_preflight.py` still maps
+  `clean_deploy_port_busy` to a warning, making the integration path too soft.
+- `otto/v5_capability_inventory.py` counts CHARTER prose excluding the IA JSON,
+  but the target remains 500 lines and the warning lacks the requested split.
+- `otto/prompts/lead.md` is the right place to tighten root decomposition,
+  CHARTER prose cap language, and deprecation-warning expectations.
+
+Open constraints:
+
+- The Codex MCP peer tool required by the project-level `codex-gate` workflow
+  is not available in this session, and the user explicitly requested one
+  workspace-write dispatch with no extra Codex calls. I will document that in
+  the plan and rely on local tests.
+
+## Dispatch 3 v6 perf-quality research (2026-05-14)
+
+Scope: implement Batches 5 and 6 from `plan-v6-perf-quality.md` on the
+`cc-i2p-2` worktree only. Batches 1-4 are already present in this branch.
+
+Relevant current paths:
+
+- `otto/prompts/lead.md` contains the architect CHARTER instructions, the
+  Information Architecture Contract JSON shape, the DAG critical-path rule,
+  and the leaf read-first rules.
+- `otto/v5_capability_inventory.py` parses and validates the CHARTER IA JSON
+  block in `parse_information_architecture_contract()` and
+  `validate_information_architecture_contract()`. The warning-only coherence
+  gate is `check_coherence()`, which is the right place to add a CHARTER line
+  cap warning without post-processing the architect output.
+- `otto/v5_runner.py` copies parent `spec/spec.json` into each child session
+  in `_run_child()`, then calls `_run_lead_with_fallback()`. This is the lowest
+  impact place to generate opt-in per-child slice artifacts before prompt
+  rendering.
+- `otto/lead.py` renders `lead.md` and saves the rendered prompt. It currently
+  has no per-child context placeholder, so slicing needs a small optional
+  prompt note that defaults to full repo-root context.
+- `otto/cli_v5.py` wires `otto v5 run`. Batch 5 needs an explicit
+  `--full-context` escape hatch and an opt-in slicing switch or config value
+  because slicing must remain off by default.
+- `otto/spec_compile_flat.py` owns the compile-spec-flat prompt and structured
+  spec validation. `validate_structured_spec(strict=False)` already returns
+  warnings instead of raising, which matches the requested over-cap warning for
+  legacy or externally loaded specs.
+
+Constraints and decisions:
+
+- No provider routing changes. Claude remains the configured default path.
+- No live runs. Validation stays unit/focused test based.
+- Slicing remains opt-in. Default `otto v5 run` still passes full context.
+- Full IA JSON stays intact in CHARTER slices. Prose may be filtered, but
+  `Agent operating notes` is treated as operational cross-cutting context and
+  preserved conservatively when slicing is enabled.
+- Scope ambiguity falls back to full context and is written to
+  `<child_session>/context_slice.json`.
+- The Codex MCP tool required by `codex-gate` is not available in this session;
+  this matches the Dispatch 2 implementation note in the plan. I will record
+  the unavailable gate in `review.md` and use local tests/ruff for validation.
+
+Open questions resolved by conservative defaults:
+
+- Existing subtask entries do not declare `owned_paths` or `action_ids`. The
+  slicer can consume those fields if present, but for current children it must
+  derive action scope from exact action-id mentions and entity/action words in
+  the task intent. If no confident action/entity match exists, it falls back to
+  full context.
+- Child prompts currently tell agents to read repo-root `CHARTER.md`. The
+  prompt will continue to say that for full-context runs. When slicing is
+  enabled, a rendered note points the child at session-local slice artifacts
+  first, with full artifact paths available as a fallback.
+
+---
 
 This document is the load-bearing source of truth for Otto's redesign
 around Feature / Group / Guardrail. It supersedes any prior
@@ -929,3 +1268,1047 @@ that triggered this redesign (mc-i2p drawer showing legacy WARN noise
 on i2p runs) is fixed not by patching the legacy panel but by routing
 i2p runs to the new `run_view.py` + `<RunDrawer />` from day one.
 Legacy runs keep using the legacy panel until Phase B.
+
+---
+
+# Modular Decomposition Field-Test Failure Research
+
+Date: 2026-05-15T02:05:47Z
+
+## Scope
+
+Fix the v5 modular/decomposition path after Round 2 field tests:
+
+- `04-mini-crm`: root emitted three children; all children reported pass; final verdict was `merge_blocked`.
+- `05-blog-generator`: root emitted three children; all children reported pass; final verdict was `merge_blocked`.
+
+Constraints from the request:
+
+- Trust the agent. Minimize classification. Default repairable clean-deploy failures to a coding agent.
+- No new validators or prompt-rule expansion.
+- No provider routing changes.
+- Do not touch the i2p monolithic path.
+- Time-based validation matters more than unit tests; live rerun 04 and 05.
+
+## Evidence Read
+
+Artifacts inspected:
+
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/04-mini-crm/otto_logs/cross-sessions/task_graph.json`
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/04-mini-crm/field-test-otto.log`
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/04-mini-crm/otto_logs/sessions/*/lead/narrative.log`
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/05-blog-generator/otto_logs/cross-sessions/task_graph.json`
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/05-blog-generator/field-test-otto.log`
+- `/Users/yuxuan/otto-projects/field-tests/20260515-012919/05-blog-generator/otto_logs/sessions/*/lead/narrative.log`
+
+04 facts:
+
+- Task graph: `root` emitted `v5-cb6494d893d7`, `v5-6825f5f82ade`, `v5-6cda4e78f2a9`.
+- All three children have `verdict: pass`.
+- Final field-test log reports:
+  - `clean_deploy_port_busy [block]`: declared port `[19301]` already bound.
+  - `clean_deploy_start_failed [block]`: `start.sh exited 127` with `python: command not found`.
+- Git ancestry check showed all three `i2p/build/*` branch tips are ancestors of `main`.
+- The frontend branch `i2p/build/v5-6825f5f82ade` has no unique frontend commit; its tip is a merge commit of the architect branch. The narrative says the FE agent found the frontend already complete and made no code changes.
+
+05 facts:
+
+- Task graph: `root` emitted `v5-361449e77ed0`, `v5-380ad5811f2c`, `v5-5805bd7c96b7`.
+- All three children have `verdict: pass`.
+- Final field-test log reports `clean_deploy_start_failed [block]`: `OSError: [Errno 48] Address already in use` from `http.server`.
+- Git ancestry check showed all three `i2p/build/*` branch tips are ancestors of `main`.
+
+## Relevant Code Paths
+
+- `otto/v5_runner.py:_run_integration_smoke_preflight` runs `smoke_clean_deploy()` and serializes blocking `PreflightIssue`s.
+- Root integration and subtree integration pass preflight payloads to the integration Lead, then run `smoke_clean_deploy()` again afterward.
+- The clean-deploy smoke path is not wrapped in `PreflightRepairController`; therefore `clean_deploy_start_failed` and `clean_deploy_port_busy` never get the existing default agent/auto-fix loop.
+- `PreflightRepairController.classify_preflight_issue()` already defaults unknown blocking failures to `agent`; it auto-fixes `port_busy`.
+- `_run_preflight_repair_agent()` currently dispatches a focused Lead but does not runner-commit repair edits. A start.sh repair can pass in the dirty worktree but still fail to propagate through branch-based integration.
+- `cleanup_stale_declared_ports()` currently runs once near pipeline start, before an architect-created `CHARTER.md` normally exists, so it often has no declared ports. It also kills all listeners on declared ports, which is too broad for user safety.
+- `_merge_child_branch()` merges child build branches into the parent integration branch but does not explicitly verify the branch tip is an ancestor afterward. The observed 04/05 runs passed ancestry, but the existing test did not assert all children in a real task graph reach main after `_process_children`.
+
+## Root-Cause Hypotheses
+
+### H1: Clean-deploy smoke failures bypass the repair loop (root)
+
+Supports:
+
+- Field logs show blocking clean-deploy issues, not merge conflicts.
+- `_run_integration_smoke_preflight()` only records issues.
+- Root integration only dispatches the normal integration Lead, then downgrades to `merge_blocked` if post-smoke still blocks.
+- `PreflightRepairController` is only used for checkout repair in this path.
+
+Test:
+
+- Simulate `smoke_clean_deploy()` returning `clean_deploy_start_failed`, then a focused repair edits `start.sh`; assert integration proceeds without invoking the broad integration Lead first and commits the repair.
+
+### H2: Zombie port cleanup happens at the wrong layer and too early
+
+Supports:
+
+- Pipeline-start cleanup runs before the architect writes `CHARTER.md`, so there are no declared ports to clean.
+- 04 field log still hit port 19301 busy after children passed.
+- 05 hit address-in-use during the clean-deploy start.
+
+Conflicts:
+
+- Some port conflicts should be product bugs, not environment bugs, if `start.sh` fails to respect `$PORT`.
+
+Test:
+
+- Run clean-deploy repair loop with a `clean_deploy_port_busy` issue and assert it invokes the port cleanup auto-fix before rerunning smoke.
+- Harden the cleanup helper to kill only Otto-owned project processes, not arbitrary listeners.
+
+### H3: Branch propagation can be reported green without explicit ancestry invariant
+
+Supports:
+
+- The v6e bug class existed before: decomposed subtree integration work could stay on `i2p/integ/<id>` and never reach main.
+- Existing tests exercise `merge_branch_into()` directly, but do not assert every child branch listed in the task graph is an ancestor of the parent/root integration after `_process_children`.
+- Field-test interpretation was confused because a no-op child branch may not have a unique "v5 task" commit even when its branch tip is actually reachable from main.
+
+Conflicts:
+
+- Round 2 04 and 05 archived repos do have all child build branch tips as ancestors of main.
+
+Test:
+
+- Add a real `_process_children()` regression where multiple children pass, one child makes no unique code changes, and assert every pass child branch tip is an ancestor of `main`.
+- Add a runner-side verification/logging helper so future failures surface as branch ancestry failures, not silent N-1 propagation.
+
+## Plan Gate
+
+Owned files:
+
+- `otto/v5_runner.py`
+- `otto/v5_preflight_repair.py`
+- `otto/v5_clean_verify.py`
+- Focused v5 tests under `tests/`
+- This research/debug/plan/review trail
+
+Risky assumptions and verification:
+
+- Assumption: wrapping smoke preflight with `PreflightRepairController` is enough for both `start.sh` portability and port-busy failures.
+  Verify: focused async tests plus live 04/05 reruns.
+- Assumption: committing successful preflight repair edits via the integration commit allowlist will preserve fixes without tracking runtime garbage.
+  Verify: test repaired `start.sh` is committed and `git status` clean.
+- Assumption: branch propagation was not the direct Round 2 root cause, but missing invariant tests allowed confusion.
+  Verify: ancestry checks for every child in tests and live rerun repos.
+- Assumption: safe port cleanup belongs in the v5 clean-deploy repair path, not the field-test driver.
+  Verify: cleanup filters to project/Otto-owned processes and clean-deploy reruns after cleanup.
+
+System-level checks:
+
+- Focused pytest for v5 integration preflight repair, branch propagation, and port cleanup.
+- Ruff on touched files.
+- `git diff --check`.
+- Live `scripts/run_field_tests.py --scenario 04-mini-crm --parallel 1`.
+- Live `scripts/run_field_tests.py --scenario 05-blog-generator --parallel 1`.
+- After live runs: `git merge-base --is-ancestor` for all child branches versus `main`, `field-test-result.json` verdict and boot smoke HTTP status.
+
+---
+
+# Research: P1 Agentic-Native Router Defaults
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+
+## Existing State
+
+- `otto/v5_preflight.py` already maps scaffold `install_failed`,
+  `build_failed`, `py_compile_failed`, `copy_failed`, and timeout kinds to
+  blocking preflight issues. `no_npm` and `no_python` still map to warn/skip
+  even though `verify_from_clean` emits them only when matching manifests
+  exist.
+- `otto/v5_preflight_repair.py` already treats `port_busy` no-op cleanup as
+  an agent fallback, but filename and chmod deterministic shortcuts still log
+  `repaired` even when they changed nothing.
+- `otto/v5_clean_verify.cleanup_stale_declared_ports()` returns only a list of
+  killed ports and does not report whether ports were actually freed.
+- `otto/v5_runner._run_integration()` still sets `integration_cwd =
+  integration_worktree or project_dir`, which can dispatch the integration
+  Lead in the wrong tree after setup failure.
+- `otto/v5_branching.merge_branch_into()` aborts unresolved source conflicts
+  after deterministic/noise/structured merge attempts. It does not preserve a
+  conflict packet for an agent repair.
+- `otto/audit_loop.py` applies repair caps before every failing group gets a
+  first repair attempt, can stop before a fix when audit pass cap is already
+  reached, and silently excludes failing verdicts without a spec group.
+- `otto/v5_context_slicer.py` falls back to full context for ambiguous scope.
+  It writes `context_slice.json`, but there is no resolver hook and no
+  explicit last-resort marker.
+- `otto/build.py` treats out-of-scope writes as non-blocking
+  `scope.warning` events. The amendment side-channel already runs before the
+  scope check, so accepted amendments can legitimately clear the violation.
+
+## Constraints
+
+- Keep P2 over-classification untouched.
+- Preserve deterministic shortcuts only when the shortcut actually changed
+  state and the rerun oracle passes.
+- For runtime/toolchain failures, blocking issue plus existing
+  `PreflightRepairController` is the repair route.
+- For merge conflicts, honor merge-conflict safety: provide both sides and do
+  not use whole-file `--ours`/`--theirs` as the agent path.
+- Tests must prove old behavior fails by leaving tests in place while
+  reversing production-only changes, then reapplying the patch.
+
+## Open Questions Resolved
+
+- Scaffold failure item 1 is already enforced by P0 in this checkout:
+  install/build/compile failures are `block` and include the clean verifier
+  failure message.
+- For `no_npm` / `no_python`, manifest presence is enough to establish the
+  runtime is needed because `verify_from_clean` only emits those failures when
+  `package.json` or `pyproject.toml` was found.
+- Context-scope agent resolution cannot call an LLM from the pure slicer
+  module without changing the runner contract. The smallest safe change is an
+  explicit resolver hook plus an auditable `scope_resolution` record; runner
+  fallback remains last-resort and logged when no resolver is supplied.
+
+---
+
+# Research: P2 Agentic-Native Over-Classification Hardening
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+
+## Existing State
+
+- `otto/repair_gates.py` uses term lists and methodology/surface heuristics to
+  turn non-passing audit verdicts into proof gaps or browser-repro requests.
+  That can suppress the agent + oracle repair lane after a detector already
+  found a failing feature.
+- `otto/browser_testing.py` classifies browser command families with substring
+  checks against argv parts. `otto/checks.py` has a second Playwright detector
+  with more substring logic for package scripts.
+- `otto/spec_compile_flat.py` already reads typed `structured_output` result
+  fields, but it first accepts assistant tool calls whose names merely look like
+  structured-output aliases such as `submit_spec`.
+- `otto/v5_verification_plan.py` skips the structured spec / CHARTER IA matrix
+  with `required=False` whenever either side is missing, even for webapp specs.
+- `otto/mcp_tools.py` writes scaffold build failures as `verdict:
+  unverified`, which is a weaker signal than the canonical `partial` repair
+  lane used elsewhere.
+
+## Constraints
+
+- Keep deterministic non-repairable classifications narrow and typed. Do not
+  replace fuzzy blocklists with different fuzzy blocklists.
+- Unknown or weakly classified audit failures should route to agent repair; the
+  smoke/verify oracle is the gate.
+- Browser command identity should live in one adapter. Unknown BrowserJourney
+  commands must still run as real checks.
+- Provider structured-output recovery should prefer typed result fields and the
+  exact Claude `StructuredOutput` contract; tool-name aliases are not evidence.
+- Missing structured IA should fail only for typed product kinds that require
+  IA, currently v5 `project_kind: webapp`.
+
+## Verification Plan
+
+- Add `tests/test_v5_p2_hardening.py` with one regression per requested item.
+- Run that file before production changes and capture the expected failures.
+- Apply the scoped production patch and rerun the P2 tests.
+- Run the requested P0/P1/leaf/smoke regressions, smoke tier, ruff, and
+  basedpyright on touched files.
+
+---
+
+# Research: Pass 4 Brittleness Containment
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+
+## Existing State
+
+- `otto/queue/subtask.py` uses one `_TERMINAL_VERDICTS` set for two different
+  jobs: anti-thrash non-runnability and dependency satisfaction. That keeps
+  catastrophic children from redispatching, but it also lets downstream
+  siblings run after a non-pass dependency.
+- `otto/v5_runner.py:_build_decomp_runtime_context()` repeats the same
+  "terminal verdicts are done" rule in the runtime prompt context.
+- `otto/audit.py` has two false-green walkthrough edges: `no_op_walkthrough()`
+  reports success with no artifacts, and synthesized webapp walkthroughs exit
+  0 for "not-applicable" when a webapp has no runnable/static shape.
+- `otto/checks.py:_malformed_check_evidence()` intentionally returns
+  `passed=True` under the v2.1 design. It already marks
+  `raw["malformed_check"]`, but `_compact_evidence()`, the evidence packet,
+  and the prompt do not elevate that signal as "not proof".
+- `otto/v5_branching.py:setup_child_worktree()` still returns `None` on setup
+  failure and documents the caller fallback to `project_dir`.
+- `otto/v5_runner._run_child()` still has a context-slicing fallback through
+  `(child_worktree or project_dir)` and can proceed after child worktree setup
+  failure.
+
+## Constraints
+
+- Preserve the anti-thrash mechanism: catastrophic/merge_blocked/unverified/raw
+  partial tasks must not redispatch endlessly.
+- Dependency satisfaction must match the P0 merge gate: only `pass` and
+  `partial` with `review_state == "reviewed_partial"` satisfy dependents.
+- Keep malformed per-check payloads non-slice-blocking per
+  `docs/intent-to-product-v2-plan.md`; make them typed, loud, and unusable as
+  proof.
+- Production audit safety depends on the audit gate no longer treating missing
+  or synthesized-not-applicable walkthroughs as success.
+- The guardrail should be precise enough to fail on new brittle shapes without
+  becoming a broad regex tax.
+
+## Open Questions Resolved
+
+- `checks.py` malformed evidence remains `passed=True` because v2.1 explicitly
+  delegates product truth to the audit contract gate. The fix is to make
+  `evidence_quality="malformed"` and `proof_usable=False` survive into the
+  audit packet and prompt.
+- Webapp synthesized "not-applicable" is not a successful walkthrough. It is a
+  product/audit evidence gap and should cap a passing audit at least to
+  partial.
+- Child worktree setup failure is not a valid reason to run a child in the
+  project root. The child should become `merge_blocked` before dispatch.
+
+---
+
+# Research: Round 6 Nested Integration Worktree Binding
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+
+## Live Evidence
+
+- Field test:
+  `/Users/yuxuan/otto-projects/field-tests/20260515-081853/08-data-platform/`.
+- `field-test-otto.log` shows every grandchild merge into subtree
+  `v5-212ea51688a9` failed with:
+  `fatal: 'i2p/integ/v5-212ea51688a9' is already used by worktree at .../.worktrees/integ-v5-212ea51688a9`.
+- `git worktree list --porcelain` confirms that
+  `i2p/integ/v5-212ea51688a9` was legitimately checked out by the dedicated
+  integration worktree while the root project worktree was on `main`.
+- The 06 SaaS comparison avoided this exact failure because the nested
+  integration branch was being mutated through whatever branch the root
+  project worktree currently held. That ordering is non-general: if the
+  integration branch is already bound to a linked worktree, a second checkout
+  from the project root fails by Git design.
+
+## Source Findings
+
+- `otto/v5_branching.py:575` `merge_branch_into()` always runs
+  `git checkout <target_branch>` in the caller's `project_dir`.
+- `otto/v5_branching.py:749` `merge_child_into_integration()` is only a thin
+  wrapper over that checkout-based primitive, so child-build to
+  parent-integration merges inherit the same branch-binding bug.
+- `otto/v5_runner.py:2623` `_setup_integration_worktree_once()` can create or
+  reuse a dedicated integration worktree for a task's own integration branch.
+  Once it does, later merges into that branch must operate in that owning
+  worktree rather than trying to bind the same branch elsewhere.
+- `otto/v5_runner.py:2895` restores `project_dir` after a nested integration,
+  which means subsequent child merges cannot rely on the root worktree still
+  being on the subtree integration branch.
+
+## Related Cases
+
+- `v5-e4696c23651d` is not the same Git checkout failure. Its logs show
+  grandchild merges completed and `i2p/integ/v5-e4696c23651d` reached `main`;
+  it remained `partial` because runner checks failed despite product tests
+  passing.
+- `v5-bc66f4349b3c` was emitted but never resolved because it depended on both
+  subtrees. The blocked dependencies prevented dispatch; no separate orphaning
+  mechanism was found.
+
+## Constraints
+
+- Do not special-case field-test 08 or task ids.
+- Preserve fail-closed merge behavior: real conflicts still produce conflict
+  packets and block/repair; no whole-file ours/theirs shortcuts.
+- Merges into an integration branch should use the existing owning worktree
+  when Git reports the target branch is bound there.
+- Guard the merge primitive so concurrent nested child completions cannot
+  mutate the same integration branch simultaneously.
+
+---
+
+# Research: Overnight iTracker Correctness Bugs
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+Evidence project: `/Users/yuxuan/otto-projects/v5-itracker-overnight-024432`
+
+## Bug A: Preflight Repair Progress Cap
+
+- `otto/v5_preflight_repair.py` currently has a flat `max_total_attempts=3`.
+  `_total_attempts` increments before every repair, including successful repairs.
+- The evidence `preflight-repair.jsonl` shows three successful progress-making
+  repairs:
+  `clean_deploy_start_failed` repaired, then
+  `clean_deploy_ports_not_listening` repaired for ports `[5173, 8000, 8001]`,
+  then `port_busy` repaired. The fourth failure was narrower:
+  only `[5173]` missing while `[8000, 8001]` were listening.
+- Existing repeated-fingerprint and per-kind caps are still valid loop guards.
+  The flat total cap is the incorrect guard because it counts progress as
+  failure.
+
+## Bug B1: Deprecation Detector and Empty Downgrade Reasons
+
+- `otto/v5_verification_plan.py:_deprecation_lines()` currently matches broad
+  word combinations and only skips a few zero/negative phrases. That makes
+  prose such as `passlib DeprecationWarning filtered - 7/7 tests pass with 0
+  warnings` fail the deprecation check even though it says the warning was
+  filtered and zero warnings remain.
+- The evidence also shows dependency-only warnings under `.venv/.../site-packages`
+  from `passlib`, `pytest_asyncio`, `fastapi`, `starlette`, and `jose`. Those
+  should not become product-blocking leaf downgrades.
+- Some real product warnings are present in the Cycles leaf:
+  `backend/models.py`, `backend/auth.py`, `backend/main.py`, and
+  `backend/webhook_service.py` emitted `DeprecationWarning: datetime.utcnow()`
+  lines. The detector must still catch these.
+- `otto/lead.py` overwrites `result.verdict` with the runner-adjusted verdict
+  and appends `runner_checks`, but it does not set `failure_reason` when a
+  runner check downgrades a pass to partial/unverified/merge_blocked. The
+  capstone summaries therefore show `verdict=partial` with an empty
+  `failure_reason`.
+
+## Bug B2: Recovery Reconciliation Scope
+
+- `otto/v5_runner.py:_reconcile_recovered_children()` updates any direct child
+  with `verdict=merge_blocked` to `pass` when its child branch is an ancestor of
+  the parent integration branch.
+- That is valid for branch/merge-blocked children where Step 0b actually merged
+  the child branch and integration verification passed.
+- It is invalid for verification-blocked children. If a child was blocked
+  because runner verification downgraded its verdict or verify-repair remained
+  partial, branch ancestry only proves code reached the branch; it does not prove
+  the blocking oracle condition is now fixed.
+
+## Constraints
+
+- Keep detector-to-agent-repair gated by the oracle. Do not make warnings lenient
+  by default.
+- Keep per-kind and repeated-fingerprint preflight caps.
+- Add an absolute preflight safety ceiling so a pathological loop still ends.
+- Add focused regressions that fail on current production code and pass after the
+  patch.
+
+---
+
+# Research: Journey Verification Implementation-Gate Fixes
+
+Date: 2026-05-15
+Worktree: `/Users/yuxuan/work/cc-autonomous/.worktrees/cc-i2p-2`
+Branch: `cc-i2p-2`
+Base: `e7ca4406b`
+
+## Current State
+
+- `otto/journey_verdict_sink.py` already has the intended sink signature:
+  `resolve_journey_verdicts(journeys, execution_scope, executor_results,
+  registered_executor_levels)`. Local uncommitted edits removed
+  `legacy_results` from `otto/v5_clean_verify.py` and partially adapted stale
+  sink tests.
+- The root clean-oracle UI path is:
+  `verify_from_clean_oracle` -> `_run_ui_journeys_clean_oracle_step` ->
+  `run_ui_journey_executor` -> `resolve_journey_verdicts` ->
+  `CleanOracleResult.from_parts`. The durable regression belongs in
+  `tests/test_journey_ui_executor.py` because it already builds a real fixture
+  webapp and inspects the sink artifact.
+- `otto/journey_ui_executor.py` can assert text through accessibility-ish
+  Playwright calls, but action controls and inputs only execute CSS selectors.
+  `otto/spec_compile_flat.py` tells compile to avoid selectors/data-testids, so
+  fresh pass-models can be valid by prompt but non-executable by the runtime.
+- `otto/journey_contracts.py` assigns API probes for non-webapp project kinds
+  but returns before validating an API-shaped pass-model. It also converts
+  missing/non-list `behavior_journeys` to `[]`; for current schema this fails
+  open.
+- `otto/lead_verify.py` runs native tests and API journeys, then computes the
+  overall verifier verdict only from applicable API journey results. Deferred UI
+  journeys are omitted and can make a webapp leaf with passing native tests
+  unverified.
+- `otto/journey_api_executor.py` has per-adapter implementations but can pass
+  weak contracts: HTTP status-only, CLI exit-only, library no-exception-only,
+  service status-only/body-optional.
+- `otto/journey_ui_executor.py` observes only the first expected network response
+  as mandatory and uses `git diff -- .`, missing untracked files generated by a
+  UI probe.
+
+## Constraints
+
+- Preserve existing uncommitted work; do not discard the legacy-results removal
+  or adapted tests.
+- No commit or branch operations.
+- Keep journey verdicts sink-only, but compose Lead verifier verdict from native
+  test outcome plus applicable API journey results; deferred UI journeys must be
+  explicitly present in output.
+- Fail closed for current schema contracts. Only strictly older schema versions
+  may synthesize legacy UI pass-models.
+- UI pass-model lowering should prefer accessible role/name/label/text and allow
+  explicit selector/testid as optional overrides, not required fields.
+
+## Verification Targets
+
+- Focused regressions for root clean-oracle UI path, accessible-only UI
+  pass-models, current-schema fail-closed contract loading, adapter-specific API
+  contract strength, Lead webapp leaf verdict composition, all expected network
+  responses, and untracked-file dirty detection.
+- Internal consistency check: no `legacy_results` references and every
+  `resolve_journey_verdicts` caller matches the current signature.
+- Required no-regress batch: focused `tests/test_journey_*` plus the requested
+  v5 repair/protocol/hardening/planning/smoke/merge suites, ruff, basedpyright.
+## 2026-05-16T03:46:57Z - Conflict Repair Composite Gate Re-entry
+
+### Existing seam
+- `otto/v5_runner.py:_merge_child_branch` calls the real `merge_child_into_integration`; on a conflict it calls `_repair_child_merge_conflict_once`, then retries the merge.
+- `_repair_child_merge_conflict_once` builds a `RepairPacket` with `phase="merge"`, `repair_phase="merge"`, clean-deploy as the stored oracle command, and `allowed_paths` from the conflict packet's `unmerged_paths`.
+- `otto/v5_preflight_repair.py:run_oracle_repair_agent` runs the durable repair loop. When `latest_oracle.passed` becomes true, `accept_or_block_passed_oracle()` evaluates `_evaluate_composite_gate()`.
+- Current bug confirmed in code: if the pre-commit or post-commit composite gate fails after clean-deploy passes, `accept_or_block_passed_oracle()` returns `OracleRepairResult(verdict="merge_blocked", ...)` immediately. It does not write a structured gate-failure event, does not convert the composite failure into the next durable-loop signal, and does not call `block_with_escalation()`.
+
+### Constraints
+- Do not weaken composite checks: unrelated scope violations, conflict markers, unmerged paths, dirty post-commit state, and graph/verdict checks must still block.
+- The fix belongs at the repair-loop/composite-gate seam, not in the clean-deploy oracle.
+- Conflict repair should treat the conflicted paths as in-scope even when they are shared/architect-owned files; unrelated files must remain blocked.
+- The deterministic repro should use real git branches and `merge_child_into_integration` through `_merge_child_branch`, with only the agent turn controlled to avoid LLM/network nondeterminism.
+
+### Open questions / judgment calls
+- Composite-gate failures should be represented as durable repair feedback without spending another expensive clean-deploy oracle invocation. I will record a `composite_gate` packet event, update `latest_oracle_result` to a synthetic blocking oracle result, and let the existing agent-turn budget decide whether another agent turn is available.
+- The local `/codex-gate` MCP tool described in project instructions is not available in this session's tool list, so plan/implementation gate review cannot be invoked here. I will compensate with red/green repro, focused protocol tests, and the requested no-regress batch.
+
+## 2026-05-16T04:24:30Z - Critical Seam Repros f87c5bf7d
+
+### RED proofs
+- Seam 2:
+  `uv run pytest -q tests/test_critical_seam_repros.py::test_root_ui_executor_runtime_failure_enters_preflight_repair_and_working_control_passes`
+  fails because `journey_ui_executor.run_ui_journey_executor()` imports
+  `playwright.sync_api.sync_playwright()` while already inside the pipeline's
+  asyncio loop. The result is an infra issue `clean_deploy_smoke_error`, so the
+  real UI journey never runs.
+- Seam 1:
+  `uv run pytest -q tests/test_critical_seam_repros.py::test_child_verify_repair_pass_reenters_when_upward_merge_gate_refuses_dirty_parent`
+  fails because `_merge_child_branch()` records a dirty parent integration
+  worktree as `merge_blocked` directly after `_ensure_child_merge_ready()` has
+  produced a green child repair packet. The refusal is not added to the same
+  durable child verify repair loop and `merge_blocked_reason` is not recorded.
+- Seam 3:
+  `uv run pytest -q tests/test_critical_seam_repros.py::test_subtree_integration_pass_reenters_when_root_propagation_conflicts`
+  fails because `_process_children()` calls `_propagate_subtree_integration()`;
+  when the source subtree conflicts with root, it emits a blocked event and
+  marks the task `merge_blocked` without creating a repair packet.
+
+### Existing machinery to reuse
+- `otto/v5_preflight_repair.py:run_oracle_repair_agent()` is already the
+  durable bounded loop. Its composite-gate path records a synthetic blocking
+  oracle result into the packet and lets the existing agent-turn budget decide
+  whether to re-enter or exhaust.
+- `otto/v5_runner.py:_build_repair_packet()` is the shared packet builder for
+  preflight, child verify, scaffold, and merge repairs.
+- `_run_child_verify_repair_packet()` already builds the correct child verify
+  durable packet. Seam 1 should reuse that packet identity and slug so the late
+  upward merge refusal re-enters the same repair unit rather than creating a
+  separate protocol.
+- Seam 3 needs a propagation-specific packet because there is no existing
+  subtree propagation packet. It should use `_build_repair_packet()` and the
+  same `run_oracle_repair_agent()` loop with a synthetic blocking oracle issue.
+
+### Constraints / plan checks
+- Do not weaken merge or propagation checks; convert late refusal into durable
+  agent feedback only.
+- UI executor can be safely ported to `async_playwright` if sync and async
+  helper logic stay equivalent. Because `_run_integration_smoke_preflight()` is
+  synchronous today, an off-loop thread bridge is a low-risk compatibility step
+  only if the executor still runs the real journey and emits `source=ui_executor`.
+- `/codex-gate` is not available in this tool environment, so the mandatory
+  gate cannot be invoked. Verification must include RED/GREEN repros, requested
+  no-regress batch, ruff, and basedpyright on touched files.
+
+## 2026-05-16T08:22:38Z - Spec Compile Timeout Re-entry
+
+### What exists today
+- `otto/spec_compile.py:compile_spec()` computes one `timeout` as
+  `min(budget.for_call(), spec_cap)` when a `RunBudget` is passed, otherwise
+  `spec_cap`. `_run_compile_agent(attempt)` closes over that single value and
+  passes it to `otto.agent.run_agent_with_timeout()`.
+- The compile retry block retries exactly once only when
+  `is_transient_provider_error(exc)` returns true. `AgentCallError("Timed out
+  after Ns")` is not transient, so it propagates raw.
+- `otto.agent.run_agent_with_timeout()` creates timeout errors with the exact
+  reason string `Timed out after {timeout}s`. It also uses `AgentCallError`
+  for other provider errors, including max-turn or budget-like failures.
+- `otto/cli_run.py` treats `SpecValidationError` as a clean compile failure in
+  both `--no-build` and full-run compile paths. Raw exceptions outside this
+  class escape to the catastrophic/pipeline-crash style handling.
+- Existing v5 merge repair structured terminal handling lives in
+  `otto/v5_runner.py`; this fix must not modify that path.
+
+### Constraints
+- Timeout detection must be narrower than all `AgentCallError`s; budget or
+  max-turn errors must keep propagating as before.
+- Timeout retry should compose with the existing transient provider retry, not
+  replace it.
+- Retrying with the same cap is ineffective for slow healthy compile agents.
+  The per-attempt timeout must increase while still respecting
+  `budget.for_call()`.
+- Honest timeout exhaustion should raise a structured `SpecValidationError`
+  subclass so CLI compile catches remain clean and machine-readable metadata is
+  available to callers/tests.
+- Config defaults are centralized in `otto/config.py::DEFAULTS` with
+  `DEFAULT_CONFIG` as an alias and the YAML template rendering from the same
+  dict.
+
+### Open questions / decisions
+- Attempt bound: use three timeout attempts total. One retry handles ordinary
+  scheduler/provider jitter; the second retry handles large multi-subsystem
+  intents without creating an unbounded loop.
+- Escalation schedule: base cap, then 2x, then 3x, each clamped to
+  `budget.for_call()` when a run budget exists. This preserves the global
+  budget while avoiding repeated identical 600s failures.
+- New default: 1200s. It doubles the empirically too-low 600s default for
+  capstone-scale product specs while leaving the one-hour run budget as the
+  primary guard and preserving `spec_timeout` override behavior.
+- CLI recording: add a small helper to emit `run.finished` with
+  `verdict="blocked"` and a structured reason payload when the compile failure
+  exposes one. This keeps compile terminal state structured without changing
+  merge/v5 runner code.
+
+---
+
+# Research — compile-agent NON-CONVERGENCE on large intents (2026-05-16)
+
+_Author: Claude. Status: for user review BEFORE any plan. This is a
+DIFFERENT, deeper issue than the timeout-robustness fix above — that fix
+only makes this fail honestly; it does not make the agent converge._
+
+## Symptom
+
+iTracker capstone (47-feature Linear-lite intent) crashes in spec-compile.
+Two independent live runs, deterministic, identical:
+
+| Run | spec_timeout | msgs | Write calls | thinking chars | text chars | outcome |
+|-----|-------------:|-----:|------------:|---------------:|-----------:|---------|
+| seamfix-010431  | 600s  | 14 | **0** | 28,787 | 60 | crash `Timed out after 600s` |
+| seamfix2-011925 | 1800s | 19 | **0** | 26,895 | 0  | crash `Timed out after 1800s` |
+
+The agent **never emits the spec by ANY channel** (no `Write` to
+`spec.json`, no `<spec_json>` text, no structured output) — only
+`thinking` blocks. 3× the time did not help; it produced more
+"Let me write the spec JSON now" cycles with ~500s silent reasoning gaps:
+
+```
+[68s]   thinking 6900c  analyze intent…             → ToolSearch
+[74s]   Read intent.md, Read otto.yaml
+[276s]  thinking 19580c "…Let me write the spec JSON. design groups: 1 foundation…" → ToolSearch
+[278s]  thinking 88c    "…I'll be thorough and carefully structured."
+[773s]  thinking 67c    "Let me write the spec JSON now. I'll write it directly to the file."
+[1288s] thinking 67c    "Let me write the spec JSON now. I'll write it directly to the file."
+(timeout)
+```
+
+Non-convergence, not slow generation.
+
+## Code path
+
+- `compile_spec()` → bounded retry → `_run_compile_agent(attempt,timeout)`
+  → `run_agent_with_timeout()`.
+- Agent = `make_agent_options(agent_type="spec")`: claude_code **preset**
+  SDK, provider `claude`, model **sonnet**, `max_turns=200`. **No
+  thinking-budget / max-output cap, no structured_output schema** for the
+  spec agent.
+- Emission priority: (1) structured `spec_json` field — **not wired** via
+  options; (2) `spec_path.exists()` (Write tool); (3) `<spec_json>` in
+  text. In both failures: none occurred.
+- Prompt: `otto/prompts/compile-spec.md` (**1010 lines**) +
+  `compile-spec-structured-output.md`. Says *"A single JSON object … Write
+  the JSON to `{spec_path}`"*. **No incremental/staged emission, no
+  deliberation bound, no early-write mandate.**
+- `max_turns=200` never approached (14–19 msgs); each turn ≈ 500s of
+  extended thinking. Wall-clock is the only cap that bites.
+
+## Root-cause hypotheses (ranked, evidence-tagged)
+
+- **H1 (strong) — single-shot emission of a very large spec does not
+  converge.** Told to produce ONE giant JSON and `Write` it once; under
+  extended-thinking sonnet it composes/refines mentally forever, never
+  commits. 0 emissions ×2 + ~27K thinking + repeated "I'll write it now"
+  + ~500s silent gaps.
+- **H2 (strong, contributing) — prompt does not bound deliberation or
+  force progressive emission.** 1010-line prompt, no "skeleton first /
+  write early / stop deliberating".
+- **H3 (contributing) — structured-output channel not wired.** Emission
+  depends on one massive Write input or huge `<spec_json>` text — large
+  atomic generations the model fails to finish.
+- **H4 (unlikely; needs control) — general compile breakage.** Smaller
+  runs produced specs; size is the suspected variable, unconfirmed.
+
+## Constraints
+
+- Agile: NO 90-min capstone iteration. Fast deterministic real-code-path
+  controls/repro only.
+- Timeout fix (`798b0a0d4→a75677088`, gate APPROVED) is orthogonal and
+  correct; it makes this fail honestly, not converge.
+- Must not regress small/medium intents (work today) or brownfield.
+- `v5_runner.py` / merge / seam fixes out of scope.
+
+## Open questions (proposed fast validation — for the plan)
+
+1. Control A (~1–2 min): does a *small* intent compile fast with a normal
+   `Write`? Isolates "large intent"; rules H4 in/out.
+2. Control B (~3–9 min, fixed code): iTracker intent at
+   `spec_timeout≈180`, 3 bounded attempts → expect same non-emission loop
+   fast + the new honest terminal. Permanent agile RED repro.
+3. Threshold: at what intent/feature size does convergence break
+   (medium intent)? "Always incremental" vs "incremental above N".
+
+## Candidate fix directions (NOT decided — for discussion)
+
+- **Staged/incremental compile (most promising):** Write a skeleton
+  (groups + deps + shared scaffold) first, then fill features per group
+  across bounded turns — N tractable artifacts, durable on-disk progress
+  each turn, instead of one impossible one.
+- **Prompt hardening:** mandate "write `{spec_path}` early, then refine
+  in place; do not compose the whole spec before writing"; bound
+  deliberation.
+- **Wire a real `spec_json` structured-output schema** so emission is a
+  first-class field, not a giant tool input.
+- **Bound extended thinking** for the compile agent (effort/thinking
+  budget) so it cannot reason indefinitely without acting.
+
+Likely core = staged compile + prompt hardening; others reinforce. Not
+mutually exclusive.
+
+---
+
+## CORRECTION (2026-05-16, later) — misattributed layer; root cause is ENTRYPOINT, not the compile agent
+
+The hypotheses above (H1–H4, staged-compile fix directions) investigate
+the **legacy `otto run` compile path** — which the v5 i2p capstone does
+**not** use. The user's question ("why 47 features? did it occur before?
+what changed?") exposed the real cause. Evidence:
+
+- There are two compile entrypoints:
+  - **`otto run`** (`cli_run.py register_run_command` → `orchestrate_run`
+    → `_run_compile_phase` → `spec_compile.compile_spec`): the **legacy
+    heavy** path. Prompt `compile-spec.md` (1010 lines), schema v2,
+    groups/features → decomposes this intent into ~47 features → the
+    non-convergence documented above. The i2p-vs-legacy `--i2p`/
+    `default_pipeline` choice only affects the **downstream** pipeline;
+    BOTH branches call the same heavy `_run_compile_phase`. So even
+    `otto run --i2p` uses the non-converging compile.
+  - **`otto v5 run`** (`cli_v5.py register_v5_command` →
+    `compile_flat_spec`): the **flat i2p** path. Schema **v4**
+    (product_overview + intent_claims + core_entities + ~5
+    behavior_journeys). Converges.
+- Prior SUCCESSFUL iTracker runs (jv2 @ ~02:00, v6*, overnight) are all
+  schema-v4 / "COMPILE-FLAT" → they used **`otto v5 run`**. jv2 compiled
+  this exact intent in ~7 min (425s agent + a contract-repair round),
+  0 Write, emitted via structured/text — i.e. the flat path converges
+  fine on the 47-"feature" intent.
+- The two crashed capstone runs were launched by me with
+  `python -m otto.cli run` = **`otto run`** = legacy heavy compile.
+  jv2's `otto.yaml` is byte-identical to mine (no `default_pipeline`),
+  confirming the difference is the **command**, not config.
+
+**Root cause: operator/entrypoint error (mine), not an Otto regression
+and not a compile-agent capability bug.** "47 features" is the legacy
+path's decomposition; it "didn't happen before" because prior runs used
+`otto v5 run` (flat); "what changed" = I used `otto run` instead of
+`otto v5 run`. H1–H4 are real *for the legacy path* but that path is not
+the v5 capstone path; treat the staged-compile investigation as **shelved
+/ legacy-only**, not the capstone fix.
+
+The timeout-robustness fix (`798b0a0d4 → a75677088`, gate APPROVED)
+remains valid as defensive hardening for the legacy `otto run` path, but
+it is **not** what unblocks the capstone.
+
+### Separate real discrepancy (Finding 2 — needs a decision)
+
+Project `CLAUDE.md:9` documents `otto run "<intent>"` as the **"Unified
+i2p entrypoint: compile → build → merge → audit → render"**, and the
+`otto-as-user` skill's pressure-test examples use
+`python -m otto.cli run "..."`. But `otto run`'s compile is hardwired to
+the **legacy heavy** `compile_spec`; the converging i2p/flat compile is
+only under `otto v5 run`. So either the docs/skill are stale (real i2p
+entrypoint = `otto v5 run`) or `otto run` is mis-wired (should use the
+flat compile to be the documented "unified i2p entrypoint"). This is a
+genuine footgun — I fell into it by trusting the doc. Distinct from the
+capstone; needs a doc-fix-vs-dispatch-fix decision.
+
+### Corrected next step
+
+Relaunch the capstone via **`otto v5 run`** (the exact path jv2 used and
+proved converges on this intent), with the cc-i2p-2 venv (fixed seam +
+timeout code). No staged-compile work needed to unblock.
+
+---
+
+# RESEARCH — Ownership-first decomposition redesign (2026-05-16)
+
+_Author: Claude. Status: for user review BEFORE the plan (per written-
+artifacts protocol). Evidence: dual Claude+Codex audit of the true logs
+of capstone `v5-itracker-v5run2-093628` (task #49). Run killed by user._
+
+## What happened (ground truth)
+
+`otto v5 run` flat-compiled the iTracker intent (schema v4, 5 journeys,
+converged) and decomposed into 5 children. Outcome: **3 pass, 2
+merge_blocked, root stuck `pending_children` ~65 min, repair agents
+timing out at 1799s, cost only $5** (USD cap never relevant).
+
+Children + `owned_paths` (from `otto_logs/cross-sessions/task_graph.json`):
+
+| child | role | owned_paths |
+|---|---|---|
+| v5-dc39b504a195 | Architect/Scaffold | **`backend/`, `frontend/`** (whole trees), start.sh, CHARTER.md, decisions.md, data/ |
+| v5-94fe5e2942c1 | Auth | backend/routers/auth.py, routers/users.py, frontend/src/features/auth/, … |
+| v5-2765268c215d | Core | backend/routers/{workspaces,teams,issues,labels,webhooks}.py, … |
+| v5-b15e4b438572 | Collab/Realtime | backend/routers/comments.py, notifications.py, backend/ws_manager.py, features/comments/, … |
+| v5-f3efd65be0d4 | Cycles | backend/routers/cycles.py, features/{cycles,search}/ |
+
+## Root causes (evidence-cited; Claude + Codex agreed, Codex sharpened)
+
+**A. Ownership model defect (the architectural root).** Scaffold owns
+the *entire* `backend/`+`frontend/` trees, **nested/overlapping** with
+every leaf's owned_paths. Shared foundation contracts —
+`backend/auth.py`, `backend/routers/auth.py`, `frontend/src/lib/ws.ts`,
+`frontend/src/lib/api.ts`, App/Layout/`routes.tsx`, Vite/DB/session
+config — were **assigned to no one exclusively and mutated by every
+child**. Git proof of parallel authorship: scaffold `3f6111d` added
+`ws.ts`; b15 `f019940` added `backend/auth.py` + modified `ws.ts`; f3
+`6337e91` independently added `backend/auth.py`; auth `f6d367e` /
+core `06c8d9e` independently added `backend/routers/auth.py`.
+`git merge-base i2p/build/v5-f3efd65be0d4 main` = `f8b7493`, where
+`backend/auth.py` does not exist → **true add/add with empty base**.
+Registration isolation (auto-discovered `routers/*.py` /
+`features/*/`) correctly solved the *registry* collision class but
+**never covered the shared-foundation-contract class**.
+
+**B. Repair-scope bloat.** The f3 merge-conflict repair agent actually
+*resolved* the `backend/auth.py` add/add early (committed a merged
+auth.py — narrative turn-1:49). It then **widened into whole-product
+clean-deploy debugging** (TypeScript, Vite IPv4/IPv6 port binding) and
+timed out at 1799s; final recorded failure = `ports_not_listening`,
+NOT the auth conflict (repair_packet.events.jsonl:9). A leaf
+merge-conflict repair is being asked to prove whole-product
+clean-deploy.
+
+**C. Verification isolation bug.** `v5-2765268c215d` child-verify
+repair grinds because clean-verify runs against ambient `Path.cwd()` /
+`main`, not the repair worktree/ref → the agent burns the turn on
+unrelated `main` TypeScript errors (`stale_integration_target_after
+_repair`; narrative turn-1:166,194).
+
+**D. Over-literal union guard + scope-gate trap.** b15's block is
+`integration_union_incomplete` on `ws.ts`: the guard demands the
+*exact old scaffold line fragments* after a legitimate refactor. The
+b15 agent found the real bug (Vite IPv6 vs oracle IPv4) and fixed it —
+but the **composite scope-gate rejected the fix for touching shared
+out-of-scope files** (repair_packet.events.jsonl:16). The guard +
+scope-gate together make the necessary fix impossible from a leaf.
+
+## Relevant code paths (to confirm during planning)
+
+- Decomposition / owned_paths assignment + overlap validation: the
+  architect/lead decomposition prompts (`otto/prompts/lead.md` and
+  scaffold/architect prompts) + `otto/v5_capability_inventory.py`
+  (`check_route_registration_isolation`, CHARTER IA clause) + wherever
+  owned_paths are validated for disjointness.
+- Foundation/serial phase: `otto/v5_runner.py` child dispatch ordering
+  (architect-first sequential vs parallel leaves).
+- Union guard: `otto/v5_runner.py` `_record_and_check_integration_union`
+  / `_integration_union_*` (line-level union; needs semantic option).
+- Repair scope: `otto/v5_preflight_repair.py` repair-packet allowed
+  paths + `otto/v5_clean_verify.py` clean-verify worktree/ref resolution
+  (the `Path.cwd()`/main bug) + composite scope-gate.
+- Repair/clean-deploy split: where merge-conflict repair escalates into
+  clean-deploy oracle.
+
+## Constraints
+
+- Agile: validate via fast deterministic RED→GREEN repros on the real
+  code path (minutes), NOT 90-min capstones. Capstone is final
+  acceptance only. See [[agile-minimal-e2e-repro]].
+- Time-budget only, never USD ([[budget-is-time-not-usd]]); the USD-cap
+  root-fix is separately open (not this effort).
+- Don't Codex-gate trivia ([[codex-gate-not-every-change]]); DO gate
+  this (correctness-critical, multi-subsystem, false-pass-adjacent).
+- Reuse existing seam/repair machinery; no parallel channels
+  ([[feedback_patches_to_protocols]], brittleness guardrail).
+
+## Proposed RED-first repro scenes (the "critical bug scenes")
+
+Each: real code path, deterministic, only the agent step injected,
+seconds-to-minutes, RED now → GREEN after fix, permanent regression.
+
+1. **Overlapping/nested owned_paths + shared-foundation add/add.**
+   Fixture decomposition: scaffold owns `backend/` broadly; 2 leaves
+   each author `backend/auth.py`. Assert the system *prevents* it
+   (disjoint-ownership validation / foundation-phase exclusive
+   ownership) — RED today (add/add reaches integration).
+2. **Repair-scope bloat.** Inject a merge-conflict whose conflicted
+   owned path is fixed immediately but clean-deploy fails on an
+   out-of-scope shared file. Assert merge-conflict repair stays scoped
+   to conflicted owned paths and emits a separate foundation/
+   integration repair task — RED today (it grinds whole-product to
+   timeout).
+3. **Verification isolation.** Invoke clean-verify in a repair context;
+   assert it runs against the repair worktree/ref, not ambient
+   cwd/`main` — RED today.
+4. **Semantic union guard + scope-gate.** A child legitimately
+   refactors a shared lib (same exported API/behavior, different
+   lines). Assert the union guard accepts (semantic/API equivalence)
+   and the necessary shared-file fix is routed (contract-amendment),
+   not rejected — RED today.
+
+## Candidate fix directions (NOT decided — for dual review + plan)
+
+1. **Serial foundation phase**: scaffold/foundation slice exclusively
+   owns + lands shared contracts (auth.py, routers/auth.py, ws.ts,
+   api.ts, App/Layout/routes, Vite/DB/session) FIRST; leaves import,
+   never recreate.
+2. **Disjoint owned_paths invariant**: after foundation lands, active
+   children's owned_paths must be non-overlapping concrete globs; no
+   child owns a descendant of another active broad owner. Validate at
+   decomposition time (compile-time fail-fast, like the seam guards).
+3. **Shared-contract amendment task**: if a leaf needs an auth/ws
+   change, it requests a foundation-owned amendment; leaves rebase.
+4. **Semantic union guard**: assert exported API + behavior, not exact
+   old lines/comments.
+5. **Split repair scope**: merge-conflict repair only resolves
+   conflicted owned paths; whole-product clean-deploy failure → a
+   separate correctly-owned integration/foundation repair task.
+6. **Verification isolation**: clean-verify runs against the repair
+   worktree/ref; isolated/explicit ports.
+
+Likely core = (1)+(2)+(5)+(6); (3)+(4) reinforce. Not mutually
+exclusive. Open question for review: is the right primitive an explicit
+**foundation slice type** in the spec/decomposition, or an
+ownership-validation pass + dispatch-ordering rule layered on the
+existing decomposition? Codex dual-review next.
+
+---
+
+## Codex design review (2026-05-16) — REVISE, incorporated
+
+Codex independently reviewed with full run+repo context. Verdict
+REVISE; all corrections accepted (code-grounded). Resulting **final
+decisions**:
+
+### Root cause — corrected
+
+- **A (architectural root) + the create-anywhere loophole.** `owned_paths`
+  is only a *write*-scope; `detect_scope_violations`
+  (`otto/build.py:~568`) **permits newly-created unowned paths**, and
+  agents may create files anywhere (`build.py:~20`). That is the precise
+  mechanism by which multiple leaves *invent* `backend/auth.py` before
+  git ever sees an add/add. Must be named explicitly — closing the
+  ownership model without closing this loophole does nothing.
+- **B and C are INDEPENDENT defects, not symptoms of A** — they bite
+  even with perfect ownership.
+  - B (repair-scope bloat): the repair prompt instructs the agent to make
+    the *full acceptance oracle* (incl. clean-deploy + composite gate)
+    pass (`otto/v5_preflight_repair.py:~988`); the merge-conflict packet
+    is correctly path-scoped (`v5_runner.py:~4809`) but the runner then
+    invokes integration-smoke repair after conflict repair
+    (`v5_runner.py:~4277`) → time burn regardless of ownership.
+  - C (verification isolation): `build_clean_verify_oracle_command` sets
+    `OTTO_CLEAN_VERIFY_WORKTREE` (`otto/v5_clean_verify.py:~677`) but the
+    CLI consumes `Path.cwd()` (`otto/cli.py:~333`) → clean-verify runs
+    against ambient main, not the repair worktree.
+- **D splits into two bugs:** D1 over-literal union guard
+  (`v5_runner.py:~722` records exact added lines + text-containment
+  check); D2 **missing shared-contract repair routing** — the scope-gate
+  correctly rejects a leaf editing out-of-scope shared files; the real
+  defect is that the union/shared repair is *routed to the leaf at all*
+  instead of to a foundation/contract-amendment owner.
+
+So: **5 distinct defect classes** (A+loophole, B, C, D1, D2), not 4.
+
+### Primitive decision — RESOLVED
+
+Do **NOT** add foundation ownership to flat schema v4. The flat compiler
+explicitly emits "NO groups, NO owned_paths, NO shared_contracts"
+(`otto/spec_compile_flat.py:~11`); `owned_paths` originate at **runtime**
+via `mcp__otto__submit_subtask` (`otto/mcp_tools.py:~197,~243`,
+`otto/queue/task_graph.py:~170`). Therefore the primitive is a
+**runtime decomposition/task-graph primitive**:
+- add `task_role ∈ {foundation, feature, contract_amendment, integration}`
+  + machine-readable `foundation_contracts` (exclusive owner + semantic
+  check type) on the task graph;
+- THEN an ownership-validation pass on top.
+- Validation **alone is insufficient** — architect-first ordering
+  *already* existed (`otto/lead.py:~589`) and leaves *did* depend on
+  scaffold, yet it failed because scaffold owned broad trees and no one
+  exclusively owned the shared contracts. Reword "compile-time
+  fail-fast" → **"decomposition/architect-gate fail-fast"**.
+
+### Final repro scenes (5 — Codex specs adopted)
+
+1. **Shared-foundation not isolated (don't wait for add/add).** Seam:
+   `_process_children` after architect pass, beside
+   `check_route_registration_isolation` (`v5_runner.py:~2984`). Fixture:
+   architect owns `backend/`, leaves own feature paths, CHARTER declares
+   `backend/auth.py` + `frontend/src/lib/ws.ts` as foundation contracts,
+   leaves depend on architect. Inject `_run_child`; raise if a leaf
+   dispatches. Assert: architect re-entered/blocked
+   `kind=shared_foundation_not_isolated`; **no feature leaf dispatches**.
+2. **Repair-scope bloat (real merge path).** Seam: `_merge_child_branch`
+   conflict path. Fake `merge_child_into_integration`: conflict →
+   success after `_repair_child_merge_conflict_once`; fake
+   smoke/clean-deploy fails on `frontend/vite.config.ts`. Assert: no
+   leaf repair loop touches that file; runner emits/enqueues a
+   foundation/integration repair need. RED today (smoke repair runs
+   after conflict repair).
+3. **Verification isolation.** Seam: `clean_verify_command`. CWD=main,
+   env `OTTO_CLEAN_VERIFY_WORKTREE=/tmp/repair-worktree`, monkeypatch
+   `verify_from_clean_oracle` to capture the project path. Assert
+   captured path == repair worktree, not CWD. RED (`cli.py:~333`).
+4. **Semantic union guard ONLY.** Seam:
+   `_integration_union_missing_contributions` /
+   `_record_and_check_integration_union`. Fixture: scaffold contributed
+   `connect(workspaceId: string)`; final has compatible
+   `connect(workspaceId: string, token?: string)` + required exports.
+   Assert: no `integration_union_incomplete` for paths declared
+   *semantic foundation contracts*. **Keep exact additive line-union for
+   route registries** (don't make registries semantic).
+5. **Shared-contract repair routing (the b15 scope-gate trap).** Seam:
+   `_record_and_check_integration_union` → `_repair_child_upward_merge
+   _gate_once` (`v5_runner.py:~4535`). Fixture: union feedback path =
+   `frontend/src/lib/ws.ts`, child owned_paths exclude it, a foundation
+   owner exists. Assert: runner does **not** launch a leaf repair packet;
+   it creates/records a foundation contract-amendment repair.
+
+All scenes: real code path, only the agent step injected, deterministic,
+seconds-to-minutes, RED now → GREEN after fix, permanent regression.
+
+### Net plan
+
+Build the 5 RED-first scenes (Codex builds — it designed them + has the
+log context), confirm RED, then Codex implements the root fixes
+(correctness-critical) under the Plan Gate + Implementation Gate. Fix
+order driven by dependency: A+loophole & the runtime `task_role`
+primitive first (unblocks 1/4/5), then B, C independently.
+
+---
+
+## S1 implementation note (2026-05-16T19:26:14Z)
+
+- S1 consumes the S0 task graph primitive: parent `foundation_contracts` via `_parent_task_id_for_child`, with a compatibility fallback for architect/foundation children that already carry contract metadata.
+- Runner-managed write admissions found by `rg "commit_worktree\(|commit_integration_worktree\(" otto/v5_runner.py`: preflight repair, integration-agent commit, root inline commit, subtree propagation repair, child verify repair, scaffold repair, child dirty/untracked commit, merge conflict repair. S1 applies one shared foundation-contract write gate to each site, plus pre-merge committed child branch delta checks before merge advancement.
+- S1 stays scoped: no amendment lifecycle, semantic union, smoke split, or clean-verify env behavior.
+
+## 2026-05-16 S3/S5 Ownership Decomposition Research
+
+Task: implement remaining Plan-Gate-approved S3 and S5 only, on top of landed S0/S1/S2/S4.
+
+Findings:
+- S0 contract shape is `path`, `owner_task_id`, `check` in `literal|semantic`, optional `required_exports`, optional `behavior_probes`; parser already rejects `check="semantic"` for route registries.
+- Integration union state currently stores `contributions[]` and `touches[]` with `child_task_id` per item; this is enough to choose semantic vs literal per contribution item.
+- `_integration_union_missing_contributions` currently performs exact line containment for every shared path and has no semantic contract awareness.
+- `_record_and_check_integration_union` can load parent `foundation_contracts` via `_foundation_contracts_for_parent`; persisting a normalized snapshot into the union state lets tests and delayed checks use the same contract data.
+- Contract amendments are recorded as `task_role="contract_amendment"` with `contract_amendment.contract_path` / `contract_amendment_path` and `owner_task_id`; semantic adequacy should only apply when the contribution is from the contract owner or a bound amendment for that same contract.
+- `clean_verify_command` currently always passes `Path.cwd()` to `verify_from_clean_oracle`; `build_clean_verify_oracle_command` sets `OTTO_CLEAN_VERIFY_WORKTREE` and only sets/args `OTTO_REPAIR_PACKET_PATH` when repair-packet context exists.
+
+Implementation constraints:
+- S3 must keep exact additive line-union for registries/literal paths and for non-owner touches to semantic contract paths.
+- S3 semantic adequacy must require all declared exports and all declared behavior probes/invariants to be present in final text, so export-only compatibility cannot false-green.
+- S5 must honor `OTTO_CLEAN_VERIFY_WORKTREE` only when repair/oracle context is present (`--repair-packet` or `OTTO_REPAIR_PACKET_PATH`), leaving manual `otto clean-verify` cwd-based.

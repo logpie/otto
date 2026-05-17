@@ -241,10 +241,12 @@ def test_layer2_prompt_narrowing_includes_feature_id(tmp_path: Path) -> None:
         feature_id="feat-a",
     )
     rendered = _build_agent_prompt(agent_input)
-    assert "FIX ONLY THE FAILING FEATURE" in rendered
+    assert "FIX ONLY THE FAILING FEATURE" not in rendered
+    assert "Repair the failing acceptance cluster" in rendered
     assert "feat-a" in rendered
     assert "Feature A" in rendered
     assert "login button does nothing" in rendered
+    assert "shared-contract edits are allowed" in rendered
 
 
 def test_layer2_prompt_cluster_repair_does_not_claim_siblings_passed(tmp_path: Path) -> None:
@@ -264,7 +266,7 @@ def test_layer2_prompt_cluster_repair_does_not_claim_siblings_passed(tmp_path: P
         related_feature_ids=("feat-a", "feat-b"),
     )
     rendered = _build_agent_prompt(agent_input)
-    assert "FIX THE FAILING FEATURE CLUSTER" in rendered
+    assert "Repair the failing acceptance cluster" in rendered
     assert "feat-a" in rendered
     assert "feat-b" in rendered
     assert "already passed audit" not in rendered
@@ -286,3 +288,4 @@ def test_layer2_prompt_no_narrowing_when_feature_id_empty(tmp_path: Path) -> Non
     )
     rendered = _build_agent_prompt(agent_input)
     assert "FIX ONLY THE FAILING FEATURE" not in rendered
+    assert "Repair the failing acceptance cluster" not in rendered

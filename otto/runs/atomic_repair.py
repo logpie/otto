@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from otto.runs.history import append_history_snapshot, build_terminal_snapshot, 
 
 _TERMINAL_ATOMIC_SUMMARY_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
 _TERMINAL_MANIFEST_EXIT_STATUSES = {"success", "failure"}
+logger = logging.getLogger("otto.runs.atomic_repair")
 
 
 def repair_atomic_history(project_dir: Path) -> None:
@@ -182,7 +184,8 @@ def _terminal_snapshot_status(
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning("ignoring unreadable atomic repair JSON %s: %s", path, exc)
         return {}
     return payload if isinstance(payload, dict) else {}
 
