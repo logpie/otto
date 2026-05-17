@@ -62,7 +62,17 @@ ROOT_SPEC_ARTIFACT_FILENAMES = frozenset({
     "otto-spec.json",
     "otto_spec.json",
 })
-PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS = 2
+# Bounded spec-repair attempts for pass-model verification-contract failures.
+# Was 2 — run #9 (mib9) died at compile: the spec model emitted an http_api
+# journey whose pass_model.steps lacked the required payload assertion, and 2
+# repair attempts could not add one (spec_contract_repair_exhausted →
+# merge_blocked before decomposition even started). The contract itself is a
+# legitimate anti-false-pass guard (an API journey asserting nothing must not
+# pass) and must NOT be relaxed; the brittle part is the tiny attempt cap.
+# Each attempt is one cheap spec LLM call and run_budget_seconds bounds the
+# total, so give the repair real room (same "rigid low limit is the villain"
+# pattern as the 400→1200s repair wall-clock).
+PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS = 5
 PASS_MODEL_CONTRACT_REPAIR_CODES = frozenset({
     "verification_contract_invalid",
     "verification_contract_missing",
