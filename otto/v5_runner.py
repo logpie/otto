@@ -3563,6 +3563,57 @@ def _verify_child_branches_reached_parent(
             })
             if ok:
                 continue
+            # The child built and PASSED (guarded by _task_entry_allows_
+            # upward_merge above) but its branch never reached the parent
+            # integration branch — almost always because a prior run's
+            # children_and_subtree_integration was interrupted/budget-killed
+            # AFTER the child passed but BEFORE its upward merge, or this is a
+            # resumed run that skipped the already-passed child (its merge
+            # only ever ran inside _run_child for freshly-built children).
+            # The work is done and on the branch; it just needs merging.
+            # Re-attempt the canonical upward merge before demoting — only a
+            # GENUINE conflict (merge fails / still unreachable) becomes
+            # merge_blocked. Demoting-without-merging silently drops a
+            # completed, passing feature and ships an incomplete product.
+            recovered = False
+            if branch == child_branch_name(child_id):
+                try:
+                    from otto.v5_branching import merge_child_into_integration
+
+                    m_ok, m_detail = merge_child_into_integration(
+                        project_dir=project_dir,
+                        child_task_id=child_id,
+                        parent_integration_branch=target,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    m_ok, m_detail = False, f"{type(exc).__name__}: {exc}"
+                recheck_ok, recheck_detail = _branch_is_ancestor(
+                    project_dir, branch, target
+                )
+                recovered = bool(m_ok) and recheck_ok
+                _emit(on_event, {
+                    "event": (
+                        "child_branch_remerged"
+                        if recovered
+                        else "child_branch_remerge_failed"
+                    ),
+                    "task_id": child_id,
+                    "branch": branch,
+                    "target": target,
+                    "detail": (
+                        m_detail
+                        if recovered
+                        else f"{m_detail} | recheck: {recheck_detail}"
+                    ),
+                })
+            if recovered:
+                logger.info(
+                    "recovered unmerged passed child %s: re-merged %s into %s",
+                    child_id,
+                    branch,
+                    target,
+                )
+                continue
             logger.warning(
                 "child branch ancestry verification failed for %s: %s",
                 child_id,
