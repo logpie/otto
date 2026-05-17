@@ -3971,6 +3971,88 @@ async def _ensure_child_merge_ready(
     )
 
 
+def _resume_root_from_checkpoint(
+    *,
+    project_dir: Path,
+    config: dict[str, Any],
+    root_session_dir: Path,
+    intent: str,
+    on_event: Any = None,
+) -> tuple[Any, LeadResult] | None:
+    """If this project already has a completed root decomposition checkpoint,
+    return ``(spec, root_result)`` so the pipeline can skip compile + root
+    decomposition + child rebuild and resume straight at integration.
+
+    The task graph (durable) + per-child git branches (durable) are the
+    checkpoint. A v5 run interrupted/killed after decomposition (e.g. budget
+    exceeded mid-integration) would otherwise have to rebuild compile +
+    scaffold + every feature (~40min) just to retry integration; that work is
+    already persisted, so resume from it instead of from scratch.
+
+    Returns ``None`` (→ unchanged fresh-run behavior) unless ALL hold:
+      * the task graph has the root task with ≥1 emitted child,
+      * root is NOT already terminal (pass/partial/merge_blocked/catastrophic
+        — a finished run should re-run fresh, not "resume" a done product),
+      * the persisted root intent matches (guards against intent drift —
+        resuming an old decomposition for a changed intent would be wrong),
+      * a persisted spec.json checkpoint exists.
+    Opt-out with ``v5_resume_from_checkpoint: false`` in config/otto.yaml.
+    """
+    if config.get("v5_resume_from_checkpoint") is False:
+        return None
+    try:
+        tasks = read_graph(project_dir).get("tasks") or {}
+    except Exception:  # noqa: BLE001
+        return None
+    root_t = tasks.get(ROOT_TASK_ID)
+    if not isinstance(root_t, dict):
+        return None
+    child_ids = [
+        str(tid)
+        for tid, v in tasks.items()
+        if isinstance(v, dict) and v.get("parent_task_id") == ROOT_TASK_ID
+    ]
+    if not child_ids:
+        return None
+    if root_t.get("verdict") in {"pass", "partial", "merge_blocked", "catastrophic"}:
+        return None
+    persisted_intent = str(root_t.get("intent") or "").strip()
+    if persisted_intent and persisted_intent != str(intent).strip():
+        return None
+    specs = sorted(
+        project_dir.glob("otto_logs/sessions/*/spec/spec.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not specs:
+        return None
+    dest = root_session_dir / "spec" / "spec.json"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(specs[0].read_text(encoding="utf-8"), encoding="utf-8")
+    except OSError:
+        return None
+    # The FlatSpec object is only consumed by Phase C (root decomposition),
+    # which we skip on resume; Phase E reads the spec.json FILE we just
+    # checkpointed into root_session_dir. So spec=None is correct here.
+    root_result = LeadResult(
+        task_id=ROOT_TASK_ID,
+        verdict="pending_children",
+        decomposition="emit",
+        emitted_subtask_ids=list(child_ids),
+        cost_usd=0.0,
+        final_text="resumed from checkpoint",
+    )
+    _emit(on_event, {
+        "event": "v5_resume_from_checkpoint",
+        "task_id": ROOT_TASK_ID,
+        "emitted": len(child_ids),
+        "child_task_ids": child_ids,
+        "spec_checkpoint": str(specs[0]),
+    })
+    return None, root_result
+
+
 async def run_v5_pipeline(
     *,
     project_dir: Path,
@@ -4047,90 +4129,114 @@ async def run_v5_pipeline(
 
         # ---- Phase A: Root session setup ----
 
-        # ---- Phase B: Compile flat spec ----
-        _emit(on_event, {"event": "compile_start"})
-        try:
-            spec = await _await_with_run_deadline(
-                compile_flat_spec(
+        # ---- Phase B/C: compile + root decomposition (or resume checkpoint) ----
+        # If this project already has a completed decomposition checkpoint
+        # (task graph + per-child branches persisted from a prior interrupted
+        # run), skip compile + decomposition + child rebuild and resume
+        # straight at integration. Fresh projects have no such graph →
+        # _resume is None → behavior is byte-identical to before.
+        _resume = _resume_root_from_checkpoint(
+            project_dir=project_dir,
+            config=config,
+            root_session_dir=root_session_dir,
+            intent=intent,
+            on_event=on_event,
+        )
+        if _resume is not None:
+            spec, root_result = _resume
+            result.spec = spec
+            result.root_lead_result = root_result
+            record_task(
+                project_dir,
+                task_id=ROOT_TASK_ID,
+                intent=intent,
+                integration_branch=None,
+            )
+        else:
+            # ---- Phase B: Compile flat spec ----
+            _emit(on_event, {"event": "compile_start"})
+            try:
+                spec = await _await_with_run_deadline(
+                    compile_flat_spec(
+                        project_dir=project_dir,
+                        session_dir=root_session_dir,
+                        intent=intent,
+                        config=config,
+                    ),
+                    config=config,
+                    started_at=started,
+                    phase="spec_compile",
+                    cap_s=float(
+                        config.get("spec_timeout")
+                        or config.get("spec_compile_timeout_s")
+                        or 900
+                    ),
+                )
+                result.spec = spec
+                _emit(on_event, {
+                    "event": "compile_done",
+                    "journey_count": len(spec.behavior_journeys),
+                    "lint_warnings": len(spec.lint_warnings),
+                })
+            except SpecContractRepairExhaustedError as exc:
+                logger.warning("flat spec pass-model repair exhausted: %s", exc)
+                result.verdict = "merge_blocked"
+                result.failure_reason = f"spec_contract_repair_exhausted: {exc}"
+                return result
+            except _V5RunDeadlineExceeded:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("flat spec compile failed")
+                result.verdict = "catastrophic"
+                result.failure_reason = f"spec_compile: {type(exc).__name__}: {exc}"
+                return result
+
+            # Record root in task graph.
+            record_task(
+                project_dir,
+                task_id=ROOT_TASK_ID,
+                intent=intent,
+                integration_branch=None,
+            )
+
+            # ---- Phase C: Run root Lead ----
+            _emit(on_event, {"event": "lead_start", "task_id": ROOT_TASK_ID})
+            root_result = await _await_with_run_deadline(
+                run_lead(
+                    task_id=ROOT_TASK_ID,
+                    intent=intent,
                     project_dir=project_dir,
                     session_dir=root_session_dir,
-                    intent=intent,
+                    integration_branch=None,
                     config=config,
+                    kind="plan_or_inline",
+                    decomp_runtime_context=_build_decomp_runtime_context(
+                        project_dir=project_dir,
+                        config=config,
+                        max_parallel=max_parallel,
+                        run_started_at=started,
+                        spec=spec,
+                    ),
                 ),
                 config=config,
                 started_at=started,
-                phase="spec_compile",
-                cap_s=float(
-                    config.get("spec_timeout")
-                    or config.get("spec_compile_timeout_s")
-                    or 900
-                ),
+                phase="root_decomposition",
+                cap_s=float(config.get("decomposition_timeout_s") or 900),
             )
-            result.spec = spec
+            result.root_lead_result = root_result
             _emit(on_event, {
-                "event": "compile_done",
-                "journey_count": len(spec.behavior_journeys),
-                "lint_warnings": len(spec.lint_warnings),
+                "event": "lead_done",
+                "task_id": ROOT_TASK_ID,
+                "verdict": root_result.verdict,
+                "decomposition": root_result.decomposition,
+                "emitted": len(root_result.emitted_subtask_ids),
             })
-        except SpecContractRepairExhaustedError as exc:
-            logger.warning("flat spec pass-model repair exhausted: %s", exc)
-            result.verdict = "merge_blocked"
-            result.failure_reason = f"spec_contract_repair_exhausted: {exc}"
-            return result
-        except _V5RunDeadlineExceeded:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("flat spec compile failed")
-            result.verdict = "catastrophic"
-            result.failure_reason = f"spec_compile: {type(exc).__name__}: {exc}"
-            return result
-
-        # Record root in task graph.
-        record_task(
-            project_dir,
-            task_id=ROOT_TASK_ID,
-            intent=intent,
-            integration_branch=None,
-        )
-
-        # ---- Phase C: Run root Lead ----
-        _emit(on_event, {"event": "lead_start", "task_id": ROOT_TASK_ID})
-        root_result = await _await_with_run_deadline(
-            run_lead(
-                task_id=ROOT_TASK_ID,
-                intent=intent,
+            _commit_root_inline_changes(
                 project_dir=project_dir,
-                session_dir=root_session_dir,
-                integration_branch=None,
-                config=config,
-                kind="plan_or_inline",
-                decomp_runtime_context=_build_decomp_runtime_context(
-                    project_dir=project_dir,
-                    config=config,
-                    max_parallel=max_parallel,
-                    run_started_at=started,
-                    spec=spec,
-                ),
-            ),
-            config=config,
-            started_at=started,
-            phase="root_decomposition",
-            cap_s=float(config.get("decomposition_timeout_s") or 900),
-        )
-        result.root_lead_result = root_result
-        _emit(on_event, {
-            "event": "lead_done",
-            "task_id": ROOT_TASK_ID,
-            "verdict": root_result.verdict,
-            "decomposition": root_result.decomposition,
-            "emitted": len(root_result.emitted_subtask_ids),
-        })
-        _commit_root_inline_changes(
-            project_dir=project_dir,
-            root_branch=root_branch,
-            result=root_result,
-            on_event=on_event,
-        )
+                root_branch=root_branch,
+                result=root_result,
+                on_event=on_event,
+            )
 
         # ---- Phase C.5: Optional review pause for root's emitted children ----
         if (
