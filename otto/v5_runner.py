@@ -2014,6 +2014,7 @@ def _foundation_contracts_for_parent(
         return contracts
     # Compatibility with early S0 repros: parent metadata is authoritative, but
     # a passed foundation child may still carry the contracts before persistence.
+    foundation_child_id = ""
     for task_id, task in (tasks or {}).items():
         if not isinstance(task, dict):
             continue
@@ -2021,12 +2022,41 @@ def _foundation_contracts_for_parent(
             continue
         if not _is_foundation_task(task):
             continue
+        if not foundation_child_id:
+            foundation_child_id = str(task_id)
         raw_child = task.get("foundation_contracts")
         for item in raw_child or []:
             if isinstance(item, dict):
                 contract = dict(item)
                 contract.setdefault("owner_task_id", str(task_id))
                 contracts.append(contract)
+    if contracts:
+        return contracts
+    # The graph metadata is populated by persist_foundation_contracts_from_
+    # charter, which runs in the architect-contract gate path — NOT before the
+    # scheduler's post-pass contracts check. When a foundation child has passed
+    # but persist has not yet written its contracts onto the parent, every
+    # graph-only lookup here returns empty and the scheduler spuriously fires
+    # `foundation_contracts_missing_after_pass`, costing a ~14min architect
+    # re-dispatch every run (#6/#8/#10/#11). CHARTER.md is the source of truth
+    # the scaffold actually produced and it is already on disk by this point —
+    # parse it directly as the fallback so contracts are visible the moment
+    # the scaffold exists, independent of when graph-persist happens.
+    try:
+        from otto.v5_capability_inventory import parse_foundation_contracts
+
+        parsed, parse_findings = parse_foundation_contracts(project_dir / "CHARTER.md")
+    except Exception:  # noqa: BLE001
+        return contracts
+    if parse_findings:
+        return contracts
+    owner_default = foundation_child_id
+    for item in parsed or []:
+        if isinstance(item, dict):
+            contract = dict(item)
+            if owner_default:
+                contract.setdefault("owner_task_id", owner_default)
+            contracts.append(contract)
     return contracts
 
 
