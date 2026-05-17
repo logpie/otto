@@ -173,10 +173,31 @@ class V5RunResult:
 
 
 class _V5RunDeadlineExceeded(TimeoutError):
-    def __init__(self, *, phase: str, budget_s: int) -> None:
+    def __init__(
+        self,
+        *,
+        phase: str,
+        budget_s: int,
+        fired_after_s: float | None = None,
+        limit_kind: str = "run_budget",
+    ) -> None:
         self.phase = phase
         self.budget_s = budget_s
-        super().__init__(f"run_budget_seconds exceeded during {phase} ({budget_s}s)")
+        self.fired_after_s = fired_after_s
+        self.limit_kind = limit_kind  # "run_budget" | "phase_cap"
+        if limit_kind == "phase_cap" and fired_after_s is not None:
+            msg = (
+                f"{phase} phase cap exceeded "
+                f"({fired_after_s:.0f}s; run_budget_seconds={budget_s}s)"
+            )
+        else:
+            super_s = (
+                f"{fired_after_s:.0f}s"
+                if fired_after_s is not None
+                else f"{budget_s}s"
+            )
+            msg = f"run_budget_seconds exceeded during {phase} ({super_s})"
+        super().__init__(msg)
 
 
 def _run_budget_seconds(config: dict[str, Any]) -> int:
@@ -204,7 +225,13 @@ async def _await_with_run_deadline(
 ) -> Any:
     remaining = _run_budget_remaining_s(config=config, started_at=started_at)
     if remaining <= 0:
-        raise _V5RunDeadlineExceeded(phase=phase, budget_s=_run_budget_seconds(config))
+        raise _V5RunDeadlineExceeded(
+            phase=phase,
+            budget_s=_run_budget_seconds(config),
+            fired_after_s=time.monotonic() - started_at,
+            limit_kind="run_budget",
+        )
+    capped = cap_s is not None and float(cap_s) < remaining
     timeout = remaining if cap_s is None else min(remaining, max(0.001, float(cap_s)))
     try:
         return await asyncio.wait_for(awaitable, timeout=timeout)
@@ -212,6 +239,8 @@ async def _await_with_run_deadline(
         raise _V5RunDeadlineExceeded(
             phase=phase,
             budget_s=_run_budget_seconds(config),
+            fired_after_s=timeout,
+            limit_kind="phase_cap" if capped else "run_budget",
         ) from exc
 
 
@@ -4004,7 +4033,7 @@ async def run_v5_pipeline(
                 cap_s=float(
                     config.get("spec_timeout")
                     or config.get("spec_compile_timeout_s")
-                    or 240
+                    or 900
                 ),
             )
             result.spec = spec
@@ -4056,7 +4085,7 @@ async def run_v5_pipeline(
             config=config,
             started_at=started,
             phase="root_decomposition",
-            cap_s=float(config.get("decomposition_timeout_s") or 240),
+            cap_s=float(config.get("decomposition_timeout_s") or 900),
         )
         result.root_lead_result = root_result
         _emit(on_event, {
