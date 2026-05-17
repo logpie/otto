@@ -258,13 +258,19 @@ def assign_verification_level(
                 "webapp behavior journey requires a well-formed entry_route",
             )
         api_only = bool(journey.get("api_only") is True)
-        if api_only:
-            if not entry_route.startswith("/api"):
-                raise VerificationContractError(
-                    "verification_contract_invalid",
-                    f"{path}.entry_route",
-                    "webapp api_only journey must use an /api entry_route",
-                )
+        if api_only and not entry_route.startswith("/api"):
+            raise VerificationContractError(
+                "verification_contract_invalid",
+                f"{path}.entry_route",
+                "webapp api_only journey must use an /api entry_route",
+            )
+        # An /api-route journey IS structurally an API journey (the iTracker
+        # product has a first-class REST API surface). Derive api-ness from
+        # the structural truth (the route), not a redundant `api_only` flag —
+        # the compiler legitimately declares such journeys `api`. Fail-closed
+        # for genuine UI journeys: a non-/api (UI page) route stays `ui`, so
+        # a broken UI can never be api-verified (no false-pass reopened).
+        if api_only or entry_route.startswith("/api"):
             return "api", "http_api"
         return "ui", None
 

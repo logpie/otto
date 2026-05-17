@@ -600,6 +600,12 @@ def _json_schema_any_of(*types: str) -> dict[str, Any]:
 
 
 def _contract_error_is_pass_model_repairable(exc: VerificationContractError) -> bool:
+    # A verification-contract mismatch (e.g. verification_level / entry_route)
+    # is a compiler-fixable spec error — route it through the SAME bounded
+    # spec-repair loop as pass_model errors so it ends in an honest terminal
+    # (SpecContractRepairExhaustedError) on exhaustion, NEVER catastrophic.
+    if exc.code == "verification_contract_invalid":
+        return True
     return exc.code in PASS_MODEL_CONTRACT_REPAIR_CODES and ".pass_model" in exc.path
 
 
