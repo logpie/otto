@@ -82,15 +82,22 @@ Architect task guidance:
   must be scaffold-owned loader/composer files with `leaf_edit: false`; leaf
   tasks add files matching the extension globs instead of editing those
   registries.
-- Shared TEST/BUILD infrastructure is a registration registry too. Any file
-  every feature would otherwise each create or edit — test config/bootstrap
+- Shared TEST/BUILD infrastructure must also be scaffold-owned. Any file every
+  feature would otherwise each create or edit — test config/bootstrap
   (`conftest.py`, `tests/setup.*`, `jest.config.*`, shared DB/session
   fixtures, shared mocks/factories), shared lint/type config — MUST be
-  created by the scaffold and listed in `shared_registry_files` with
-  `leaf_edit: false`. Feature leaves add only their own `test_<feature>.*`
-  modules under the extension globs and import the shared harness; they must
-  never create or edit the shared test bootstrap. Divergent independent
-  creates of these files are the #1 cause of integration merge conflicts.
+  created by the scaffold and declared as a `foundation_contracts` entry
+  owned by the architect/scaffold task (`check: "semantic"` is correct for
+  content that legitimately evolves, e.g. conftest.py; use `"literal"` only
+  for exact-match files). Do NOT list these in
+  `registration_isolation.shared_registry_files` — that field is exclusively
+  for route/API/screen registration registries (which must be `check:
+  "literal"`); putting test/build infra there fails the contract gate.
+  Feature leaves add only their own `test_<feature>.*` modules under the
+  extension globs and import the shared harness; they must never create or
+  edit the shared test bootstrap (the foundation_contract owner makes that an
+  isolation violation). Divergent independent creates of these files are the
+  #1 cause of integration merge conflicts.
 - Declare shared foundation files in a machine-readable `## Foundation Contracts`
   JSON block or `foundation_contracts` IA field. Each entry has `path`,
   `owner_task_id`, `check` (`literal` or `semantic`), and optional
