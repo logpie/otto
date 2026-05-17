@@ -118,6 +118,20 @@ Architect task guidance:
   JSON block or `foundation_contracts` IA field. Each entry has `path`,
   `owner_task_id`, `check` (`literal` or `semantic`), and optional
   `required_exports`/`behavior_probes`; route registries must use `literal`.
+- For any scaffold-owned shared module FEATURES CONSUME (context/hook/store/
+  client/util/shared types — e.g. `useToast`, `useAuth`, an api client, a
+  shared store selector), `required_exports` MUST pin the EXACT public API
+  surface, not just export names: for each export give its precise signature —
+  the hook's return-value type with every method name + params (e.g.
+  `useToast(): { showToast(message: string, type?: 'success'|'error'): void }`),
+  exported type/interface fields, function params/return. Features build in
+  isolation and only this declared surface guarantees they agree at
+  integration; an under-specified contract (export name only) makes each
+  feature INVENT method names (run #15: 4/4 features passed alone but the
+  integrated build broke — `showToast` did not exist on `ToastContextValue`
+  because the contract named the export but not its shape). State in CHARTER
+  prose that features MUST import and call exactly this declared API verbatim
+  and never invent or rename methods on a scaffold-owned type.
 - After building the scaffold, author the authoritative ownership partition in
   CHARTER's Information Architecture Contract as `feature_owned_paths`: an
   object keyed by each sibling feature child task_id. Use the EXACT task_ids
