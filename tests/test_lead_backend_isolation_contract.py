@@ -107,6 +107,54 @@ def test_face_b_foundation_must_not_seed_feature_owned_files() -> None:
     )
 
 
+def test_shared_table_namespace_one_canonical_owner_no_dup_tablename() -> None:
+    """fix10-092844 (2026-05-18, --tier modular iTracker): foundation + ALL 4
+    features clean-merged (fix-7 working — per-feature model FILE ownership
+    sound), but clean_deploy blocked `clean_deploy_ports_not_listening`
+    because the integrated backend could not boot:
+    `sqlalchemy.exc.InvalidRequestError: Table 'audit_logs' is already
+    defined for this MetaData instance`. Independently audited:
+    `backend/models/admin.py` (child v5-325c61544c42) AND
+    `backend/models/auth.py` (child v5-4c3c1f87b728) each declared
+    `__tablename__="audit_logs"` (and "webhooks") on the shared SQLAlchemy
+    Base — each passed byte-isolated child-verify, collided only at
+    integration. fix-7 isolated per-feature model FILES but was silent on the
+    shared TABLE/ENTITY namespace inside them. lead.md must now require ONE
+    canonical definition per table/ORM `__tablename__`, on one scaffold-owned
+    declarative Base/metadata, with cross-cutting (≥2-feature) entities
+    foundation-owned and imported (never re-declared) by features.
+
+    Content assertions on the architect contract (same regression pattern as
+    the Face A/B tests above). RED before this change (the phrases did not
+    exist in lead.md), GREEN after. NOT gate-weakening: the write/union/
+    merge/clean_deploy guards are unchanged; the architect is constrained to
+    emit a decomposition where the ORM table namespace cannot collide by
+    construction.
+    """
+    n = _norm(_text())
+    # exactly one definition per table / ORM __tablename__
+    assert "__tablename__" in n
+    assert "exactly one definition" in n
+    # one scaffold-owned shared declarative Base / single metadata
+    assert "single metadata" in n
+    assert ("shared orm declarative" in n) or ("declarative `base`/`metadata`" in n)
+    # cross-cutting (≥2-feature) entities are foundation-owned, imported
+    assert "cross-cutting" in n
+    assert "read or write" in n
+    assert ("never re-declare its `__tablename__`" in n) or (
+        "import it and never re-declare" in n
+    )
+    # a feature must not redeclare a __tablename__ owned elsewhere
+    assert "must not declare a `__tablename__` already owned" in n
+    # ties to the real failure mode + the concrete fix10 evidence
+    assert "is already defined for this metadata instance" in n
+    assert "audit_logs" in n and "webhooks" in n
+    # CHARTER must enumerate the single owner per shared entity
+    assert "single foundation owner in charter" in n or (
+        "canonical model" in n and "charter" in n
+    )
+
+
 def test_not_gate_weakening_guards_still_named_strict() -> None:
     """Sanity: the fix is consistent-by-construction, not gate relaxation —
     the contract still names the write-block / union / merge consequences as

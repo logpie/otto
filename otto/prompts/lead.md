@@ -129,6 +129,28 @@ Architect task guidance:
   extend is a `foundation_contract_write_blocked` waiting to happen (the
   iTracker run: the Core-Issues feature was blocked writing the shared
   `backend/models.py`/`backend/schemas.py` it had to extend).
+- A leaf-extensible per-feature model package solves FILE ownership but NOT
+  the shared TABLE/ENTITY NAMESPACE inside it. Every DB table / ORM
+  `__tablename__` (or stack equivalent) MUST have EXACTLY ONE definition in
+  the whole codebase, on ONE shared ORM declarative `Base`/`MetaData` the
+  scaffold owns (declare that base module as a `foundation_contract` /
+  `shared_registry_files` entry, `leaf_edit:false`; ALL models register on
+  that single metadata). A domain entity that ≥2 features READ or WRITE is
+  CROSS-CUTTING, not feature-private (e.g. an audit log, webhooks, users,
+  workspace/membership): its model MUST live in a scaffold-owned shared
+  models module, defined ONCE, listed in CHARTER with its single owning
+  module — feature modules IMPORT it and NEVER re-declare its
+  `__tablename__`. A per-feature `backend/models/<feature>.py` defines ONLY
+  that feature's PRIVATE tables; a feature MUST NOT declare a
+  `__tablename__` already owned by the foundation or another feature. Two
+  feature modules each defining the same `__tablename__` on the shared Base
+  is a `Table '<name>' is already defined for this MetaData instance` at
+  integration → routers fail to load → the app cannot boot → clean_deploy
+  port-bind block (the fix10 iTracker run: the `admin` and `auth` features
+  each independently defined `__tablename__="audit_logs"` and `"webhooks"`,
+  byte-isolated child-verify passed, collided only at integration). Enumerate
+  every cross-cutting/shared entity and its single foundation owner in
+  CHARTER so features build against one canonical model.
 - Declare shared foundation files in a machine-readable `## Foundation Contracts`
   JSON block or `foundation_contracts` IA field. Each entry has `path`,
   `owner_task_id`, `check` (`literal` or `semantic`), and optional
