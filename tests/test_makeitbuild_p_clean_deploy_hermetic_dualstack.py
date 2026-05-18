@@ -94,6 +94,31 @@ def test_ephemeral_plan_remaps_named_envs_only() -> None:
     assert 5173 not in probe and 8000 not in probe
 
 
+def test_prose_duplicate_of_named_port_is_remapped_too() -> None:
+    # The exact resume16i bug: _parse_declared_port_envs yields the same
+    # logical port BOTH as a named env (start.sh ${FRONTEND_PORT:-5173})
+    # AND as unnamed prose duplicates (CHARTER "127.0.0.1:5173" / "port
+    # 5173"). The prose (None, 5173) entries must inherit FRONTEND_PORT's
+    # ephemeral remap — otherwise 5173 leaked into the probe set and the
+    # deploy (correctly bound to the ephemeral port) was falsely blocked
+    # as "ports [5173] did not bind".
+    port_envs = [
+        (None, 5173),
+        (None, 8000),
+        ("FRONTEND_PORT", 5173),
+        ("API_PORT", 8000),
+    ]
+    overrides, probe, effective = _ephemeral_port_plan(port_envs)
+    fe = int(overrides["FRONTEND_PORT"])
+    be = int(overrides["API_PORT"])
+    # The original fixed ports must NOT remain anywhere in the probe set.
+    assert 5173 not in probe and 8000 not in probe, probe
+    assert sorted(probe) == sorted({fe, be})
+    # Every entry — including the unnamed prose duplicates — maps to the
+    # ephemeral port, so nothing probes the original 5173/8000.
+    assert {p for _en, p in effective} == {fe, be}
+
+
 def test_hermetic_ipv6_deploy_passes_even_with_5173_busy(
     tmp_path: Path,
 ) -> None:

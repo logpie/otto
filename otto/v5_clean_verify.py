@@ -1812,21 +1812,34 @@ def _ephemeral_port_plan(
     the entire collision class *structurally impossible* rather than patched
     per instance.
 
-    Ports declared only in prose (no env var to inject) cannot be
-    overridden and are kept as-is (best-effort).
+    A port declared ONLY in prose (env_name=None) with no env var to
+    inject cannot be overridden — UNLESS the same numeric port is also
+    exposed under a named env (CHARTER prose + start.sh both mention
+    5173, which start.sh also parameterizes as ${FRONTEND_PORT:-5173}).
+    Those prose duplicates refer to the SAME logical port the architect
+    parameterized, so they inherit that env's ephemeral remap; otherwise
+    the original fixed port leaked back into the probe set and the deploy
+    (correctly bound to the ephemeral port) was falsely "did not bind".
 
     Returns ``(env_overrides, probe_ports, effective_port_envs)``.
     """
     overrides: dict[str, int] = {}
+    orig_to_eph: dict[int, int] = {}
     used: set[int] = set()
-    for env_name, _port in port_envs:
+    for env_name, port in port_envs:
         if env_name and env_name not in overrides:
             p = _free_ephemeral_port(used)
             overrides[env_name] = p
             used.add(p)
-    effective = [
-        (en, overrides.get(en, port) if en else port) for en, port in port_envs
-    ]
+            orig_to_eph.setdefault(port, p)
+
+    def _eff(env_name: str | None, port: int) -> int:
+        if env_name and env_name in overrides:
+            return overrides[env_name]
+        # Unnamed/prose duplicate of a port a named env remapped.
+        return orig_to_eph.get(port, port)
+
+    effective = [(en, _eff(en, port)) for en, port in port_envs]
     probe = sorted({port for _en, port in effective})
     return {k: str(v) for k, v in overrides.items()}, probe, effective
 
