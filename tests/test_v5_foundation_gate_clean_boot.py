@@ -42,7 +42,12 @@ RED before the helper existed (import / behavior absent); GREEN after.
 
 from __future__ import annotations
 
-from otto.v5_runner import _foundation_clean_boot_probe_targets
+from pathlib import Path
+
+from otto.v5_runner import (
+    _foundation_clean_boot_probe_targets,
+    _seed_foundation_gate_spec,
+)
 
 PARENT = "v5-root"
 FOUNDATION = "v5-foundation"
@@ -180,3 +185,63 @@ def test_reviewed_partial_foundation_is_mergeable_probe_fires() -> None:
     )
     assert foundation_ids == [FOUNDATION]
     assert [e["task_id"] for e in ready_features] == ["v5-feat-a"]
+
+
+# --- _seed_foundation_gate_spec: the f2aa00b25 SILENT-NO-OP regression -------
+#
+# Root cause (f2aa00b25 validation run v5-itracker-fgate-143401, 2026-05-18):
+# the probe block WAS entered (foundation_gate dir created) but
+# `_run_integration_smoke_preflight_with_repair` derives
+# `spec_path = session_dir/"spec"/"spec.json"`; every OTHER caller passes a
+# spec-bearing integration session dir, but the probe passed a fresh empty
+# `<root_session>/foundation_gate` dir => spec_path missing => the clean-deploy
+# oracle had no spec => vacuous non-blocking pass => the probe was a SILENT
+# NO-OP (empty dir, ~10s, features dispatched with no clean-boot; ZERO
+# `foundation_clean_boot` anywhere in otto_logs). _seed_foundation_gate_spec
+# makes the probe session spec-bearing from the canonical compiled spec at the
+# parent root session — honoring the same contract every other caller honors.
+
+
+def test_seed_copies_canonical_spec_into_probe_session(tmp_path: Path) -> None:
+    """THE fix: foundation_gate sits under the root session; seed its
+    spec/spec.json from the parent root session's canonical compiled spec so
+    the preflight (spec_path = session_dir/spec/spec.json) actually runs."""
+    root = tmp_path / "2026-01-01-000000-abc123"
+    (root / "spec").mkdir(parents=True)
+    (root / "spec" / "spec.json").write_text('{"flat": true}')
+    fg = root / "foundation_gate"
+    fg.mkdir()
+
+    assert _seed_foundation_gate_spec(fg) is True
+    seeded = fg / "spec" / "spec.json"
+    assert seeded.exists()
+    assert seeded.read_text() == '{"flat": true}'
+
+
+def test_seed_returns_false_when_canonical_spec_missing(tmp_path: Path) -> None:
+    """Degenerate run (no compiled spec at root session): return False so the
+    caller makes it OBSERVABLE (emit foundation_clean_boot_skipped) instead of
+    the original SILENT no-op. Never fabricate a spec."""
+    root = tmp_path / "2026-01-01-000000-def456"
+    fg = root / "foundation_gate"
+    fg.mkdir(parents=True)
+
+    assert _seed_foundation_gate_spec(fg) is False
+    assert not (fg / "spec" / "spec.json").exists()
+
+
+def test_seed_idempotent_when_probe_spec_already_present(
+    tmp_path: Path,
+) -> None:
+    """Already-seeded probe session: return True without overwriting (probe
+    runs once; re-entry must not clobber)."""
+    root = tmp_path / "2026-01-01-000000-aaa111"
+    (root / "spec").mkdir(parents=True)
+    (root / "spec" / "spec.json").write_text('{"canonical": 1}')
+    fg = root / "foundation_gate"
+    (fg / "spec").mkdir(parents=True)
+    (fg / "spec" / "spec.json").write_text('{"already": "here"}')
+
+    assert _seed_foundation_gate_spec(fg) is True
+    # not overwritten by the canonical copy
+    assert (fg / "spec" / "spec.json").read_text() == '{"already": "here"}'

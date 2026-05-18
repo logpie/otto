@@ -3780,6 +3780,39 @@ def _foundation_clean_boot_probe_targets(
     return foundation_ids, ready_features
 
 
+def _seed_foundation_gate_spec(fg_session: Path) -> bool:
+    """Make the FOUNDATION-GATE CLEAN-BOOT PROBE's session dir spec-bearing.
+
+    ``_run_integration_smoke_preflight`` derives
+    ``spec_path = session_dir / "spec" / "spec.json"`` and every OTHER caller of
+    ``_run_integration_smoke_preflight_with_repair`` passes an integration
+    session dir that already carries the compiled spec. The foundation-gate
+    probe runs in an isolated ``<root_session>/foundation_gate`` dir; without
+    seeding, ``spec_path`` does not exist, the clean-deploy oracle has no spec
+    to drive the probe, and the preflight returns a vacuous non-blocking
+    payload — the probe becomes a SILENT NO-OP (regression observed in the
+    f2aa00b25 validation run: empty foundation_gate dir, ~10s, features
+    dispatched with no clean-boot). The canonical compiled spec lives at the
+    parent root session (``fg_session.parent / "spec" / "spec.json"`` — the
+    foundation_gate dir is created directly under the root session dir). Copy
+    it in so the probe honors the same spec-bearing-session_dir contract as
+    every other caller (consistent-by-construction, NOT gate-weakening).
+
+    Returns True iff the probe's spec is present (already there, or seeded).
+    Returns False only when the canonical compiled spec is itself missing
+    (degenerate run) — callers must make that observable, never silently skip.
+    """
+    dst = fg_session / "spec" / "spec.json"
+    if dst.exists():
+        return True
+    src = fg_session.parent / "spec" / "spec.json"
+    if not src.exists():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return True
+
+
 def _child_result_allows_upward_merge(
     project_dir: Path,
     task_id: str,
@@ -5927,81 +5960,96 @@ async def _process_children(
                     / "foundation_gate"
                 )
                 _fg_session.mkdir(parents=True, exist_ok=True)
-                _emit(on_event, {
-                    "event": "foundation_clean_boot_probe_start",
-                    "parent_task_id": parent_task_id,
-                    "task_id": _fg_fid,
-                })
-                _fg_cb = await _run_integration_smoke_preflight_with_repair(
-                    project_dir=project_dir,
-                    worktree_path=project_dir,
-                    task_id=_fg_fid,
-                    phase="foundation_clean_boot",
-                    session_dir=_fg_session,
-                    config=config,
-                    integration_branch=None,
-                    journey_scope="root_integration",
-                    on_event=on_event,
-                )
-                if _integration_smoke_blocks(_fg_cb):
-                    _fg_feedback = {
-                        "kind": "foundation_clean_boot_failed",
-                        "step_id": "foundation_gate_clean_boot",
-                        "message": (
-                            "merged foundation scaffold failed the clean-boot "
-                            "probe before feature dispatch; re-enter the "
-                            "foundation to fix it before the feature builds "
-                            "absorb it"
-                        ),
-                        "parent_task_id": parent_task_id,
-                        "foundation_task_ids": _fg_foundation_ids,
-                        "_written_at": time.strftime(
-                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-                        ),
-                    }
+                if not _seed_foundation_gate_spec(_fg_session):
+                    # Canonical compiled spec missing => degenerate run; the
+                    # probe cannot meaningfully clean-boot. Make it OBSERVABLE
+                    # (the original f2aa00b25 bug was a SILENT no-op) and
+                    # proceed to feature dispatch without a false block.
                     _emit(on_event, {
-                        "event": "foundation_clean_boot_failed",
+                        "event": "foundation_clean_boot_skipped",
+                        "parent_task_id": parent_task_id,
                         "task_id": _fg_fid,
-                        "structured_reason": _fg_feedback,
+                        "reason": "canonical compiled spec.json not found "
+                        "at root session; clean-boot probe not run",
                     })
-                    await _reenter_or_block_architect_contract(
+                else:
+                    _emit(on_event, {
+                        "event": "foundation_clean_boot_probe_start",
+                        "parent_task_id": parent_task_id,
+                        "task_id": _fg_fid,
+                    })
+                    _fg_cb = await _run_integration_smoke_preflight_with_repair(
                         project_dir=project_dir,
-                        architect_tid=_fg_fid,
-                        child_results=child_results,
-                        completed=completed,
-                        feedback=_fg_feedback,
-                        origin="foundation_clean_boot",
+                        worktree_path=project_dir,
+                        task_id=_fg_fid,
+                        phase="foundation_clean_boot",
+                        session_dir=_fg_session,
                         config=config,
+                        integration_branch=None,
+                        journey_scope="root_integration",
                         on_event=on_event,
                     )
-                    if str(
-                        (get_task(project_dir, _fg_fid) or {}).get("verdict") or ""
-                    ) != "merge_blocked":
-                        continue
-                    for _fg_entry in _fg_ready_features:
-                        _fg_ftid = str(_fg_entry.get("task_id") or "")
-                        _fg_res = child_results.get(_fg_ftid) or LeadResult(
-                            task_id=_fg_ftid,
-                            verdict="merge_blocked",
-                            decomposition="inline",
-                        )
-                        _record_task_merge_blocked_reason(
+                    if _integration_smoke_blocks(_fg_cb):
+                        _fg_feedback = {
+                            "kind": "foundation_clean_boot_failed",
+                            "step_id": "foundation_gate_clean_boot",
+                            "message": (
+                                "merged foundation scaffold failed the "
+                                "clean-boot probe before feature dispatch; "
+                                "re-enter the foundation to fix it before "
+                                "the feature builds absorb it"
+                            ),
+                            "parent_task_id": parent_task_id,
+                            "foundation_task_ids": _fg_foundation_ids,
+                            "_written_at": time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                            ),
+                        }
+                        _emit(on_event, {
+                            "event": "foundation_clean_boot_failed",
+                            "task_id": _fg_fid,
+                            "structured_reason": _fg_feedback,
+                        })
+                        await _reenter_or_block_architect_contract(
                             project_dir=project_dir,
-                            task_id=_fg_ftid,
-                            result=_fg_res,
-                            reason=str(_fg_feedback["message"]),
+                            architect_tid=_fg_fid,
+                            child_results=child_results,
+                            completed=completed,
+                            feedback=_fg_feedback,
                             origin="foundation_clean_boot",
-                            structured_reason=_fg_feedback,
+                            config=config,
+                            on_event=on_event,
                         )
-                        child_results[_fg_ftid] = _fg_res
-                    _fg_blocked = {
-                        str(_e.get("task_id") or "") for _e in _fg_ready_features
-                    }
-                    ready = [
-                        _e
-                        for _e in ready
-                        if str(_e.get("task_id") or "") not in _fg_blocked
-                    ]
+                        if str(
+                            (get_task(project_dir, _fg_fid) or {}).get("verdict")
+                            or ""
+                        ) != "merge_blocked":
+                            continue
+                        for _fg_entry in _fg_ready_features:
+                            _fg_ftid = str(_fg_entry.get("task_id") or "")
+                            _fg_res = child_results.get(_fg_ftid) or LeadResult(
+                                task_id=_fg_ftid,
+                                verdict="merge_blocked",
+                                decomposition="inline",
+                            )
+                            _record_task_merge_blocked_reason(
+                                project_dir=project_dir,
+                                task_id=_fg_ftid,
+                                result=_fg_res,
+                                reason=str(_fg_feedback["message"]),
+                                origin="foundation_clean_boot",
+                                structured_reason=_fg_feedback,
+                            )
+                            child_results[_fg_ftid] = _fg_res
+                        _fg_blocked = {
+                            str(_e.get("task_id") or "")
+                            for _e in _fg_ready_features
+                        }
+                        ready = [
+                            _e
+                            for _e in ready
+                            if str(_e.get("task_id") or "") not in _fg_blocked
+                        ]
 
         # Spawn ready tasks up to max_parallel.
         spawned_any = False
