@@ -80,17 +80,28 @@ def test_port_connectable_false_when_nothing_listening() -> None:
 
 
 def test_ephemeral_plan_remaps_named_envs_only() -> None:
-    overrides, probe, effective = _ephemeral_port_plan(
+    env_out, probe, effective = _ephemeral_port_plan(
         [("API_PORT", 8000), ("FRONTEND_PORT", 5173), (None, 9999)]
     )
-    assert set(overrides) == {"API_PORT", "FRONTEND_PORT"}
-    assert int(overrides["API_PORT"]) not in (8000, 5173)
-    assert int(overrides["FRONTEND_PORT"]) not in (8000, 5173)
-    assert int(overrides["API_PORT"]) != int(overrides["FRONTEND_PORT"])
+    # Port envs are remapped to ephemeral ports...
+    assert {"API_PORT", "FRONTEND_PORT"} <= set(env_out)
+    assert int(env_out["API_PORT"]) not in (8000, 5173)
+    assert int(env_out["FRONTEND_PORT"]) not in (8000, 5173)
+    assert int(env_out["API_PORT"]) != int(env_out["FRONTEND_PORT"])
+    # ...and the matching frontend origin is published under conventional
+    # CORS/origin env names so a port-coupled backend allow-list still
+    # accepts the (now ephemeral) frontend origin. Backends ignore the
+    # names they do not read — generic, not iTracker-specific.
+    fe = int(env_out["FRONTEND_PORT"])
+    assert env_out["CORS_ORIGINS"] == (
+        f"http://127.0.0.1:{fe},http://localhost:{fe}"
+    )
+    assert env_out["ALLOWED_ORIGINS"] == env_out["CORS_ORIGINS"]
+    assert "5173" not in env_out["CORS_ORIGINS"]
     # Prose-only port (no env to inject) is kept as-is.
     assert (None, 9999) in effective
     assert 9999 in probe
-    assert int(overrides["FRONTEND_PORT"]) in probe
+    assert fe in probe
     assert 5173 not in probe and 8000 not in probe
 
 

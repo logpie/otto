@@ -1841,7 +1841,38 @@ def _ephemeral_port_plan(
 
     effective = [(en, _eff(en, port)) for en, port in port_envs]
     probe = sorted({port for _en, port in effective})
-    return {k: str(v) for k, v in overrides.items()}, probe, effective
+
+    env_out: dict[str, str] = {k: str(v) for k, v in overrides.items()}
+
+    # Keep the deploy env self-consistent: remapping the frontend port to
+    # an ephemeral one breaks any backend whose CORS allow-list is coupled
+    # to the fixed frontend origin (iTracker's backend defaults
+    # CORS_ORIGINS to "http://localhost:5173"). start.sh parameterizes the
+    # PORT but not the dependent origin, so the browser's API calls from
+    # the ephemeral origin were CORS-blocked and every UI journey failed
+    # with "required control absent". Since the oracle owns the deploy
+    # environment (just as it injects FRONTEND_PORT/API_PORT), it must
+    # also publish the matching frontend origin under the conventional
+    # env names; a backend ignores the ones it does not read, so this is
+    # generic and harmless, not iTracker-specific.
+    fe_markers = ("FE", "FRONTEND", "WEB", "UI", "CLIENT")
+    fe_port: int | None = None
+    for env_name, port in effective:
+        if env_name and any(m in env_name.upper() for m in fe_markers):
+            fe_port = port
+            break
+    if fe_port is not None:
+        origins = f"http://127.0.0.1:{fe_port},http://localhost:{fe_port}"
+        for var in (
+            "CORS_ORIGINS",
+            "CORS_ALLOW_ORIGINS",
+            "CORS_ALLOWED_ORIGINS",
+            "ALLOWED_ORIGINS",
+            "FRONTEND_URL",
+            "FRONTEND_ORIGIN",
+        ):
+            env_out[var] = origins
+    return env_out, probe, effective
 
 
 def _bind_local_port(port: int) -> socket.socket | None:
