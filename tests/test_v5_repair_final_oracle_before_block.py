@@ -240,3 +240,146 @@ async def test_final_oracle_before_block_is_not_gate_weakening(
     assert result.escalation is not None
     assert result.escalation["reason"] == "wall_clock_exhausted"
     assert oracle_calls >= 1, "the final oracle ran and honestly reported failure"
+
+
+@pytest.mark.asyncio
+async def test_final_oracle_runs_on_committed_state_after_agent_call_failed(
+    tmp_path: Path,
+) -> None:
+    """fix-10 regression (bbfix-072338, 2026-05-18): the integration-smoke
+    repair agent stayed product-scoped (fix-9), produced a genuinely
+    oracle-PASSING fix, and — because clean-verify's clean-copy only sees
+    git-tracked content — COMMITTED it; then its 1199s per-turn wall-clock
+    timeout fired and `call_agent` raised `AgentCallError`. otto took the
+    `except AgentCallError` path straight to `block_with_escalation`
+    (reason=agent_call_failed), NEVER running a final oracle on the produced
+    state — blocking on the STALE pre-repair oracle with
+    oracle_invocations=0, discarding a complete, committed, passing fix
+    (reproduced: `otto clean-verify` on the produced tree → passed=True).
+
+    fix-10: the agent_call_failed path routes through
+    `final_oracle_then_block` (now eligible via `_FINAL_ORACLE_BEFORE_BLOCK`),
+    and its "agent left changes" guard uses
+    `_changed_paths_since_repair_start` (UNCOMMITTED edits OR commits since
+    the repair baseline HEAD) instead of a dirty-only check that misfires on
+    a committed fix. RED on pre-fix code (merge_blocked: bypassed + clean
+    worktree); GREEN after (final oracle runs on the committed produced
+    state and accepts the genuine pass).
+    """
+    from otto.agent import AgentCallError
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        budget=RepairBudget(agent_turns=2, oracle_invocations=4, wall_clock_s=30.0),
+    )
+
+    agent_calls = 0
+    oracle_calls = 0
+
+    async def fake_agent(
+        prompt: str, options: Any, **kwargs: Any
+    ) -> tuple[str, float, str, dict[str, Any]]:
+        nonlocal agent_calls
+        del prompt, options, kwargs
+        agent_calls += 1
+        # Product-scoped fix that the agent COMMITS itself (clean worktree —
+        # the realistic fix-9 case; clean-verify clean-copy = git-tracked
+        # only). The OLD dirty-only guard would misfire here.
+        (repo / "fixed.txt").write_text("repaired\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "repair: declare static frontend port")
+        # The agent's confirming clean-verify is then cut off by the 1199s
+        # per-turn wall-clock timeout — call_agent raises AgentCallError.
+        raise AgentCallError(
+            reason="Timed out after 1199s",
+            session_id="sess-acf",
+            total_cost_usd=0.02,
+        )
+
+    async def fake_oracle(_packet: RepairPacket) -> CleanOracleResult:
+        nonlocal oracle_calls
+        oracle_calls += 1
+        # The committed produced state genuinely PASSES (mirrors the
+        # reproduced `otto clean-verify` → passed=True on 6602cd8).
+        return _oracle_result(passed=True)
+
+    async def commit_hook(
+        _packet: RepairPacket, _oracle_result: CleanOracleResult
+    ) -> tuple[bool, str]:
+        # Agent already committed; nothing to add — success.
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "repair: accept")
+        return True, "already committed by agent"
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=fake_agent,
+        oracle_runner=fake_oracle,
+        commit_hook=commit_hook,
+    )
+
+    assert agent_calls == 1, "exactly one agent turn ran then raised"
+    # Decisive: the committed, oracle-passing fix is NOT discarded — the
+    # final oracle ran on the produced (committed) state and otto accepted.
+    assert result.verdict == "pass", (
+        f"expected pass after final oracle on committed produced state, got "
+        f"{result.verdict} (escalation={result.escalation})"
+    )
+    assert oracle_calls >= 1, "the final acceptance oracle must actually run"
+
+
+@pytest.mark.asyncio
+async def test_agent_call_failed_final_oracle_not_gate_weakening(
+    tmp_path: Path,
+) -> None:
+    """Guard (fix-10): on the agent_call_failed path, when the produced
+    (committed) state still FAILS the oracle, otto must still block — the
+    final oracle runs the real clean-verify and only accepts a genuine pass.
+    Reason must surface as `agent_call_failed`, never silently weakened."""
+    from otto.agent import AgentCallError
+
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        budget=RepairBudget(agent_turns=2, oracle_invocations=4, wall_clock_s=30.0),
+    )
+
+    oracle_calls = 0
+
+    async def fake_agent(
+        prompt: str, options: Any, **kwargs: Any
+    ) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt, options, kwargs
+        (repo / "still-broken.txt").write_text("nope\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "repair: attempt (still broken)")
+        raise AgentCallError(
+            reason="Timed out after 1199s",
+            session_id="sess-acf2",
+            total_cost_usd=0.02,
+        )
+
+    async def fake_oracle(_packet: RepairPacket) -> CleanOracleResult:
+        nonlocal oracle_calls
+        oracle_calls += 1
+        return _oracle_result(passed=False)
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=fake_agent,
+        oracle_runner=fake_oracle,
+    )
+
+    assert result.verdict == "merge_blocked", (
+        "a still-failing produced state on agent_call_failed MUST still block"
+    )
+    assert result.escalation is not None
+    assert result.escalation["reason"] == "agent_call_failed"
+    assert oracle_calls >= 1, "the final oracle ran and honestly reported failure"

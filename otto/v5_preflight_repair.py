@@ -231,6 +231,18 @@ _TIME_TURN_EXHAUSTION = frozenset(
     {"wall_clock_exhausted", "budget_exhausted", "idle_exhausted"}
 )
 
+# `agent_call_failed` (the repair agent raised / hit its per-turn
+# wall-clock timeout / error_max_turns) is the SAME situation as
+# time/turn exhaustion: a killed turn can leave a COMPLETE,
+# possibly-committed, oracle-passing fix that was never evaluated
+# (the agent's own confirming clean-verify was cut off). It gets the
+# same remediation — ONE final acceptance oracle on the produced
+# worktree before blocking. Without this the agent-timeout path blocks
+# on the stale PRE-repair oracle with oracle_invocations=0, discarding
+# the produced state unjudged (the exact fix-8 bug class, observed on
+# the agent_call_failed path which fix-8 never covered).
+_FINAL_ORACLE_BEFORE_BLOCK = _TIME_TURN_EXHAUSTION | {"agent_call_failed"}
+
 
 def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1611,33 +1623,46 @@ async def run_oracle_repair_agent(
         reconcile_replayed_usage()
 
     async def final_oracle_then_block(
-        *, reason: str, summary: str
+        *, reason: str, summary: str, allow_closeout: bool = True
     ) -> OracleRepairResult:
         """The ORACLE decides repair success, not the agent-turn wall clock.
 
-        A killed/timed-out agent turn can leave a COMPLETE, oracle-passing
-        fix that was never evaluated — the agent's own confirming
-        clean-verify was cut off by its wall-clock timeout, so
+        A killed/timed-out/failed agent turn can leave a COMPLETE,
+        oracle-passing fix that was never evaluated — the agent's own
+        confirming clean-verify was cut off by its wall-clock timeout, so
         `packet.latest_oracle_result` is still the stale PRE-repair failure.
-        Before blocking on TIME/TURN exhaustion, run ONE final acceptance
-        oracle on the produced worktree when oracle budget remains and the
-        agent left changes. This RUNS the real oracle (clean-verify) on the
-        real produced state — it is NOT gate-weakening: a genuinely-failing
-        produced state still blocks (now with a TRUTHFUL post-repair oracle
-        result instead of the stale pre-repair one).
+        Before blocking on TIME/TURN exhaustion OR an agent call failure
+        (``_FINAL_ORACLE_BEFORE_BLOCK``), run ONE final acceptance oracle on
+        the produced worktree when oracle budget remains and the agent left
+        changes since repair start. "Left changes" means UNCOMMITTED edits
+        OR commits made since the repair baseline HEAD — a competent
+        product-scoped repair agent commits its fix (clean-verify's
+        clean-copy only sees git-tracked content), which leaves the worktree
+        clean; a dirty-only check would misfire and skip the final oracle on
+        exactly the fix that needs judging. This RUNS the real oracle
+        (clean-verify) on the real produced state — it is NOT gate-weakening:
+        a genuinely-failing produced state still blocks (now with a TRUTHFUL
+        post-repair oracle result instead of the stale pre-repair one).
         """
+        baseline_raw = packet.current_state.get("scope_baseline")
+        baseline = baseline_raw if isinstance(baseline_raw, dict) else None
+        produced_changed = bool(
+            _changed_paths_since_repair_start(packet, worktree, baseline)
+        )
         if (
-            reason in _TIME_TURN_EXHAUSTION
+            reason in _FINAL_ORACLE_BEFORE_BLOCK
             and not latest_oracle.passed
             and oracle_invocations < packet.budget.oracle_invocations
-            and _git_status_porcelain(worktree).strip()
+            and produced_changed
         ):
             await run_controller_oracle()
             if latest_oracle.passed:
                 accepted = await accept_or_block_passed_oracle()
                 if accepted is not None:
                     return accepted
-        return await block_with_escalation(reason=reason, summary=summary)
+        return await block_with_escalation(
+            reason=reason, summary=summary, allow_closeout=allow_closeout
+        )
 
     while True:
         if latest_oracle.passed:
@@ -1680,7 +1705,7 @@ async def run_oracle_repair_agent(
                 },
             )
             packet.persist()
-            return await block_with_escalation(
+            return await final_oracle_then_block(
                 reason="agent_call_failed",
                 summary=f"repair agent failed: {exc.reason}",
                 allow_closeout=False,
