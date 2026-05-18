@@ -3733,6 +3733,53 @@ def _task_entry_allows_upward_merge(entry: dict[str, Any]) -> bool:
     return verdict == "partial" and entry.get("review_state") == "reviewed_partial"
 
 
+def _foundation_clean_boot_probe_targets(
+    *,
+    scheduler_feedback: object,
+    parent_task_id: str,
+    already_probed: set[str],
+    graph_tasks: dict[str, Any],
+    ready: list[dict[str, Any]],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Pure target-selection for the FOUNDATION-GATE CLEAN-BOOT PROBE.
+
+    Returns ``(foundation_ids, ready_feature_entries)``; the probe runs iff
+    BOTH are non-empty. Returns ``([], [])`` — i.e. NO probe, gate
+    unaffected — when the foundation contracts are NOT valid
+    (``scheduler_feedback is not None``: this is a contract re-entry that the
+    existing scheduler-feedback gate owns) or this parent was already probed
+    this run (dedupe). Selects a foundation sibling only when it is
+    upward-mergeable (passed/reviewed-partial, not blocked) and at least one
+    feature child is ready to dispatch. Extracting this keeps the
+    regression-critical decision consistent-by-construction and unit-testable
+    without driving the full async ``_process_children`` loop.
+    """
+    if scheduler_feedback is not None:
+        return [], []
+    if parent_task_id in already_probed:
+        return [], []
+    foundation_ids = [
+        str(_tid)
+        for _tid, _t in graph_tasks.items()
+        if isinstance(_t, dict)
+        and _t.get("parent_task_id") == parent_task_id
+        and _t.get("task_role") == "foundation"
+        and _task_entry_allows_upward_merge(_t)
+    ]
+    ready_features = [
+        _e
+        for _e in ready
+        if str(
+            (graph_tasks.get(str(_e.get("task_id") or "")) or _e).get("task_role")
+            or "feature"
+        )
+        == "feature"
+    ]
+    if not foundation_ids or not ready_features:
+        return [], []
+    return foundation_ids, ready_features
+
+
 def _child_result_allows_upward_merge(
     project_dir: Path,
     task_id: str,
@@ -5292,6 +5339,10 @@ async def _process_children(
     in_flight: dict[str, asyncio.Task[Any]] = {}
     preflight_seen: set[str] = set()  # issue kinds already emitted, dedupe
     architect_preflight_done: set[tuple[str, int]] = set()
+    # FOUNDATION-GATE CLEAN-BOOT PROBE: parents whose merged foundation has
+    # already been clean-boot-probed this run (probe once, before dispatching
+    # the dependent feature children — see the gate after scheduler feedback).
+    foundation_clean_boot_done: set[str] = set()
     if dispatch_lease is None:
         dispatch_lease = _DispatchLease(max_parallel)
 
@@ -5850,6 +5901,107 @@ async def _process_children(
                 "parent_task_id": parent_task_id,
                 "structured_reason": scheduler_feedback,
             })
+
+        # FOUNDATION-GATE CLEAN-BOOT PROBE: once the foundation sibling has
+        # passed+merged and its contracts are valid (scheduler_feedback is
+        # None), verify the MERGED foundation scaffold boots clean BEFORE
+        # dispatching the dependent feature children. Shifts the "assembled
+        # product won't boot/build clean" class left — caught here as a cheap
+        # bounded foundation-repair instead of at the single terminal
+        # clean_deploy where one bounded repair turn must absorb it.
+        if scheduler_feedback is None and parent_task_id not in foundation_clean_boot_done:
+            _fg_foundation_ids, _fg_ready_features = (
+                _foundation_clean_boot_probe_targets(
+                    scheduler_feedback=scheduler_feedback,
+                    parent_task_id=parent_task_id,
+                    already_probed=foundation_clean_boot_done,
+                    graph_tasks=(read_graph(project_dir).get("tasks") or {}),
+                    ready=ready,
+                )
+            )
+            if _fg_foundation_ids and _fg_ready_features:
+                foundation_clean_boot_done.add(parent_task_id)
+                _fg_fid = _fg_foundation_ids[0]
+                _fg_session = (
+                    Path(_find_session_dir_for_task(project_dir, ROOT_TASK_ID))
+                    / "foundation_gate"
+                )
+                _fg_session.mkdir(parents=True, exist_ok=True)
+                _emit(on_event, {
+                    "event": "foundation_clean_boot_probe_start",
+                    "parent_task_id": parent_task_id,
+                    "task_id": _fg_fid,
+                })
+                _fg_cb = await _run_integration_smoke_preflight_with_repair(
+                    project_dir=project_dir,
+                    worktree_path=project_dir,
+                    task_id=_fg_fid,
+                    phase="foundation_clean_boot",
+                    session_dir=_fg_session,
+                    config=config,
+                    integration_branch=None,
+                    journey_scope="root_integration",
+                    on_event=on_event,
+                )
+                if _integration_smoke_blocks(_fg_cb):
+                    _fg_feedback = {
+                        "kind": "foundation_clean_boot_failed",
+                        "step_id": "foundation_gate_clean_boot",
+                        "message": (
+                            "merged foundation scaffold failed the clean-boot "
+                            "probe before feature dispatch; re-enter the "
+                            "foundation to fix it before the feature builds "
+                            "absorb it"
+                        ),
+                        "parent_task_id": parent_task_id,
+                        "foundation_task_ids": _fg_foundation_ids,
+                        "_written_at": time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                        ),
+                    }
+                    _emit(on_event, {
+                        "event": "foundation_clean_boot_failed",
+                        "task_id": _fg_fid,
+                        "structured_reason": _fg_feedback,
+                    })
+                    await _reenter_or_block_architect_contract(
+                        project_dir=project_dir,
+                        architect_tid=_fg_fid,
+                        child_results=child_results,
+                        completed=completed,
+                        feedback=_fg_feedback,
+                        origin="foundation_clean_boot",
+                        config=config,
+                        on_event=on_event,
+                    )
+                    if str(
+                        (get_task(project_dir, _fg_fid) or {}).get("verdict") or ""
+                    ) != "merge_blocked":
+                        continue
+                    for _fg_entry in _fg_ready_features:
+                        _fg_ftid = str(_fg_entry.get("task_id") or "")
+                        _fg_res = child_results.get(_fg_ftid) or LeadResult(
+                            task_id=_fg_ftid,
+                            verdict="merge_blocked",
+                            decomposition="inline",
+                        )
+                        _record_task_merge_blocked_reason(
+                            project_dir=project_dir,
+                            task_id=_fg_ftid,
+                            result=_fg_res,
+                            reason=str(_fg_feedback["message"]),
+                            origin="foundation_clean_boot",
+                            structured_reason=_fg_feedback,
+                        )
+                        child_results[_fg_ftid] = _fg_res
+                    _fg_blocked = {
+                        str(_e.get("task_id") or "") for _e in _fg_ready_features
+                    }
+                    ready = [
+                        _e
+                        for _e in ready
+                        if str(_e.get("task_id") or "") not in _fg_blocked
+                    ]
 
         # Spawn ready tasks up to max_parallel.
         spawned_any = False
