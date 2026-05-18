@@ -1063,9 +1063,16 @@ def verify_from_clean_oracle(
         journey_contract_issue = None
         ui_journeys = []
 
+    port_env_overrides: dict[str, str] = {}
+    effective_port_envs: list[tuple[str | None, int]] = []
     if scope in ("subtree", "full"):
         declared_port_envs = _parse_declared_port_envs(project)
-        declared_ports = sorted({port for _env_name, port in declared_port_envs})
+        # Hermetic ports: bind fresh ephemeral ports per deploy instead of
+        # the product's fixed shared 5173/8000, so a deploy can never
+        # collide with a prior round / leaked orphan / concurrent run.
+        port_env_overrides, declared_ports, effective_port_envs = (
+            _ephemeral_port_plan(declared_port_envs)
+        )
         busy = _check_ports_free(declared_ports)
         step = _oracle_step(
             step_id="precheck_ports",
@@ -1359,7 +1366,10 @@ def verify_from_clean_oracle(
                             if journey_artifact_dir is not None
                             else temp_root / "otto_artifacts" / "journeys"
                         )
-                        base_url = _frontend_base_url(declared_port_envs, listening_ports)
+                        base_url = _frontend_base_url(
+                            effective_port_envs or declared_port_envs,
+                            listening_ports,
+                        )
                         ui_step, ui_issue = _run_ui_journeys_clean_oracle_step(
                             journeys=ui_journeys,
                             project=project,
@@ -1392,6 +1402,7 @@ def verify_from_clean_oracle(
                     port_wait_s=port_wait_s,
                     log=log,
                     after_listening=run_ui_probe,
+                    port_env_overrides=port_env_overrides,
                 )
                 start_step = _oracle_step(
                     step_id="start",
@@ -1724,6 +1735,100 @@ def _host_bash_major(bash: str) -> int | None:
 
 def _uses_bash4_case_expansion(text: str) -> bool:
     return bool(re.search(r"\$\{[^}\n]+(?:\^\^|,,)[^}\n]*\}", text))
+
+
+def _port_connectable(port: int, timeout: float = 0.5) -> bool:
+    """True if *anything* accepts a TCP connection on this port via IPv4
+    127.0.0.1, IPv6 ::1, OR however ``localhost`` resolves on this host.
+
+    The old probe used AF_INET + 127.0.0.1 ONLY. A dev server that binds
+    ``localhost`` (vite's default when start.sh omits ``--host 127.0.0.1``)
+    resolves IPv6-first on macOS, so it listens on ``[::1]:PORT`` — lsof
+    sees it LISTENing but the IPv4-only connect is refused forever, a false
+    "did not bind" that mis-blocked a correct product. Probing both
+    families (what a browser/curl does) fixes the false negative without
+    weakening the gate: a server that genuinely is not accepting still
+    fails every family.
+    """
+    targets: list[tuple[int, str]] = [
+        (int(socket.AF_INET), "127.0.0.1"),
+        (int(socket.AF_INET6), "::1"),
+    ]
+    try:
+        for info in socket.getaddrinfo(
+            "localhost", port, type=socket.SOCK_STREAM
+        ):
+            fam = int(info[0])
+            addr = str(info[4][0])
+            if (fam, addr) not in targets:
+                targets.append((fam, addr))
+    except (OSError, socket.gaierror):
+        pass
+    for fam, addr in targets:
+        try:
+            s = socket.socket(fam, socket.SOCK_STREAM)
+        except OSError:
+            continue
+        s.settimeout(timeout)
+        try:
+            s.connect((addr, port))
+            return True
+        except OSError:
+            continue
+        finally:
+            s.close()
+    return False
+
+
+def _free_ephemeral_port(avoid: set[int]) -> int:
+    """A fresh kernel-assigned free port (bind to :0), distinct from
+    `avoid`. Used to make each clean-deploy hermetic."""
+    last = 0
+    for _ in range(20):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", 0))
+            last = s.getsockname()[1]
+        finally:
+            s.close()
+        if last not in avoid:
+            return last
+    return last
+
+
+def _ephemeral_port_plan(
+    port_envs: list[tuple[str | None, int]],
+) -> tuple[dict[str, str], list[int], list[tuple[str | None, int]]]:
+    """Remap every NAMED ``*PORT`` env var to a fresh ephemeral free port.
+
+    This is the protocol-level fix for the recurring clean-deploy "port
+    conflict" class. The product's start.sh parameterizes its ports
+    (``API_PORT=${API_PORT:-8000}``, ``FRONTEND_PORT=${FRONTEND_PORT:-5173}``)
+    but the oracle never overrode them, so every deploy on the machine
+    fought over the same two fixed integers — colliding with prior rounds,
+    leaked orphans, concurrent runs, and other tooling. Picking a free port
+    is deterministic; sharing fixed ports across many deploys is what
+    destroyed that. Giving each deploy its own private ephemeral ports makes
+    the entire collision class *structurally impossible* rather than patched
+    per instance.
+
+    Ports declared only in prose (no env var to inject) cannot be
+    overridden and are kept as-is (best-effort).
+
+    Returns ``(env_overrides, probe_ports, effective_port_envs)``.
+    """
+    overrides: dict[str, int] = {}
+    used: set[int] = set()
+    for env_name, _port in port_envs:
+        if env_name and env_name not in overrides:
+            p = _free_ephemeral_port(used)
+            overrides[env_name] = p
+            used.add(p)
+    effective = [
+        (en, overrides.get(en, port) if en else port) for en, port in port_envs
+    ]
+    probe = sorted({port for _en, port in effective})
+    return {k: str(v) for k, v in overrides.items()}, probe, effective
 
 
 def _bind_local_port(port: int) -> socket.socket | None:
@@ -2119,9 +2224,17 @@ def _subtree_verify_start_sh(
     port_wait_s: int,
     log: Any,
     after_listening: Callable[[list[int]], None] | None = None,
+    port_env_overrides: dict[str, str] | None = None,
 ) -> tuple[bool, FailureKind | None, str | None, list[str], list[int]]:
     """Run start.sh in temp_root, poll for declared ports. Returns
-    (passed, failure_kind, message, steps_run, listening_ports)."""
+    (passed, failure_kind, message, steps_run, listening_ports).
+
+    ``port_env_overrides`` (e.g. ``{"FRONTEND_PORT": "53121"}``) are
+    injected into start.sh's environment so the deploy binds private
+    ephemeral ports instead of fixed shared ones — making port collision
+    with prior rounds / orphans / concurrent runs structurally impossible.
+    ``declared_ports`` must be the matching ephemeral ports to probe.
+    """
     steps: list[str] = []
     start_sh = temp_root / "start.sh"
     if not start_sh.exists():
@@ -2206,6 +2319,13 @@ def _subtree_verify_start_sh(
             **os.environ,
             "OTTO_CLEAN_DEPLOY_TEMP": str(temp_root.resolve()),
         }
+        if port_env_overrides:
+            # Hermetic ports: start.sh honors ${API_PORT:-8000} /
+            # ${FRONTEND_PORT:-5173}; binding fresh ephemeral ports makes
+            # collision with prior rounds / orphans / concurrent runs
+            # structurally impossible (deterministic), not patched per case.
+            deploy_env.update(port_env_overrides)
+            log(f"verify_from_clean: hermetic ports {port_env_overrides}")
         proc = subprocess.Popen(  # noqa: S603 — our own script
             [bash, "start.sh"],
             cwd=temp_root,
@@ -2284,16 +2404,9 @@ def _subtree_verify_start_sh(
             for port in declared_ports:
                 if port in listening:
                     continue
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(0.3)
-                try:
-                    s.connect(("127.0.0.1", port))
+                if _port_connectable(port):
                     listening.add(port)
                     log(f"verify_from_clean: port {port} listening")
-                except OSError:
-                    pass
-                finally:
-                    s.close()
             if declared_ports and listening == set(declared_ports):
                 log("verify_from_clean: all declared ports listening")
                 break
@@ -2405,12 +2518,18 @@ def verify_from_clean(
             logger_fn(msg)
 
     declared_ports: list[int] = []
+    port_env_overrides: dict[str, str] = {}
 
     # Pre-check ports for subtree scope so we don't try to run start.sh
     # if its ports are already busy (which would give us a misleading
     # "still listening" pass).
     if scope in ("subtree", "full"):
-        declared_ports = _parse_declared_ports(project_dir)
+        # Hermetic ports: bind fresh ephemeral ports per deploy instead of
+        # the product's fixed shared 5173/8000 — collision with prior
+        # rounds / leaked orphans / concurrent runs becomes impossible.
+        port_env_overrides, declared_ports, _eff = _ephemeral_port_plan(
+            _parse_declared_port_envs(project_dir)
+        )
         busy = _check_ports_free(declared_ports)
         if busy:
             return CleanVerifyResult(
@@ -2473,6 +2592,7 @@ def verify_from_clean(
                 timeout_s=timeout_s,
                 port_wait_s=port_wait_s,
                 log=log,
+                port_env_overrides=port_env_overrides,
             )
             if not passed:
                 return CleanVerifyResult(
