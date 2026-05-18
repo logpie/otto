@@ -377,7 +377,14 @@ def _run_action(
     if locator is None:
         return f"action {action.get('id') or '<unnamed>'} lacks an executable control locator"
     if locator.count() == 0:
-        return f"required control absent: {control}"
+        # Literal selector missed — try the deterministic semantic
+        # fallback (robust to accessible-name/label drift). Literal-first
+        # means zero behavior change when the label already matches.
+        sloc, slabel = _semantic_locator(page, action)
+        if sloc is not None and sloc.count() > 0:
+            locator, control = sloc, slabel
+        else:
+            return f"required control absent: {control}"
     try:
         locator.wait_for(state="visible", timeout=timeout_ms)
     except timeout_error_type:
@@ -395,7 +402,13 @@ def _run_action(
         if field is None:
             return f"action input lacks executable locator for {action.get('id') or '<unnamed>'}"
         if field.count() == 0:
-            return f"required input absent: {field_label}"
+            # Literal-miss → deterministic semantic fallback (handles the
+            # unassociated-<label> case that broke resume16k journey 1).
+            sfield, sflabel = _semantic_locator(page, fill)
+            if sfield is not None and sfield.count() > 0:
+                field, field_label = sfield, sflabel
+            else:
+                return f"required input absent: {field_label}"
         field.fill(value, timeout=timeout_ms)
 
     post_observables = _list_of_dicts(action.get("success_observables"))
@@ -953,6 +966,127 @@ def _semantic_match(
     if len(scored) > 1 and best_score - scored[1][0] < margin:
         return None  # ambiguous — fail closed, do not guess
     return best
+
+
+# DOM snapshot of interactive controls + their accessible names. Crucially
+# this also recovers labels for inputs whose <label> is NOT programmatically
+# associated (no for=/id, not wrapping) by walking preceding siblings — the
+# exact resume16k journey-1 killer (`required input absent: label='Name'`).
+_CANDIDATE_JS = r"""
+() => {
+  const SEL = 'button,a[href],input,textarea,select,[role=button],[role=link],[role=textbox],[role=searchbox],[role=combobox],[role=menuitem],[role=tab],[role=checkbox],[role=switch],[contenteditable=""],[contenteditable=true]';
+  const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/[^a-zA-Z0-9_-]/g,'\\$&');
+  const cssPath = (el) => {
+    const td = el.getAttribute && el.getAttribute('data-testid');
+    if (td) return `[data-testid="${td}"]`;
+    if (el.id) return `#${esc(el.id)}`;
+    const parts = []; let n = el;
+    while (n && n.nodeType === 1 && parts.length < 6) {
+      let s = n.nodeName.toLowerCase();
+      const p = n.parentElement;
+      if (p) { const sib = Array.from(p.children).filter(c => c.nodeName === n.nodeName);
+        if (sib.length > 1) s += `:nth-of-type(${sib.indexOf(n)+1})`; }
+      parts.unshift(s); n = n.parentElement;
+    }
+    return parts.join(' > ');
+  };
+  const roleOf = (el) => {
+    const r = el.getAttribute && el.getAttribute('role'); if (r) return r;
+    const t = el.nodeName.toLowerCase();
+    if (t === 'button') return 'button';
+    if (t === 'a') return 'link';
+    if (t === 'select') return 'combobox';
+    if (t === 'textarea') return 'textbox';
+    if (t === 'input') { const ty = (el.getAttribute('type')||'text').toLowerCase();
+      if (ty === 'search') return 'searchbox';
+      if (ty === 'checkbox') return 'checkbox';
+      if (ty === 'radio') return 'radio';
+      if (['button','submit','reset','image'].includes(ty)) return 'button';
+      return 'textbox'; }
+    return '';
+  };
+  const labelFor = (el) => {
+    const lb = el.getAttribute && el.getAttribute('aria-labelledby');
+    if (lb) { const r = document.getElementById(lb); if (r) return (r.textContent||'').trim(); }
+    if (el.id) { const l = document.querySelector(`label[for="${esc(el.id)}"]`); if (l) return (l.textContent||'').trim(); }
+    let p = el.parentElement;
+    while (p) { if (p.nodeName === 'LABEL') return (p.textContent||'').trim(); p = p.parentElement; }
+    let prev = el.previousElementSibling;
+    while (prev) {
+      if (['LABEL','SPAN','DIV','P','LEGEND'].includes(prev.nodeName)) {
+        const t = (prev.textContent||'').trim();
+        if (t && t.length <= 60) return t;
+      }
+      prev = prev.previousElementSibling;
+    }
+    return '';
+  };
+  const out = [];
+  for (const el of Array.from(document.querySelectorAll(SEL))) {
+    if (out.length >= 250) break;
+    const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    if (rect && rect.width === 0 && rect.height === 0) continue;
+    const ty = (el.getAttribute && (el.getAttribute('type')||'')).toLowerCase();
+    const submitVal = (el.nodeName === 'INPUT' && ['button','submit','reset'].includes(ty)) ? (el.value||'') : '';
+    out.push({
+      role: roleOf(el),
+      name: ((el.getAttribute && el.getAttribute('aria-label')) || submitVal || (el.textContent||'').trim()).slice(0,80),
+      label: labelFor(el),
+      text: (el.textContent||'').trim().slice(0,80),
+      placeholder: (el.getAttribute && el.getAttribute('placeholder')) || '',
+      value: (el.value !== undefined && el.value !== null ? String(el.value) : '').slice(0,80),
+      aria_label: (el.getAttribute && el.getAttribute('aria-label')) || '',
+      selector: cssPath(el),
+    });
+  }
+  return out;
+}
+"""
+
+
+def _intent_from_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """The journey step's literal selector strings, reinterpreted as fuzzy
+    INTENT for semantic resolution (Hybrid resolver Phase 1)."""
+    pick = lambda *keys: next(  # noqa: E731
+        (str(spec[k]).strip() for k in keys if str(spec.get(k) or "").strip()),
+        "",
+    )
+    return {
+        "role": pick("role", "control_role", "field_role", "input_role"),
+        "name": pick(
+            "name", "accessible_name", "control_name", "button_name", "field_name", "input_name"
+        ),
+        "label": pick("label", "control_label", "field_label", "input_label"),
+        "text": pick("text", "visible_text", "button_text", "expected_text"),
+    }
+
+
+def _semantic_locator(
+    page: Any, spec: dict[str, Any]
+) -> tuple[Any | None, str]:
+    """Literal-miss fallback: snapshot the live page's interactive
+    controls and deterministically resolve the step's intent to the best
+    one (robust to accessible-name/label drift). Returns
+    (locator, "semantic:<selector>") or (None, "")."""
+    intent = _intent_from_spec(spec)
+    if not (intent["name"] or intent["label"] or intent["text"]):
+        return None, ""
+    try:
+        cands = page.evaluate(_CANDIDATE_JS)
+    except Exception:  # noqa: BLE001 — never let resolution crash the journey
+        return None, ""
+    if not isinstance(cands, list) or not cands:
+        return None, ""
+    match = _semantic_match(intent, [c for c in cands if isinstance(c, dict)])
+    if not match:
+        return None, ""
+    selector = str(match.get("selector") or "").strip()
+    if not selector:
+        return None, ""
+    try:
+        return page.locator(selector).first, f"semantic:{selector}"
+    except Exception:  # noqa: BLE001
+        return None, ""
 
 
 def _action_locator(page: Any, action: dict[str, Any]) -> tuple[Any | None, str]:
