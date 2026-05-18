@@ -2560,6 +2560,34 @@ def _read_json_artifact(path: Path, *, max_chars: int = 120000) -> dict[str, Any
     return payload
 
 
+def _failing_ui_journey_count(latest_oracle_result: Any) -> int:
+    """How many UI journeys the oracle reports failing.
+
+    The smoke-pre repair agent fixes journeys in ONE shared sequential
+    session; each journey = diagnose + product fix + a ~5min cold
+    clean-verify oracle re-run. resume16n proved the agent CAN fix the
+    genuine product gaps (journey 1 register/onboarding fail->pass via
+    real commits) but the fixed ~1199s wall killed it mid-work on the
+    remaining journeys — N cross-feature journeys do not fit one base
+    budget. Returns 0 when there is no failing ui_journeys step (other
+    repair phases are unaffected — they stay at the base budget).
+    """
+    if not isinstance(latest_oracle_result, dict):
+        return 0
+    for st in latest_oracle_result.get("steps") or []:
+        if not isinstance(st, dict):
+            continue
+        sid = str(st.get("id") or st.get("command_identity") or "").lower()
+        if "journey" not in sid or str(st.get("status") or "").lower() != "failed":
+            continue
+        reason = str(st.get("reason") or "")
+        if "failed:" in reason:
+            return len(
+                [j for j in reason.split("failed:", 1)[1].split(",") if j.strip()]
+            )
+    return 0
+
+
 def _repair_budget_from_config(
     config: dict[str, Any],
     *,
@@ -2881,6 +2909,18 @@ def _build_repair_packet(
             prefix=budget_prefix,
             default_agent_turns=default_agent_turns,
             default_oracle_invocations=default_oracle_invocations,
+            # Scale the wall budget with the number of failing UI journeys
+            # so a cross-feature repair (each journey = fix + ~5min cold
+            # oracle re-run) actually fits. Base 1200s/journey, capped at
+            # 6000s (5 journeys' worth) to stay bounded. Only journey
+            # failures scale it (n=0 -> base, other phases unchanged); an
+            # explicit {prefix}_wall_clock_s config override still wins.
+            # Not gate-weakening: journeys must still genuinely pass, and
+            # idle/cost/diff-churn budgets + agent escalation still
+            # terminate a non-progressing repair.
+            default_wall_clock_s=min(
+                6000.0, 1200.0 * max(1, _failing_ui_journey_count(latest_payload))
+            ),
         ),
         packet_dir=packet_dir,
     )
