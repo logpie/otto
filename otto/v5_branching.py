@@ -370,6 +370,14 @@ coverage/
 .worktrees
 otto_logs/
 otto_logs
+# Otto's own side-channels (merge-conflict packets, amendment requests,
+# self-check). Written under .otto/ DURING integration by v5_branching/
+# build; if not ignored they leave the tree dirty and block
+# git_checkout_clean — and because .otto/ is filtered from agent-facing
+# surfaces, the repair agent is structurally blind to the blocker and
+# burns its whole wall. Same class as otto_logs/.
+.otto/
+.otto
 uploads/
 uploads
 
