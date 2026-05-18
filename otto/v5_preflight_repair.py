@@ -219,6 +219,17 @@ OracleRunner = Callable[[RepairPacket], CleanOracleResult | Awaitable[CleanOracl
 AgentRunner = Callable[..., Awaitable[tuple[str, float, str, dict[str, Any]]]]
 CommitHook = Callable[[RepairPacket, CleanOracleResult], tuple[bool, str] | Awaitable[tuple[bool, str]]]
 _CLOSEOUT_AGENT_REASONS = frozenset({"budget_exhausted", "oracle_budget_exhausted"})
+# Budget reasons that mean "the agent ran out of TIME/TURNS" — not a hard
+# money cap, not an oracle-call cap, not runaway churn. On these, an agent
+# turn may have produced a COMPLETE, oracle-passing fix that was never
+# evaluated (the agent's own confirming clean-verify was cut off by its
+# wall-clock timeout, so latest_oracle is still the stale pre-repair
+# failure). The ORACLE — not the agent-turn wall clock — decides repair
+# success, so before blocking on these we run ONE final acceptance oracle
+# on the produced worktree (bounded by the oracle-invocations budget).
+_TIME_TURN_EXHAUSTION = frozenset(
+    {"wall_clock_exhausted", "budget_exhausted", "idle_exhausted"}
+)
 
 
 def _iso_now() -> str:
@@ -1560,6 +1571,57 @@ async def run_oracle_repair_agent(
         )
         return None
 
+    async def run_controller_oracle() -> None:
+        """Run the controller-side acceptance oracle on the current produced
+        worktree and record it as the latest oracle result."""
+        nonlocal latest_oracle, oracle_invocations, last_activity_epoch_s
+        raw_oracle = (
+            oracle_runner(packet)
+            if oracle_runner is not None
+            else _default_oracle_runner(packet)
+        )
+        latest_oracle = await _maybe_await(raw_oracle)
+        oracle_invocations += 1
+        last_activity_epoch_s = time.time()
+        packet.latest_oracle_result = latest_oracle.to_jsonable()
+        if not default_oracle:
+            packet.append_event(
+                "oracle_run",
+                digest=latest_oracle.digest,
+                payload={"source": "controller", "passed": latest_oracle.passed},
+            )
+        packet.persist()
+        reconcile_replayed_usage()
+
+    async def final_oracle_then_block(
+        *, reason: str, summary: str
+    ) -> OracleRepairResult:
+        """The ORACLE decides repair success, not the agent-turn wall clock.
+
+        A killed/timed-out agent turn can leave a COMPLETE, oracle-passing
+        fix that was never evaluated — the agent's own confirming
+        clean-verify was cut off by its wall-clock timeout, so
+        `packet.latest_oracle_result` is still the stale PRE-repair failure.
+        Before blocking on TIME/TURN exhaustion, run ONE final acceptance
+        oracle on the produced worktree when oracle budget remains and the
+        agent left changes. This RUNS the real oracle (clean-verify) on the
+        real produced state — it is NOT gate-weakening: a genuinely-failing
+        produced state still blocks (now with a TRUTHFUL post-repair oracle
+        result instead of the stale pre-repair one).
+        """
+        if (
+            reason in _TIME_TURN_EXHAUSTION
+            and not latest_oracle.passed
+            and oracle_invocations < packet.budget.oracle_invocations
+            and _git_status_porcelain(worktree).strip()
+        ):
+            await run_controller_oracle()
+            if latest_oracle.passed:
+                accepted = await accept_or_block_passed_oracle()
+                if accepted is not None:
+                    return accepted
+        return await block_with_escalation(reason=reason, summary=summary)
+
     while True:
         if latest_oracle.passed:
             accepted = await accept_or_block_passed_oracle()
@@ -1569,7 +1631,7 @@ async def run_oracle_repair_agent(
 
         reason = budget_exhausted_reason()
         if reason is not None:
-            return await block_with_escalation(
+            return await final_oracle_then_block(
                 reason=reason,
                 summary=f"repair {reason.replace('_', ' ')}",
             )
@@ -1643,7 +1705,7 @@ async def run_oracle_repair_agent(
 
         reason = budget_exhausted_reason(include_turn_limit=False)
         if reason is not None:
-            return await block_with_escalation(
+            return await final_oracle_then_block(
                 reason=reason,
                 summary=f"repair {reason.replace('_', ' ')}",
             )
@@ -1653,19 +1715,4 @@ async def run_oracle_repair_agent(
                 reason="oracle_budget_exhausted",
                 summary="repair oracle budget exhausted",
             )
-        raw_oracle = oracle_runner(packet) if oracle_runner is not None else _default_oracle_runner(packet)
-        latest_oracle = await _maybe_await(raw_oracle)
-        oracle_invocations += 1
-        last_activity_epoch_s = time.time()
-        packet.latest_oracle_result = latest_oracle.to_jsonable()
-        if not default_oracle:
-            packet.append_event(
-                "oracle_run",
-                digest=latest_oracle.digest,
-                payload={
-                    "source": "controller",
-                    "passed": latest_oracle.passed,
-                },
-            )
-        packet.persist()
-        reconcile_replayed_usage()
+        await run_controller_oracle()
