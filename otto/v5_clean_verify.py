@@ -1971,32 +1971,67 @@ def _is_otto_owned_process(pid: int, project_dir: Path) -> bool:
         return False
     try:
         proc = psutil.Process(pid)
-        cwd = Path(proc.cwd()).resolve()
-        project = project_dir.resolve()
-        if cwd == project or project in cwd.parents:
-            return True
-        env = _process_environ(proc)
-        field_test_project = env.get("FIELD_TEST_PROJECT_DIR", "")
-        if field_test_project and _looks_like_field_test_path(field_test_project):
-            return True
-        queue_project = env.get("OTTO_QUEUE_PROJECT_DIR", "")
-        if queue_project:
-            try:
-                queue_root = Path(queue_project).resolve()
-                if queue_root == project or queue_root in project.parents or project in queue_root.parents:
-                    return True
-            except OSError:
-                pass
-        cmdline = " ".join(proc.cmdline())
-        if str(project) in cmdline and "otto" in cmdline.lower():
-            return True
-        if _looks_like_field_test_path(str(cwd)):
-            return _looks_like_local_server(cmdline)
-        if cwd.name.startswith("otto-clean-"):
-            return _looks_like_local_server(cmdline)
-        return False
     except (psutil.Error, OSError, RuntimeError):
         return False
+    project = project_dir.resolve()
+    env = _process_environ(proc)
+
+    # PRIMARY signal: the clean-deploy process tree is tagged with an
+    # inherited env var at Popen time. This is the ONLY ownership signal
+    # that survives a leaked server outliving its temp dir (cwd deleted →
+    # unreadable; exe resolves to the base interpreter). Without it the
+    # leaked orphan was unrecognized and aborted the next run's startup
+    # port cleanup ("still busy after killing Otto-owned processes").
+    if env.get("OTTO_CLEAN_DEPLOY_TEMP"):
+        return True
+
+    # Gather cmdline/exe WITHOUT requiring cwd to still exist (a leaked
+    # clean-deploy server's temp cwd is rm'd by verify_from_clean.finally).
+    try:
+        cmdline = " ".join(proc.cmdline())
+    except (psutil.Error, OSError, RuntimeError):
+        cmdline = ""
+    try:
+        exe = proc.exe() or ""
+    except (psutil.Error, OSError, RuntimeError):
+        exe = ""
+
+    # `otto-clean-` is otto's exclusive tempfile.mkdtemp prefix for
+    # clean-deploy copies — anything running from such a path (incl.
+    # subdirs like otto-clean-XXX/backend, which the old `cwd.name`
+    # prefix check missed) is unambiguously a leaked otto deploy server.
+    if "otto-clean-" in cmdline or "otto-clean-" in exe:
+        return True
+
+    field_test_project = env.get("FIELD_TEST_PROJECT_DIR", "")
+    if field_test_project and _looks_like_field_test_path(field_test_project):
+        return True
+    queue_project = env.get("OTTO_QUEUE_PROJECT_DIR", "")
+    if queue_project:
+        try:
+            queue_root = Path(queue_project).resolve()
+            if (
+                queue_root == project
+                or queue_root in project.parents
+                or project in queue_root.parents
+            ):
+                return True
+        except OSError:
+            pass
+    if str(project) in cmdline and "otto" in cmdline.lower():
+        return True
+
+    try:
+        cwd: Path | None = Path(proc.cwd()).resolve()
+    except (psutil.Error, OSError, RuntimeError):
+        cwd = None
+    if cwd is not None:
+        if cwd == project or project in cwd.parents:
+            return True
+        cwd_str = str(cwd)
+        if "otto-clean-" in cwd_str or _looks_like_field_test_path(cwd_str):
+            return _looks_like_local_server(cmdline)
+    return False
 
 
 def _terminate_pid(pid: int) -> None:
@@ -2159,12 +2194,25 @@ def _subtree_verify_start_sh(
 
     try:
         log_fh = deploy_log.open("wb")
+        # Tag the entire clean-deploy process tree with an env var. start.sh
+        # backgrounds its servers (uvicorn/vite) in subshells; if one leaks
+        # (orphaned to init), it outlives its temp dir, its cwd becomes
+        # unreadable and its exe resolves to the base interpreter — so
+        # cwd/cmdline heuristics miss it and the NEXT run's startup port
+        # cleanup aborts ("still busy after killing Otto-owned processes").
+        # An inherited env var is the one signal that survives all of that;
+        # _is_otto_owned_process reads it back via psutil to reclaim leaks.
+        deploy_env = {
+            **os.environ,
+            "OTTO_CLEAN_DEPLOY_TEMP": str(temp_root.resolve()),
+        }
         proc = subprocess.Popen(  # noqa: S603 — our own script
             [bash, "start.sh"],
             cwd=temp_root,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            env=deploy_env,
         )
         # start_new_session=True makes start.sh a new session+group leader, so
         # its pgid == its pid and every child/grandchild it spawns (the
