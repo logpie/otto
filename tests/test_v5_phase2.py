@@ -22,6 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from otto.lead import LeadResult
+from otto.journey_contracts import VerificationContractError
 from otto.queue.subtask import enqueue_subtask
 from otto.queue.task_graph import (
     aggregate_verdict,
@@ -37,6 +38,7 @@ from otto.v5_runner import (
     _process_children,
     run_v5_pipeline,
 )
+from otto.spec_compile_flat import SpecContractRepairExhaustedError
 
 
 @pytest.fixture
@@ -376,6 +378,35 @@ class TestVerdictPropagation:
 
 
 class TestRunV5PipelineStubbed:
+    @pytest.mark.asyncio
+    async def test_spec_contract_repair_exhaustion_is_merge_blocked_not_catastrophic(
+        self,
+        project: Path,
+    ) -> None:
+        """Compile pass-model repair exhaustion is a spec verdict, not a crash."""
+
+        async def fake_compile(**_kwargs: Any) -> Any:
+            raise SpecContractRepairExhaustedError(
+                VerificationContractError(
+                    "verification_contract_invalid",
+                    "behavior_journeys[comment_mention_inbox].pass_model.actions[0].success_observables",
+                    "state-changing action lacks a non-tautological post-action observable",
+                ),
+                attempts=2,
+            )
+
+        with patch("otto.v5_runner.compile_flat_spec", new=fake_compile):
+            result = await run_v5_pipeline(
+                project_dir=project,
+                intent="build tracker",
+                config={},
+                tree_budget_usd=10.0,
+            )
+
+        assert result.verdict == "merge_blocked"
+        assert "spec_contract_repair_exhausted" in result.failure_reason
+        assert "comment_mention_inbox" in result.failure_reason
+
     @pytest.mark.asyncio
     async def test_root_inline_no_children(self, project: Path) -> None:
         """Root inlines (begin_inline) → no children → root verdict from Lead."""

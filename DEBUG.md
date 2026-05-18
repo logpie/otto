@@ -1,4 +1,39 @@
-# Mission Control Queue Failure Debug
+# ACTIVE — contract gate fails first-try across runs #2/#4/#5/#6 (2026-05-17)
+
+## Symptom
+Architect contract gate fails attempt 1 (often 2) → architect re-dispatch →
+each retry is a full ~14min scaffold rebuild. Runs #2/#4/#5 dead-ended
+(merge_blocked). Run #6 SELF-CORRECTED via retries and features fanned out —
+but at ~28min retry waste, blowing the <45min mandate.
+
+## Root cause: ONE class, four shapes
+Rigid deterministic predicate rejects the architect's self-consistent,
+semantically-correct CHARTER:
+- #2 `_feature_ownership_items` allowlisted `owned_paths`; architect wrote `may_add` → fixed 02ef92796
+- #4 `leaf_extension_globs` membership hard-finding on legit feature files → fixed ce5e2b138
+- #5 feature_owned_paths grouped by layer keys backend/frontend/tests → fixed 5252f5a44 (generalize to any list-of-strings)
+- #6 `registration_isolation.policy="auto-discover"` (architect's word; description fully explains pkgutil+import.meta.glob; shared_registry_files+leaf_extension_globs all correct) rejected by string-equality vs {file_local_auto_discovery, manifest_auto_compose, plugin_auto_discovery, none_needed}
+
+## Correct probe (cost 2 wasted diagnoses)
+- parse_*_from_charter needs pathlib.Path NOT str (str → treated as charter text → false-empty)
+- gate uses persist_*_from_charter + check_route_registration_isolation, NOT parse_* / _foundation_isolation_feedback (latter → None, misleading)
+- run#6 definitive: persist_foundation 15/0, persist_feature 4 feats/0, check_route_registration_isolation → route_registration_isolation_contract_invalid on policy
+
+## Fix (run#7 target)
+Stop hard-rejecting on the policy enum string. Label is descriptive; the REAL
+invariant is STRUCTURE: shared_registry_files scaffold-owned + leaf_edit:false,
+leaf_extension_globs telling leaves where to add modules. Validate structure;
+"no registries AND no globs" ⇒ effectively none_needed. Never reject on label.
+Per patches→protocols: do NOT add "auto-discover" as enum value #5 — generalize.
+User explicitly authorized: "lessen or remove esp brittle places, feel free."
+
+## Status
+run#6 limping to success via retries — kept alive for e2e signal. Applying
+policy-tolerance fix for run#7 (first-try gate pass → <45min).
+
+---
+
+# Mission Control Queue Failure Debug (STALE — 2026-04-25, resolved)
 
 Date: 2026-04-25
 

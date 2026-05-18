@@ -11,8 +11,30 @@ from otto.lead import LeadResult
 from otto.queue.subtask import v5_pending_path
 from otto.queue.task_graph import record_task, set_decomposition, set_verdict
 from otto.v5_branching import integration_branch_name
-from otto.v5_clean_verify import ToolchainPreflightResult
+from otto.v5_clean_verify import CleanOracleResult, CleanOracleStepResult, ToolchainPreflightResult
 from otto.v5_runner import _process_children
+
+
+def _clean_scaffold_result(project_dir: Path, *_args: Any, **_kwargs: Any) -> CleanOracleResult:
+    step = CleanOracleStepResult(
+        id="scaffold",
+        status="passed",
+        return_code=0,
+        command_identity="deterministic scaffold check",
+        command=["true"],
+        cwd=str(project_dir),
+        env={},
+    )
+    return CleanOracleResult.from_parts(
+        passed=True,
+        scope="scaffold",
+        issues=[],
+        steps=[step],
+        artifact_path_refs=[],
+        command=step.command,
+        env={},
+        project_dir=project_dir,
+    )
 
 
 def _append_architect(project_dir: Path, task_id: str) -> None:
@@ -33,7 +55,7 @@ def _append_architect(project_dir: Path, task_id: str) -> None:
     pending.parent.mkdir(parents=True, exist_ok=True)
     with pending.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry) + "\n")
-    record_task(project_dir, task_id=task_id, intent=entry["intent"], parent_task_id="root")
+    record_task(project_dir, task_id=task_id, intent=str(entry["intent"]), parent_task_id="root")
 
 
 @pytest.mark.asyncio
@@ -82,7 +104,7 @@ async def test_architect_preflight_emits_ia_page_route_coherence_finding(
         return LeadResult(task_id=tid, verdict="pass", decomposition="inline")
 
     monkeypatch.setattr("otto.v5_runner._run_child", fake_run_child)
-    monkeypatch.setattr("otto.v5_runner.check_scaffold_compiles", lambda *_a, **_k: [])
+    monkeypatch.setattr("otto.v5_runner.verify_from_clean_oracle", _clean_scaffold_result)
     monkeypatch.setattr(
         "otto.v5_clean_verify.preflight_shared_toolchains",
         lambda worktree, **_kwargs: ToolchainPreflightResult(

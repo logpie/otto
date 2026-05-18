@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from otto.spec_compile_flat import FlatSpec
 from otto.v5_capability_inventory import (
@@ -13,7 +14,7 @@ from otto.v5_capability_inventory import (
 )
 
 
-def _write_charter(project: Path, ia: dict[str, object] | None) -> None:
+def _write_charter(project: Path, ia: dict[str, Any] | None) -> None:
     if ia is None:
         text = "# CHARTER\n\n## Agent operating notes\n\n- Tests: `npm run test`\n"
     else:
@@ -28,7 +29,7 @@ def _write_charter(project: Path, ia: dict[str, object] | None) -> None:
     (project / "CHARTER.md").write_text(text)
 
 
-def _ia() -> dict[str, object]:
+def _ia() -> dict[str, Any]:
     return {
         "entry_states": [{"id": "unauthenticated", "route": "/", "expected": "Home"}],
         "routes": [{"id": "team.backlog", "path": "/", "key_text": "Backlog"}],
@@ -46,10 +47,21 @@ def _ia() -> dict[str, object]:
         "data_contracts": [{"id": "Issue", "fields": ["id", "title"]}],
         "empty_states": [{"entity": "issue", "list_route": "team.backlog", "cta_present": True}],
         "settings_sections": [{"id": "account", "path": "/settings/account"}],
+        "registration_isolation": {
+            "policy": "file_local_auto_discovery",
+            "shared_registry_files": [
+                {
+                    "path": "frontend/src/App.tsx",
+                    "discovers": "frontend/src/features/*/routes.tsx",
+                    "leaf_edit": False,
+                }
+            ],
+            "leaf_extension_globs": ["frontend/src/features/*/routes.tsx"],
+        },
     }
 
 
-def _spec() -> dict[str, object]:
+def _spec() -> dict[str, Any]:
     return {
         "project_kind": "webapp",
         "product_overview": {
@@ -119,6 +131,20 @@ def test_bad_surface_kind_fails(tmp_path: Path) -> None:
     assert any(f.kind == "ia_unknown_surface" for f in findings)
 
 
+def test_bad_registration_isolation_contract_fails(tmp_path: Path) -> None:
+    payload = _ia()
+    payload["registration_isolation"] = {
+        "policy": "manual_append",
+        "shared_registry_files": [{"path": "frontend/src/App.tsx", "leaf_edit": True}],
+        "leaf_extension_globs": [],
+    }
+    _write_charter(tmp_path, payload)
+
+    findings = validate_information_architecture_contract(tmp_path, spec=_spec())
+
+    assert any(f.kind == "route_registration_isolation_contract_invalid" for f in findings)
+
+
 def test_missing_action_surface_for_spec_action_fails(tmp_path: Path) -> None:
     payload = _ia()
     payload["action_surfaces"] = []
@@ -177,6 +203,8 @@ def test_architect_prompt_keeps_concise_ia_contract_requirement() -> None:
     prompt = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
 
     assert "Information Architecture Contract" in prompt
+    assert "registration_isolation" in prompt
+    assert "file-local" in prompt
     assert "Do not restate JSON in paragraphs" in prompt
 
 

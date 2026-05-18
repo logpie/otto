@@ -6,12 +6,13 @@ picks it back up with the failure context attached.
 
 Building blocks (helpers + cap constant) are tested directly. The end-
 to-end retry loop is also exercised via ``_process_children`` with
-stubbed ``run_lead`` + ``check_scaffold_compiles`` so we verify the
+stubbed ``run_lead`` + ``verify_from_clean_oracle`` so we verify the
 state-machine without burning $13/run on a live build.
 """
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -28,12 +29,43 @@ from otto.queue.task_graph import (
     record_task,
     set_verdict,
 )
-from otto.v5_preflight import PreflightIssue
+from otto.v5_branching import integration_branch_name
+from otto.v5_clean_verify import CleanOracleIssue, CleanOracleResult, CleanOracleStepResult
 from otto.v5_runner import (
     MAX_ARCHITECT_RETRIES,
     _link_shared_install_dirs,
     _process_children,
 )
+
+
+def _oracle_result(*, passed: bool, kind: str = "contract_structural_invalid", message: str = "") -> CleanOracleResult:
+    step = CleanOracleStepResult(
+        id="scaffold",
+        status="passed" if passed else "failed",
+        return_code=0 if passed else 1,
+        command_identity="deterministic scaffold check",
+        command=["true"],
+        cwd=".",
+        env={},
+    )
+    issue = CleanOracleIssue(
+        kind=kind,
+        severity="block",
+        message=message or kind,
+        step_id=step.id,
+        command_identity=step.command_identity,
+        return_code=step.return_code,
+    )
+    return CleanOracleResult.from_parts(
+        passed=passed,
+        scope="scaffold",
+        issues=[] if passed else [issue],
+        steps=[step],
+        artifact_path_refs=[],
+        command=step.command,
+        env={},
+        project_dir=Path("."),
+    )
 
 
 def _seed_architect(project_dir: Path, task_id: str = "v5-arch") -> None:
@@ -45,6 +77,34 @@ def _seed_architect(project_dir: Path, task_id: str = "v5-arch") -> None:
         parent_task_id="root",
     )
     set_verdict(project_dir, task_id, "pass")
+
+
+def _git(cwd: Path, *args: str) -> None:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} failed\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+
+
+def _init_git_repo(project_dir: Path) -> None:
+    project_dir.mkdir(parents=True, exist_ok=True)
+    _git(project_dir, "init", "-q", "-b", "main")
+    _git(project_dir, "config", "user.email", "test@example.invalid")
+    _git(project_dir, "config", "user.name", "Test User")
+    (project_dir / ".gitignore").write_text(".worktrees/\notto_logs/\n", encoding="utf-8")
+    (project_dir / "README.md").write_text("fixture\n", encoding="utf-8")
+    _git(project_dir, "add", "-A")
+    _git(project_dir, "commit", "-q", "-m", "init")
+    root_integration = integration_branch_name("root")
+    if root_integration != "main":
+        _git(project_dir, "branch", root_integration, "main")
 
 
 def test_clear_verdict_for_retry_resets_state(tmp_path: Path) -> None:
@@ -126,6 +186,7 @@ def test_retry_state_independent_per_task(tmp_path: Path) -> None:
 
 def _setup_root_with_architect(project: Path, intent: str = "Architect a scaffold.") -> str:
     """Seed project_dir with a root task + one pending architect subtask."""
+    _init_git_repo(project)
     (project / "otto_logs").mkdir(exist_ok=True)
     record_task(project, task_id="root", intent="root build", parent_task_id=None)
     arch_tid = enqueue_subtask(
@@ -156,23 +217,19 @@ async def test_architect_retries_then_succeeds(tmp_path: Path) -> None:
 
     scaffold_calls = {"v": 0}
 
-    def fake_scaffold(project_dir: Path, architect_task_id: str | None = None) -> list[PreflightIssue]:
+    def fake_verify(project_dir: Path, *_args: Any, **_kwargs: Any) -> CleanOracleResult:
         scaffold_calls["v"] += 1
         if scaffold_calls["v"] == 1:
-            return [
-                PreflightIssue(
-                    kind="scaffold_compile_failed",
-                    severity="block",
-                    message="npm run build failed: tsc error TS2339",
-                    task_id=architect_task_id,
-                )
-            ]
-        return []
+            return _oracle_result(
+                passed=False,
+                message="contract routes contradict required IA: tsc error TS2339",
+            )
+        return _oracle_result(passed=True)
 
     events: list[dict[str, Any]] = []
 
     with patch("otto.v5_runner.run_lead", new=fake_run_lead), \
-         patch("otto.v5_runner.check_scaffold_compiles", new=fake_scaffold):
+         patch("otto.v5_runner.verify_from_clean_oracle", new=fake_verify):
         await _process_children(
             project_dir=tmp_path,
             parent_task_id="root",
@@ -230,21 +287,17 @@ async def test_architect_retry_cap_exhausted(tmp_path: Path) -> None:
             task_id=kwargs["task_id"], verdict="pass", cost_usd=0.1, decomposition="inline"
         )
 
-    # Scaffold preflight: always fails.
-    def fake_scaffold(project_dir: Path, architect_task_id: str | None = None) -> list[PreflightIssue]:
-        return [
-            PreflightIssue(
-                kind="scaffold_compile_failed",
-                severity="block",
-                message="persistent build failure",
-                task_id=architect_task_id,
-            )
-        ]
+    # Scaffold structural-contract preflight: always fails.
+    def fake_verify(project_dir: Path, *_args: Any, **_kwargs: Any) -> CleanOracleResult:
+        return _oracle_result(
+            passed=False,
+            message="persistent structured contract failure",
+        )
 
     events: list[dict[str, Any]] = []
 
     with patch("otto.v5_runner.run_lead", new=fake_run_lead), \
-         patch("otto.v5_runner.check_scaffold_compiles", new=fake_scaffold):
+         patch("otto.v5_runner.verify_from_clean_oracle", new=fake_verify):
         await _process_children(
             project_dir=tmp_path,
             parent_task_id="root",
@@ -282,6 +335,7 @@ async def test_toolchain_preflight_runs_after_architect_and_children_inherit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Architect preflight should install once, propagate, then leaves inherit."""
+    (tmp_path / "CHARTER.md").write_text("# Test charter\n", encoding="utf-8")
     record_task(tmp_path, task_id="root", intent="root build", parent_task_id=None)
     arch_tid = enqueue_subtask(
         project_dir=tmp_path,
@@ -340,7 +394,7 @@ async def test_toolchain_preflight_runs_after_architect_and_children_inherit(
 
     events: list[dict[str, Any]] = []
     monkeypatch.setattr("otto.v5_runner._run_child", fake_run_child)
-    monkeypatch.setattr("otto.v5_runner.check_scaffold_compiles", lambda *_a, **_k: [])
+    monkeypatch.setattr("otto.v5_runner.verify_from_clean_oracle", lambda *_a, **_k: _oracle_result(passed=True))
     monkeypatch.setattr("otto.v5_clean_verify.preflight_shared_toolchains", fake_toolchain)
 
     await _process_children(
