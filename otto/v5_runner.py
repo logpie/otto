@@ -2062,11 +2062,22 @@ def _foundation_contracts_for_parent(
     try:
         from otto.v5_capability_inventory import parse_foundation_contracts
 
-        parsed, parse_findings = parse_foundation_contracts(project_dir / "CHARTER.md")
+        parsed, _parse_findings = parse_foundation_contracts(project_dir / "CHARTER.md")
     except Exception:  # noqa: BLE001
         return contracts
-    if parse_findings:
-        return contracts
+    # `parse_foundation_contracts` already EXCLUDES malformed/rejected
+    # entries from `parsed` (it records a finding and `continue`s), so
+    # `parsed` holds only structurally-valid contracts. Returning them even
+    # when the parser also emitted advisory findings (e.g. a registry path
+    # using check='semantic' that should be 'literal') keeps
+    # `contracts_present` truthful: discarding all parsed contracts on ANY
+    # advisory finding was a brittle all-or-nothing predicate that
+    # spuriously failed the architect/foundation contract gate and
+    # merge_blocked the whole foundation. Not gate-weakening: the gate's own
+    # `_foundation_contract_findings` independently re-validates the returned
+    # contracts (and still blocks genuinely-bad ones), genuine emptiness /
+    # total invalidity still yields `[]`, and advisory parse findings remain
+    # available to callers that surface architect feedback.
     owner_default = foundation_child_id
     for item in parsed or []:
         if isinstance(item, dict):
