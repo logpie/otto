@@ -1686,7 +1686,7 @@ def _parse_declared_port_envs(project_dir: Path) -> list[tuple[str | None, int]]
         for line in text.splitlines():
             if "|" not in line:
                 continue
-            env_match = re.search(r"`?([A-Z][A-Z0-9_]*PORT)`?", line)
+            env_match = re.search(r"`?((?:[A-Z][A-Z0-9_]*)?PORT)`?", line)
             port_match = re.search(r"`?(\d{4,5})`?", line)
             if env_match and port_match:
                 declared.append((env_match.group(1), int(port_match.group(1))))
@@ -1698,12 +1698,12 @@ def _parse_declared_port_envs(project_dir: Path) -> list[tuple[str | None, int]]
         except OSError:
             script = ""
         for m in re.finditer(
-            r"\b([A-Z][A-Z0-9_]*PORT)\s*=\s*[\"']?\$\{\1:-(\d{4,5})\}",
+            r"\b((?:[A-Z][A-Z0-9_]*)?PORT)\s*=\s*[\"']?\$\{\1:-(\d{4,5})\}",
             script,
         ):
             declared.append((m.group(1), int(m.group(2))))
         for m in re.finditer(
-            r"\b([A-Z][A-Z0-9_]*PORT)\s*=\s*[\"']?(\d{4,5})\b",
+            r"\b((?:[A-Z][A-Z0-9_]*)?PORT)\s*=\s*[\"']?(\d{4,5})\b",
             script,
         ):
             declared.append((m.group(1), int(m.group(2))))
