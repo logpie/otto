@@ -114,6 +114,21 @@ Architect task guidance:
   build time (a slice registry, a context with feature-pluggable reducers, a
   subscribe API) and declare it in `registration_isolation.leaf_extension_globs`
   — do not leave a feature with no isolated way to contribute shared state.
+- The composition/extension-point rule above is NOT frontend-only: it applies
+  to ANY shared module every feature must EXTEND with new definitions —
+  notably the BACKEND data-model and schema layer. A shared `models.py` /
+  `schemas.py` (or stack equivalent) that each feature must add its own
+  entities to is the SAME hazard as a central route registry or store: it
+  MUST be a leaf-extensible package, NOT one monolithic foundation_contract
+  file every feature edits. Make it a scaffold-owned aggregator/base (e.g.
+  `backend/models/__init__.py` that re-exports/auto-imports, declared in
+  `registration_isolation.shared_registry_files` with `leaf_edit:false`) plus
+  per-feature `backend/models/<feature>.py` / `schemas/<feature>.py` under a
+  `leaf_extension_globs` entry — the same structure as the router package. A
+  monolithic backend model/schema foundation_contract that ≥1 feature must
+  extend is a `foundation_contract_write_blocked` waiting to happen (the
+  iTracker run: the Core-Issues feature was blocked writing the shared
+  `backend/models.py`/`backend/schemas.py` it had to extend).
 - Declare shared foundation files in a machine-readable `## Foundation Contracts`
   JSON block or `foundation_contracts` IA field. Each entry has `path`,
   `owner_task_id`, `check` (`literal` or `semantic`), and optional
@@ -142,7 +157,19 @@ Architect task guidance:
   contract gate. Provide an entry for every listed target, with exact NEW
   file paths/globs that feature may add. Feature paths must live under
   `registration_isolation.leaf_extension_globs`; never assign a
-  foundation_contract or shared registry file to a feature.
+  foundation_contract or shared registry file to a feature. Conversely the
+  scaffold/foundation MUST NOT pre-create (seed) any file that is
+  feature-owned — any path in `feature_owned_paths` or matching a
+  `leaf_extension_globs` entry. Auto-discovery/composition seams MUST tolerate
+  an absent feature file: the loader globs, so a missing
+  `routers/<x>/router.py` / `models/<x>.py` is simply not registered and the
+  app still boots. Seeding a feature-owned stub makes the foundation a
+  contributor to a feature-owned file, which then fails the integration union
+  guard or merge when the owning feature implements it for real (the iTracker
+  run: foundation-seeded `backend/routers/*/router.py` 501-stubs caused
+  identical `integration union incomplete` / merge-conflict blocks on every
+  feature). The foundation owns ONLY aggregators/loaders/base + true shared
+  scaffolding, never feature-owned per-resource files.
 - Keep prose short. Do not restate JSON in paragraphs.
 - Create `decisions.md`.
 - Verify the scaffold with the smallest build/typecheck command that proves it
