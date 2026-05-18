@@ -159,6 +159,8 @@ def normalize_journey_contracts(
             "current schema requires at least one behavior journey",
         )
 
+    cold_state_ids = _cold_start_state_ids(normalized)
+
     for index, journey in enumerate(journeys):
         if not isinstance(journey, dict):
             raise VerificationContractError(
@@ -171,10 +173,50 @@ def normalize_journey_contracts(
             project_kind=project_kind,
             path=f"behavior_journeys[{journey.get('id') or index}]",
             legacy_schema=legacy_schema,
+            cold_state_ids=cold_state_ids,
         )
 
     normalized["schema_version"] = current_schema_version
     return normalized
+
+
+def _cold_start_state_ids(payload: dict[str, Any]) -> frozenset[str]:
+    """The spec's OWN declared cold-start state ids.
+
+    A journey whose ``start_state`` matches one of these is
+    self-bootstrapping from a clean deploy (no pre-existing data) and needs
+    no setup. Any other ``start_state`` declares a precondition the oracle
+    must establish via ``pass_model.setup``. Derived from the spec's
+    declaration — not a hardcoded state-name list — so it generalizes to
+    every product.
+    """
+
+    raw = payload.get("cold_start_states")
+    if not isinstance(raw, list):
+        return frozenset()
+    ids: set[str] = set()
+    for item in raw:
+        if isinstance(item, dict):
+            sid = str(item.get("id") or "").strip()
+            if sid:
+                ids.add(sid)
+        elif isinstance(item, str) and item.strip():
+            ids.add(item.strip())
+    return frozenset(ids)
+
+
+def _setup_step_is_executable(step: Any) -> bool:
+    """A setup step is executable iff the oracle can actually perform it:
+    a navigation ``route`` and/or an executable UI locator (the same
+    primitives ``pass_model.actions`` use). An abstract
+    ``{"action":"seed","entity":...,"fields":...}`` declaration has neither
+    and cannot be run against a black-box clean deployment."""
+
+    if not isinstance(step, dict):
+        return False
+    if str(step.get("route") or "").strip():
+        return True
+    return _has_any_key(step, UI_LOCATOR_KEYS)
 
 
 def _normalize_one_journey(
@@ -183,6 +225,7 @@ def _normalize_one_journey(
     project_kind: str,
     path: str,
     legacy_schema: bool,
+    cold_state_ids: frozenset[str] = frozenset(),
 ) -> None:
     assigned_level, assigned_probe = assign_verification_level(journey, project_kind, path=path)
     existing_level = journey.get("verification_level")
@@ -238,7 +281,7 @@ def _normalize_one_journey(
                 "ui journey is missing declarative pass_model",
             )
         journey["pass_model"] = synthesize_ui_pass_model(journey)
-    validate_ui_pass_model(journey, path=path)
+    validate_ui_pass_model(journey, path=path, cold_state_ids=cold_state_ids)
 
 
 def assign_verification_level(
@@ -332,7 +375,12 @@ def synthesize_ui_pass_model(journey: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_ui_pass_model(journey: dict[str, Any], *, path: str) -> None:
+def validate_ui_pass_model(
+    journey: dict[str, Any],
+    *,
+    path: str,
+    cold_state_ids: frozenset[str] = frozenset(),
+) -> None:
     model = journey.get("pass_model")
     if not isinstance(model, dict):
         raise VerificationContractError(
@@ -347,6 +395,46 @@ def validate_ui_pass_model(journey: dict[str, Any], *, path: str) -> None:
             f"{path}.pass_model",
             f"pass_model missing required keys: {', '.join(missing_keys)}",
         )
+
+    # Non-cold journeys MUST declare an executable setup precondition.
+    #
+    # The clean_deploy UI oracle navigates to entry_route against a freshly
+    # built product with an empty database. A journey whose start_state is
+    # one of the spec's own declared cold_start_states self-bootstraps (its
+    # actions create everything). Any OTHER start_state declares a
+    # precondition (a seeded workspace/issue/etc.) that only pass_model.setup
+    # can establish — and every setup step must be executable (a navigation
+    # route and/or a real UI locator, the same primitives actions use). An
+    # empty setup or an abstract {"action":"seed",...} declaration would make
+    # the oracle silently skip the precondition and then false-fail the
+    # journey "control absent" on a correct product. Fail closed at compile
+    # time (only when the spec actually declares cold_start_states — legacy
+    # specs without that declaration keep their prior behavior).
+    if cold_state_ids:
+        start_state = str(
+            journey.get("start_state") or model.get("start_state") or ""
+        ).strip()
+        if start_state and start_state not in cold_state_ids:
+            setup_steps = model.get("setup")
+            if not isinstance(setup_steps, list) or not setup_steps:
+                raise VerificationContractError(
+                    "verification_contract_invalid",
+                    f"{path}.pass_model.setup",
+                    f"non-cold start_state {start_state!r} requires a non-empty "
+                    f"pass_model.setup that bootstraps the precondition from a "
+                    f"clean deploy (declared cold states: "
+                    f"{sorted(cold_state_ids)})",
+                )
+            for s_index, step in enumerate(setup_steps):
+                if not _setup_step_is_executable(step):
+                    raise VerificationContractError(
+                        "verification_contract_invalid",
+                        f"{path}.pass_model.setup[{s_index}]",
+                        "setup step is not executable: needs a navigation "
+                        "'route' and/or a UI locator (role/name/label/text/"
+                        "selector). Abstract seed declarations cannot be run "
+                        "against a black-box clean deployment.",
+                    )
 
     actions = model.get("actions")
     if not isinstance(actions, list):

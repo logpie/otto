@@ -178,6 +178,42 @@ def _itracker_comment_mention_payload(pass_model: dict[str, object]) -> dict[str
     return payload
 
 
+def _executable_seed_setup() -> list[dict[str, object]]:
+    """Concrete executable setup the compiler must now emit for a non-cold
+    start_state (here: authenticated_seeded_workspace). Same primitives as
+    pass_model.actions — a real first-user path: register, create the
+    workspace, seed the issue the journey opens. Satisfies the
+    setup-precondition contract (journey_contracts._setup_step_is_executable)
+    so these fixtures isolate exactly what their test targets (observable
+    repair / lint-warn), not the orthogonal setup contract."""
+
+    return [
+        {
+            "id": "setup.register",
+            "route": "/register",
+            "role": "button",
+            "name": "Create account",
+            "inputs": [
+                {"label": "Email", "value": "alice@example.com"},
+                {"label": "Password", "value": "Passw0rd!"},
+            ],
+        },
+        {
+            "id": "setup.workspace",
+            "role": "button",
+            "name": "Create workspace",
+            "inputs": [{"label": "Workspace name", "value": "Acme"}],
+        },
+        {
+            "id": "setup.issue",
+            "route": "/acme/issues",
+            "role": "button",
+            "name": "Create issue",
+            "inputs": [{"label": "Title", "value": "Fix login"}],
+        },
+    ]
+
+
 def _weak_comment_mention_pass_model() -> dict[str, object]:
     tautological = {
         "kind": "text_visible",
@@ -186,7 +222,7 @@ def _weak_comment_mention_pass_model() -> dict[str, object]:
     }
     return {
         "start_state": "authenticated_seeded_workspace",
-        "setup": [],
+        "setup": _executable_seed_setup(),
         "actions": [
             {
                 "id": "comment.mention",
@@ -218,7 +254,7 @@ def _strong_comment_mention_pass_model() -> dict[str, object]:
     }
     return {
         "start_state": "authenticated_seeded_workspace",
-        "setup": [],
+        "setup": _executable_seed_setup(),
         "actions": [
             {
                 "id": "comment.mention",
@@ -622,6 +658,10 @@ def test_webapp_root_cold_start_journey_gap_warns() -> None:
     spec = _valid_spec()
     spec.behavior_journeys[0]["start_state"] = "authenticated_seeded_workspace"
     spec.behavior_journeys[0]["entry_route"] = "/app"
+    # The journey is now non-cold; the setup-precondition contract requires
+    # executable setup. Provide it so this test still isolates the orthogonal
+    # concern it targets — the soft "no root cold-start journey" lint warning.
+    spec.behavior_journeys[0]["pass_model"]["setup"] = _executable_seed_setup()
 
     warnings = validate_structured_spec(spec, strict=True)
 

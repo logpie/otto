@@ -239,6 +239,25 @@ def _run_one_journey(
         context = browser.new_context(viewport={"width": 1280, "height": 720})
         page = context.new_page()
         _wire_page_events(page, network_events, console_errors)
+        setup_failure = _run_setup(
+            page,
+            pass_model,
+            base_url,
+            timeout_ms=timeout_ms,
+            timeout_error_type=timeout_error_type,
+        )
+        if setup_failure:
+            return _finalize_journey(
+                journey,
+                status="fail",
+                detail=f"setup precondition failed: {setup_failure}",
+                proof_usable=True,
+                journey_dir=journey_dir,
+                page=page,
+                network_events=network_events,
+                console_errors=console_errors,
+                artifacts=artifacts,
+            )
         route = _ready_route(journey, pass_model)
         target_url = base_url.rstrip("/") + route
         response = page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
@@ -362,6 +381,91 @@ def _run_one_journey(
                     closer.close()
                 except Exception:
                     pass
+
+
+def _run_setup(
+    page: Any,
+    pass_model: dict[str, Any],
+    base_url: str,
+    *,
+    timeout_ms: int,
+    timeout_error_type: type[Exception],
+) -> str:
+    """Execute pass_model.setup to establish the journey's declared
+    start_state from a clean deployment, BEFORE navigating to entry_route.
+
+    Skipping setup is the resume16o root cause: non-cold journeys
+    (start_state needs a seeded workspace/issue) then false-fail "control
+    absent" on a correct product. Setup ESTABLISHES state; it does not
+    assert observables (that is the journey's job). A declared input/control
+    that cannot be resolved fails the step loudly so a mis-compiled setup
+    surfaces as a precondition failure — never a silent skip, never a
+    false-pass. The contract layer (journey_contracts) already guarantees
+    every setup step is executable; this runs it."""
+
+    steps = pass_model.get("setup") if isinstance(pass_model, dict) else None
+    if not isinstance(steps, list):
+        return ""
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        failure = _run_setup_step(
+            page,
+            step,
+            base_url,
+            timeout_ms=timeout_ms,
+            timeout_error_type=timeout_error_type,
+        )
+        if failure:
+            label = step.get("id") or step.get("route") or "<unnamed>"
+            return f"step[{index}] ({label}): {failure}"
+    return ""
+
+
+def _run_setup_step(
+    page: Any,
+    step: dict[str, Any],
+    base_url: str,
+    *,
+    timeout_ms: int,
+    timeout_error_type: type[Exception],
+) -> str:
+    route = str(step.get("route") or "").strip()
+    if route:
+        try:
+            page.goto(
+                base_url.rstrip("/") + route,
+                wait_until="domcontentloaded",
+                timeout=timeout_ms,
+            )
+        except timeout_error_type:
+            return f"navigation to {route!r} timed out"
+    for fill in _input_specs(step):
+        field, field_label = _input_locator(page, fill)
+        if field is None or field.count() == 0:
+            sfield, sflabel = _semantic_locator(page, fill)
+            if sfield is not None and sfield.count() > 0:
+                field, field_label = sfield, sflabel
+            else:
+                return f"required setup input absent: {field_label}"
+        field.fill(str(fill.get("value") or ""), timeout=timeout_ms)
+    # Click a control only if the step declares one. _action_locator
+    # returns None when no control locator keys are present (a
+    # navigation-only step legitimately declares just a route + inputs).
+    locator, control = _action_locator(page, step)
+    if locator is not None:
+        if locator.count() == 0:
+            sloc, slabel = _semantic_locator(page, step)
+            if sloc is not None and sloc.count() > 0:
+                locator, control = sloc, slabel
+            else:
+                return f"required setup control absent: {control}"
+        try:
+            locator.wait_for(state="visible", timeout=timeout_ms)
+            locator.click(timeout=timeout_ms)
+        except timeout_error_type:
+            return f"setup control not actionable: {control}"
+    return ""
 
 
 def _run_action(

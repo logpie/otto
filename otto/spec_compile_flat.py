@@ -563,6 +563,7 @@ Guidance:
 - Webapp UI journeys use `verification_level: "ui"` and a pass_model with accessible locators: role/name for controls, label/name for inputs, and text/role/name/label assertions for resulting UI. Avoid CSS selectors and data-testids unless no accessible locator exists.
 - Every state-changing UI pass_model action must include `success_observables` with a non-tautological post-action observable tied to one of that journey's covered primary actions or to a concrete entity/effect. Example: after `comment.mention`, assert that the mentioned user's inbox contains the comment/issue title; do not merely assert "comment text appears" or "route loaded".
 - The action-level observable, top-level `success_observables`, and `final_dom_assertions` should all point at the same post-action entity/effect so the runner can prove the button actually changed user-visible state.
+- `pass_model.setup` establishes the journey's `start_state` from a COLD clean deployment (empty database, no session) BEFORE `entry_route` is opened. If `start_state` is one of the declared `cold_start_states` ids, `setup` MUST be `[]` — the journey's own `actions` bootstrap everything. For ANY other `start_state` (e.g. a seeded workspace, an existing issue, a second member), `setup` MUST be a non-empty ORDERED list of CONCRETE EXECUTABLE steps that create that precondition by driving the real product exactly as a first-time user would, each step using the SAME primitives as `actions`: an optional navigation `route` and/or an accessible `role`/`name`/`label`/`text` locator plus `inputs`. NEVER emit an abstract declaration such as `{{"action":"seed","entity":"issue","fields":{{...}}}}` — the verifier runs against a black-box deployment and cannot seed a database it does not own; an empty OR abstract `setup` for a non-cold `start_state` is a hard schema failure. Concrete executable setup example for `start_state: "workspace_with_issue"`, `entry_route: "/issues/ENG-1"`: `"setup": [{{"id":"setup.register","route":"/register","role":"button","name":"Create account","inputs":[{{"label":"Email","value":"alice@example.com"}},{{"label":"Password","value":"Passw0rd!"}}]}}, {{"id":"setup.workspace","role":"button","name":"Create workspace","inputs":[{{"label":"Workspace name","value":"Acme"}},{{"label":"Team identifier","value":"ENG"}}]}}, {{"id":"setup.issue","route":"/acme/eng/issues","role":"button","name":"Create issue","inputs":[{{"label":"Title","value":"Set up CI pipeline"}}]}}]` — the cold-start path a real user takes to reach `start_state`.
 - API/CLI/library/service journeys use `verification_level: "api"`, the adapter `probe_kind`, and a strong pass_model: http_api needs response payload assertions/extracted state; cli_command needs stdout/stderr or filesystem effects; library_call needs expect_return or expect_raises; service_health needs health plus payload assertion.
 - For an `api` journey, `verification_level` AND `probe_kind` are JOURNEY-level fields (siblings of `pass_model`, exactly like `verification_level` is for ui journeys) — NOT keys inside `pass_model`. An api journey missing the journey-level `probe_kind` fails the schema. The `http_api` pass_model itself has NO `actions`/`final_dom_assertions` (that is the UI shape); it MUST be a `steps` array where every step has `path` + `method` + `expect_status`, and at least one step MUST carry a strong payload assertion — `expect_json`, `expect_body_contains`, `expect_json_path`, or `extract` (a status code alone is NOT sufficient and fails the contract). Concrete example for an `http_api` journey (PAT auth → POST create → GET verify), showing the journey-level fields and the pass_model together:
   `"verification_level": "api", "probe_kind": "http_api", "pass_model": {{"steps": [{{"name": "create issue", "method": "POST", "path": "/api/issues", "headers": {{"Authorization": "Bearer $PAT"}}, "body": {{"title": "Example"}}, "expect_status": 201, "expect_json": {{"identifier": "ENG-1"}}, "extract": {{"issue_id": "$.id"}}}}, {{"name": "fetch it back", "method": "GET", "path": "/api/issues/{{issue_id}}", "headers": {{"Authorization": "Bearer $PAT"}}, "expect_status": 200, "expect_body_contains": "Example"}}]}}`
@@ -592,13 +593,22 @@ YOUR PREVIOUS OUTPUT FAILED OTTO'S PASS-MODEL ADEQUACY VALIDATOR:
 
 Regenerate ONLY the offending `pass_model` for behavior journey `{target}`.
 Keep the same top-level JSON object and keep all other journeys, claims, entities,
-routes, and product fields unchanged. The repaired pass_model must satisfy this
-hard rule: every state-changing action must include at least one
-`success_observables[]` entry that is a non-tautological post-action observable
-tied to a covered primary action or entity effect. Use an executable DOM assertion
-such as text/role/name/label for the created, updated, deleted, sent, exported,
-or notified entity. Do not use route-loaded, HTTP-200, body-present, skeleton, or
-generic text as the only success observable.
+routes, and product fields unchanged. Fix the SPECIFIC failure named in `reason`
+above. The repaired pass_model must satisfy ALL of these hard rules:
+- Every state-changing action includes at least one `success_observables[]`
+  entry that is a non-tautological post-action observable tied to a covered
+  primary action or entity effect — an executable DOM assertion (text/role/
+  name/label) for the created, updated, deleted, sent, exported, or notified
+  entity. Never route-loaded, HTTP-200, body-present, skeleton, or generic
+  text as the only success observable.
+- If `start_state` is NOT one of the declared `cold_start_states` ids,
+  `pass_model.setup` is a non-empty ordered list of concrete EXECUTABLE steps
+  (each an optional navigation `route` and/or an accessible role/name/label/
+  text locator plus `inputs`) that bootstrap that precondition by driving the
+  real product as a first-time user would. An empty or abstract
+  `{{"action":"seed",...}}` setup for a non-cold `start_state` is invalid —
+  the verifier runs against a black-box deploy and cannot seed the database.
+  If `start_state` IS a declared cold start state, `setup` MUST be `[]`.
 
 Previous JSON to repair:
 ```json
