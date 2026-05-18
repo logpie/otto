@@ -1179,6 +1179,21 @@ def _oracle_focus_guidance(packet: RepairPacket) -> str:
     return "".join(parts) + "\n\n"
 
 
+_HARNESS_BLACKBOX_GUIDANCE = (
+    "The acceptance oracle, clean-verify, the UI-journey executor, and Otto "
+    "itself are a BLACK-BOX CONTRACT that is fixed and correct by definition. "
+    "NEVER read, grep, search, or reverse-engineer Otto's source, the oracle, "
+    "the journey executor, or the test harness to infer how it works — that "
+    "is out of scope, cannot change the verdict, and wastes the repair "
+    "budget. Diagnose ONLY from the product source and the failure evidence "
+    "in the repair packet: for UI-journey failures read the per-journey "
+    "artifacts (screenshot.png, dom.html, console-errors.jsonl, "
+    "network.jsonl, verdict.json) under the journeys artifact directory. Fix "
+    "the PRODUCT behavior the journeys assert so the UNMODIFIED oracle "
+    "passes; never try to satisfy the harness by guessing its internals. "
+)
+
+
 def _repair_prompt(packet: RepairPacket) -> str:
     custom_template = str(packet.repair_unit.get("prompt_template") or "").strip()
     custom_text = ""
@@ -1206,7 +1221,9 @@ def _repair_prompt(packet: RepairPacket) -> str:
         + _oracle_focus_guidance(packet)
         + f"{scope_text}Preserve the product contract, P0-P4 "
         "merge invariants, and owned-path/scope rules. "
-        "Diagnose from the complete evidence packet. Run the oracle as your "
+        "Diagnose from the complete evidence packet. "
+        + _HARNESS_BLACKBOX_GUIDANCE
+        + "Run the oracle as your "
         "acceptance loop. Stop only when the oracle passes or you can produce a "
         "structured escalation record explaining why it cannot within budget.\n\n"
         f"Repair packet: {packet.packet_path}\n"
