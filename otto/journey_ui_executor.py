@@ -1005,12 +1005,30 @@ _CANDIDATE_JS = r"""
       return 'textbox'; }
     return '';
   };
+  // Per the HTML spec only LABELABLE controls (input[not button-ish]/
+  // textarea/select/contenteditable/role=textbox|searchbox|combobox|
+  // spinbutton) are associated with a <label>. Buttons/links derive
+  // their accessible name from their OWN text/aria-label/value. Without
+  // this gate the unassociated-label sibling walk bled an adjacent
+  // field's <label> ("Password") onto the submit <button> ("Create
+  // account"), creating a duplicate recall-1.0 candidate that made the
+  // semantic resolver fail-closed on false ambiguity.
+  const labelable = (el) => {
+    const t = el.nodeName.toLowerCase();
+    if (t === 'textarea' || t === 'select') return true;
+    if (t === 'input') { const ty = (el.getAttribute('type')||'text').toLowerCase();
+      return !['button','submit','reset','image','hidden'].includes(ty); }
+    if (el.isContentEditable) return true;
+    const r = ((el.getAttribute && el.getAttribute('role')) || '').toLowerCase();
+    return ['textbox','searchbox','combobox','spinbutton'].includes(r);
+  };
   const labelFor = (el) => {
     const lb = el.getAttribute && el.getAttribute('aria-labelledby');
     if (lb) { const r = document.getElementById(lb); if (r) return (r.textContent||'').trim(); }
     if (el.id) { const l = document.querySelector(`label[for="${esc(el.id)}"]`); if (l) return (l.textContent||'').trim(); }
     let p = el.parentElement;
     while (p) { if (p.nodeName === 'LABEL') return (p.textContent||'').trim(); p = p.parentElement; }
+    if (!labelable(el)) return '';  // buttons/links: no sibling-label bleed
     let prev = el.previousElementSibling;
     while (prev) {
       if (['LABEL','SPAN','DIV','P','LEGEND'].includes(prev.nodeName)) {
