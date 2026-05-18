@@ -52,6 +52,37 @@ LeadVerdict = Literal[
     "pass", "partial", "unverified", "merge_blocked", "pending_children", "catastrophic"
 ]
 _CANONICAL_VERDICTS = ("pass", "partial", "unverified", "merge_blocked")
+
+
+def _canonical_decomposition(
+    decomposition: str,
+    emitted_subtask_ids: list[str],
+    *,
+    is_integration: bool,
+) -> str:
+    """Canonical decomposition mode for a Lead result.
+
+    A non-integration Lead that submitted real child subtasks IS a
+    decomposer: ``emitted_subtask_ids`` non-empty is ground truth that
+    decomposition happened. A stray ``begin_inline`` (which sets the
+    task-graph ``decomposition`` to ``"inline"``) must NOT silently
+    discard actually-submitted children and let otto false-stamp
+    ``partial`` on a zero-product inline worktree.
+
+    fix12-115705 (2026-05-18): the root Lead correctly decided to
+    decompose, submitted 5 child subtasks, then ALSO called
+    ``begin_inline`` → graph entry was ``decomposition="inline",
+    child_task_ids=[5]``. Both the lead.py verdict guard and
+    v5_runner.py Phase D are gated on ``decomposition == "emit"``, so the
+    5 children never ran and otto committed an empty "v5 inline build"
+    and stamped a false ``partial``. Canonicalizing emitted⇒emit at the
+    single graph-entry read point fixes both consumers
+    consistent-by-construction (NOT gate-weakening: genuine inline with
+    no emitted children, and integration Leads, are preserved).
+    """
+    if not is_integration and emitted_subtask_ids:
+        return "emit"
+    return decomposition
 _RUNTIME_HINT_LABEL_RE = re.compile(
     r"^\s*(?:[-*+>]\s*)?(?:\d+[.)]\s*)?(?:#+\s*)?"
     + r"(?:[`*_]+)?(?P<label>[A-Za-z][A-Za-z0-9 _./-]{0,80}?)(?:[`*_]+)?\s*[:=]"
@@ -238,8 +269,18 @@ async def run_lead(
         from otto.queue.task_graph import get_task
 
         graph_entry = get_task(project_dir, task_id) or {}
-        result.decomposition = graph_entry.get("decomposition") or "unknown"
         result.emitted_subtask_ids = list(graph_entry.get("child_task_ids") or [])
+        # Canonicalize at the single graph-entry read point so BOTH
+        # consumers — the verdict guard below AND v5_runner Phase D
+        # (_process_children) — see the authoritative decomposition: a
+        # Lead that emitted real child subtasks is a decomposer even if
+        # it also called begin_inline (else otto discards the submitted
+        # children and false-stamps partial on a zero-product worktree).
+        result.decomposition = _canonical_decomposition(
+            graph_entry.get("decomposition") or "unknown",
+            result.emitted_subtask_ids,
+            is_integration=(kind == "integration"),
+        )
 
         # Verdict comes from the agent's own verdict.json (written via Write).
         # Agents are responsible for running their own tests and reporting
