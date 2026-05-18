@@ -73,6 +73,24 @@ ROOT_SPEC_ARTIFACT_FILENAMES = frozenset({
 # total, so give the repair real room (same "rigid low limit is the villain"
 # pattern as the 400→1200s repair wall-clock).
 PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS = 5
+
+# Conservative wall-clock upper bound for ONE compile/repair LLM round (the
+# initial product-contract emit for a complex product runs ~10min; scoped
+# pass-model repair rounds are shorter). Used to derive the spec_compile
+# phase cap so it accommodates the phase's OWN bounded-repair loop instead
+# of a flat constant that contradicts it (v5-itracker-setupfix2-002240
+# died: flat ~1200s cap killed a converging 8-attempt repair loop at
+# round 3 while only 1205/7200s run budget was used).
+SPEC_COMPILE_PER_ATTEMPT_BUDGET_S = 600.0
+
+
+def spec_compile_attempt_budget(max_retries: int = 2) -> int:
+    """Total LLM attempts compile_flat_spec may run: shape retries + the
+    first emit + the bounded pass-model contract repair rounds. Single
+    source of truth for both the internal loop bound and the spec_compile
+    phase-cap derivation, so the cap can never contradict the loop."""
+
+    return max_retries + 1 + PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS
 PASS_MODEL_CONTRACT_REPAIR_CODES = frozenset({
     "verification_contract_invalid",
     "verification_contract_missing",
@@ -1102,7 +1120,7 @@ async def compile_flat_spec(
     total_tokens = 0
     output_tokens = 0
     first_token_ts: str | None = None
-    max_total_attempts = max_retries + 1 + PASS_MODEL_CONTRACT_REPAIR_ATTEMPTS
+    max_total_attempts = spec_compile_attempt_budget(max_retries)
     while attempts_run < max_total_attempts:
         attempts_run += 1
         active_repair_request = repair_request

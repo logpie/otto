@@ -97,9 +97,11 @@ from otto.queue.task_graph import (
     update_task_metadata,
 )
 from otto.spec_compile_flat import (
+    SPEC_COMPILE_PER_ATTEMPT_BUDGET_S,
     FlatSpec,
     SpecContractRepairExhaustedError,
     compile_flat_spec,
+    spec_compile_attempt_budget,
 )
 from otto.v5_branching import MergeWorktreeDirtyError
 
@@ -213,6 +215,21 @@ def _run_budget_remaining_s(
     started_at: float,
 ) -> float:
     return max(0.0, float(_run_budget_seconds(config)) - (time.monotonic() - started_at))
+
+
+def _spec_compile_cap_s(config: dict[str, Any]) -> float:
+    """Phase cap for spec_compile, derived from the phase's OWN bounded
+    pass-model repair budget so the cap can never contradict the loop it
+    wraps (v5-itracker-setupfix2-002240 died: a flat ~1200s cap killed a
+    monotonically-converging 8-attempt repair loop at round 3, far under
+    the run budget). Explicit operator override still wins;
+    _await_with_run_deadline still clamps this to remaining run budget
+    (the real global ceiling), so it is bounded and not gate-weakening."""
+
+    override = config.get("spec_timeout") or config.get("spec_compile_timeout_s")
+    if override:
+        return float(override)
+    return SPEC_COMPILE_PER_ATTEMPT_BUDGET_S * spec_compile_attempt_budget()
 
 
 async def _await_with_run_deadline(
@@ -4257,11 +4274,7 @@ async def run_v5_pipeline(
                     config=config,
                     started_at=started,
                     phase="spec_compile",
-                    cap_s=float(
-                        config.get("spec_timeout")
-                        or config.get("spec_compile_timeout_s")
-                        or 900
-                    ),
+                    cap_s=_spec_compile_cap_s(config),
                 )
                 result.spec = spec
                 _emit(on_event, {
