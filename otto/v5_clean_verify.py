@@ -902,13 +902,24 @@ def _ui_journeys_for_scope(
 
 
 def _frontend_base_url(port_envs: list[tuple[str | None, int]], ports: list[int]) -> str:
+    # Use `localhost`, NOT a hardcoded `127.0.0.1`, for the URL the
+    # Playwright journey executor navigates to. The dual-stack START
+    # probe (809033823) lets clean_deploy's start step PASS when a dev
+    # server binds `localhost`->`::1` (vite's default when start.sh omits
+    # --host 127.0.0.1, IPv6-first on macOS) — but the journey executor's
+    # page.goto then hit ERR_CONNECTION_REFUSED on the IPv4-only
+    # `http://127.0.0.1:<port>`, marking every journey `unverified`
+    # (oracle_infra_error). Chromium resolves `localhost` dual-stack
+    # (Happy Eyeballs) and connects whichever family the server bound —
+    # how a real user/browser reaches it. CORS already allows the
+    # localhost origin (a48de32b6), so this stays consistent.
     preferred_names = ("FE", "FRONTEND", "WEB", "UI", "CLIENT")
     for env_name, port in port_envs:
         name = str(env_name or "").upper()
         if any(marker in name for marker in preferred_names):
-            return f"http://127.0.0.1:{port}"
+            return f"http://localhost:{port}"
     if ports:
-        return f"http://127.0.0.1:{ports[0]}"
+        return f"http://localhost:{ports[0]}"
     return ""
 
 
