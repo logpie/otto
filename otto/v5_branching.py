@@ -744,15 +744,16 @@ def _merge_branch_into_worktree(
     non_noise = [f for f in files if f not in noise_set]
 
     # Layer 3: structured-file merge drivers for non-noise conflicts.
-    from otto.v5_merge_drivers import find_driver, is_discard_signal
+    from otto.v5_merge_drivers import (
+        find_driver,
+        is_discard_signal,
+        merge_source_additive_union,
+    )
     structured_resolved: list[str] = []
     truly_blocked: list[str] = []
     for f in non_noise:
         driver = find_driver(f)
-        if driver is None:
-            truly_blocked.append(f)
-            continue
-        # Read --ours and --theirs versions and ask the driver to merge.
+        # Read --ours and --theirs versions for the driver / generic union.
         ours_proc = subprocess.run(
             ["git", "show", f":2:{f}"],
             cwd=str(merge_worktree), capture_output=True, text=True,
@@ -764,7 +765,25 @@ def _merge_branch_into_worktree(
         if ours_proc.returncode != 0 or theirs_proc.returncode != 0:
             truly_blocked.append(f)
             continue
-        merged = driver(ours_proc.stdout, theirs_proc.stdout, None)
+        if driver is not None:
+            # Structured driver: exact prior behavior (base=None).
+            merged = driver(ours_proc.stdout, theirs_proc.stdout, None)
+        else:
+            # No structured driver: generic deterministic 3-way additive
+            # union for shared SOURCE files. Roots the integration_union_
+            # guard whack-a-mole — .py/.sh additively edited by sibling
+            # children had no driver -> truly_blocked -> LLM re-restore ->
+            # next child merge re-dropped sibling lines -> merge_blocked.
+            # Pure additions from both sides are kept; a true overlapping
+            # modification still returns None (honest conflict).
+            base_proc = subprocess.run(
+                ["git", "show", f":1:{f}"],
+                cwd=str(merge_worktree), capture_output=True, text=True,
+            )
+            base_text = base_proc.stdout if base_proc.returncode == 0 else ""
+            merged = merge_source_additive_union(
+                ours_proc.stdout, theirs_proc.stdout, base_text
+            )
         if merged is None:
             truly_blocked.append(f)
             continue

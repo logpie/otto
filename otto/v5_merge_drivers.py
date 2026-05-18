@@ -216,6 +216,112 @@ def merge_decisions_log(ours: str, theirs: str, base: Optional[str]) -> Optional
     return "\n".join(out) + ("\n" if not out or out[-1] != "" else "")
 
 
+def merge_source_additive_union(
+    ours: str, theirs: str, base: Optional[str]
+) -> Optional[str]:
+    """Generic deterministic 3-way merge for a source file git could not
+    auto-merge and that has no structured driver.
+
+    Uses ``git merge-file -p --diff3``: every NON-overlapping change from
+    EITHER side is kept, so two sibling children that each add distinct
+    lines to the same shared file (e.g. backend/app/auth.py) both survive
+    the integration merge. A conflict is reported ONLY where both sides
+    modified the SAME region differently — in that case we return ``None``
+    so the caller treats it as an honest conflict and NEVER silently unions
+    divergent edits (not gate-weakening; the integration_union_guard stays
+    the gate, it is now satisfiable by construction for pure additions).
+
+    ``base`` is the merge-base content ("" / None when add/add with no
+    common ancestor — then a line present on only one side is an addition
+    and is kept; genuine same-region divergence still conflicts).
+    """
+
+    import os
+    import subprocess
+    import tempfile
+
+    # No common ancestor (add/add: the file was created independently on
+    # both branches) => the two versions are divergent complete contents,
+    # NOT additive contributions to a shared file. Unioning them would
+    # silently merge divergent definitions. Block (honest conflict). The
+    # genuine F2 case always has a real base — the shared file (e.g.
+    # backend/app/auth.py) exists in the scaffold/parent before feature
+    # children branch and they ADD to it.
+    if not (base or "").strip():
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="otto-merge3-") as d:
+        op = os.path.join(d, "ours")
+        bp = os.path.join(d, "base")
+        tp = os.path.join(d, "theirs")
+        for p, c in ((op, ours), (bp, base or ""), (tp, theirs)):
+            try:
+                with open(p, "w", encoding="utf-8") as fh:
+                    fh.write(c)
+            except OSError:
+                return None
+        try:
+            cp = subprocess.run(
+                ["git", "merge-file", "-p", "--diff3", op, bp, tp],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+    # rc 0 = clean union (no overlapping changes) -> done.
+    if cp.returncode == 0:
+        return cp.stdout
+    if cp.returncode < 0:
+        return None  # git error -> honest truly_blocked
+    # rc > 0: conflict hunks. Resolve ONLY the pure-additive case: a hunk
+    # whose ||||||| base section is EMPTY means neither side removed/modified
+    # a shared base line — both sides merely INSERTED distinct lines at the
+    # same point. The integration_union_guard wants ALL contributed lines
+    # present and is order-agnostic for additions, so keep BOTH sides'
+    # inserted lines (deduped). Any hunk with a NON-empty base section means
+    # both sides modified/deleted the SAME base lines differently -> a real
+    # semantic conflict -> return None (never silently union divergent edits;
+    # not gate-weakening).
+    out: list[str] = []
+    it = iter(cp.stdout.splitlines(keepends=True))
+    for line in it:
+        if not line.startswith("<<<<<<<"):
+            out.append(line)
+            continue
+        ours_sec: list[str] = []
+        base_sec: list[str] = []
+        theirs_sec: list[str] = []
+        section = "ours"
+        closed = False
+        for inner in it:
+            if inner.startswith("|||||||"):
+                section = "base"
+            elif inner.startswith("======="):
+                section = "theirs"
+            elif inner.startswith(">>>>>>>"):
+                closed = True
+                break
+            elif section == "ours":
+                ours_sec.append(inner)
+            elif section == "base":
+                base_sec.append(inner)
+            else:
+                theirs_sec.append(inner)
+        if not closed or any(s.strip() for s in base_sec):
+            # malformed, or both sides changed shared base lines -> conflict.
+            return None
+        # Pure additive overlap: keep both sides' inserted lines, deduped,
+        # ours first (parent precedence) then theirs-only.
+        seen = set()
+        for s in (*ours_sec, *theirs_sec):
+            if s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
+    return "".join(out)
+
+
 _DRIVERS: tuple[tuple[str, MergeDriver], ...] = (
     ("package.json", merge_package_json),
     ("pyproject.toml", lambda o, t, b: None),  # let LLM handle; toml stdlib varies
