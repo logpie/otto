@@ -985,6 +985,75 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def _oracle_focus_guidance(packet: RepairPacket) -> str:
+    """Generic, data-driven repair guidance derived from the packet's own
+    oracle result — applies to ANY product, not a specific one.
+
+    Two recurring repair-budget sinks, observed across products:
+
+    1. Re-diagnosing oracle steps that ALREADY PASSED. A repair agent that
+       re-derives solved infrastructure (build, install, port binding,
+       IPv4/IPv6, deploy, CORS) burns its whole budget before touching the
+       actual failing step. Tell it explicitly which steps passed and to
+       leave their infrastructure alone.
+    2. Treating UI-journey failures as independent. The journey executor
+       runs all journeys in ONE shared, sequential browser session: an
+       earlier journey establishes state (registration/auth/seed data)
+       that later journeys depend on, so one early failure cascades into
+       many. Fixing the earliest failing journey's first assertion often
+       clears the rest. Tell it to fix in order, re-run, and not chase the
+       cascades as separate bugs.
+    """
+    res = packet.latest_oracle_result if isinstance(packet.latest_oracle_result, dict) else {}
+    steps = res.get("steps") or []
+    passed: list[str] = []
+    failed: list[str] = []
+    journeys: list[str] = []
+    for st in steps:
+        if not isinstance(st, dict):
+            continue
+        sid = str(st.get("id") or st.get("command_identity") or "").strip()
+        status = str(st.get("status") or "").lower()
+        if not sid:
+            continue
+        if status == "passed":
+            passed.append(sid)
+        elif status == "failed":
+            failed.append(sid)
+            reason = str(st.get("reason") or "")
+            if "journey" in sid.lower() and "failed:" in reason:
+                journeys = [
+                    j.strip()
+                    for j in reason.split("failed:", 1)[1].split(",")
+                    if j.strip()
+                ]
+    if not passed and not failed:
+        return ""
+    parts: list[str] = []
+    if passed:
+        parts.append(
+            "Oracle steps ALREADY PASSING — do NOT re-investigate, re-derive, "
+            "or modify their infrastructure (build, install, port binding, "
+            f"IPv4/IPv6, deploy, CORS): {sorted(set(passed))}. "
+        )
+    if failed:
+        parts.append(
+            f"Focus exclusively on the FAILING step(s): {sorted(set(failed))}. "
+        )
+    if journeys:
+        parts.append(
+            "The UI journeys execute in ONE shared, sequential browser "
+            "session: an earlier journey establishes state (e.g. "
+            "registration/auth/seed data) that later journeys depend on. "
+            f"Failing journeys, in execution order: {journeys}. Fix the "
+            "FIRST failing journey's FIRST failing assertion, re-run the "
+            "oracle, and only then proceed — later failures frequently "
+            "cascade from the first and clear once it passes. Do NOT treat "
+            "the journey failures as independent bugs. "
+        )
+    return "".join(parts) + "\n\n"
+
+
 def _repair_prompt(packet: RepairPacket) -> str:
     custom_template = str(packet.repair_unit.get("prompt_template") or "").strip()
     custom_text = ""
@@ -1009,8 +1078,8 @@ def _repair_prompt(packet: RepairPacket) -> str:
         )
     return (
         custom_text
-        +
-        f"{scope_text}Preserve the product contract, P0-P4 "
+        + _oracle_focus_guidance(packet)
+        + f"{scope_text}Preserve the product contract, P0-P4 "
         "merge invariants, and owned-path/scope rules. "
         "Diagnose from the complete evidence packet. Run the oracle as your "
         "acceptance loop. Stop only when the oracle passes or you can produce a "
