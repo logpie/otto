@@ -856,6 +856,105 @@ def _input_specs(action: dict[str, Any]) -> list[dict[str, Any]]:
     return _list_of_dicts(raw)
 
 
+_SEMANTIC_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+# Role compatibility for semantic resolution. The journey's intended role
+# and the built control's actual role need not be identical — a "button"
+# intent legitimately resolves to a link styled as a button, a "textbox"
+# to a searchbox/combobox, etc. Missing role on either side is neutral.
+_SEMANTIC_ROLE_SYNONYMS: dict[str, set[str]] = {
+    "button": {"button", "link", "menuitem", "tab"},
+    "link": {"link", "button"},
+    "textbox": {"textbox", "searchbox", "combobox"},
+    "searchbox": {"searchbox", "textbox", "combobox"},
+    "combobox": {"combobox", "textbox", "listbox"},
+    "checkbox": {"checkbox", "switch"},
+    "switch": {"switch", "checkbox"},
+}
+
+
+def _semantic_tokens(text: Any) -> list[str]:
+    return _SEMANTIC_TOKEN_RE.findall(str(text or "").lower())
+
+
+def _semantic_role_compatible(intent_role: str, cand_role: str) -> bool:
+    ir = (intent_role or "").strip().lower()
+    cr = (cand_role or "").strip().lower()
+    if not ir or not cr:
+        return True
+    if ir == cr:
+        return True
+    return cr in _SEMANTIC_ROLE_SYNONYMS.get(ir, {ir})
+
+
+def _semantic_match(
+    intent: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    *,
+    min_recall: float = 0.6,
+    margin: float = 0.15,
+) -> dict[str, Any] | None:
+    """Deterministically resolve a journey step's intended control to the
+    best-matching page element, robust to accessible-name/label drift.
+
+    Phase 1 of the Hybrid journey resolver (see
+    plan-hybrid-journey-resolver.md). The brittle root cause: compile-spec
+    emits literal Playwright selectors; independent leaf agents build the
+    UI with their own reasonable wording ("Create workspace" vs the
+    journey's "Create your workspace"; aria-label "Search query" vs
+    "Search"; an unassociated ``<label>Name</label>``). A strict string
+    match then fails a functionally-correct product.
+
+    ``intent`` = the step's {role, name|label|text} treated as fuzzy
+    INTENT, not exact match. ``candidates`` = page elements, each
+    {role, name, label, text, placeholder, value, aria_label, selector}.
+
+    Scores by token-recall of the intent phrase within each candidate's
+    accessible text, gated by role compatibility. Returns the best
+    candidate ONLY if it clears ``min_recall`` AND is unambiguous (beats
+    the runner-up by ``margin``); otherwise None — fail CLOSED, never
+    guess. This keeps the no-false-pass invariant: a wrong/ambiguous
+    resolution yields "absent" (a real failure), never a fake pass; and
+    the post-action assertion stays deterministic regardless.
+    """
+    want = str(
+        intent.get("name") or intent.get("label") or intent.get("text") or ""
+    ).strip()
+    want_toks = _semantic_tokens(want)
+    if not want_toks or not candidates:
+        return None
+    want_set = set(want_toks)
+    want_phrase = " ".join(want_toks)
+    irole = str(intent.get("role") or "").strip().lower()
+    scored: list[tuple[float, int, dict[str, Any]]] = []
+    for cand in candidates:
+        if not _semantic_role_compatible(irole, str(cand.get("role") or "")):
+            continue
+        cand_text = " ".join(
+            str(cand.get(k) or "")
+            for k in ("name", "label", "text", "placeholder", "value", "aria_label")
+        )
+        cand_toks = _semantic_tokens(cand_text)
+        cand_set = set(cand_toks)
+        if not cand_set:
+            continue
+        recall = len(want_set & cand_set) / len(want_set)
+        # Full-phrase containment is a strong specificity signal but only
+        # ever co-occurs with recall == 1.0, so it sharpens the margin /
+        # tie-break without ever rescuing a low-recall match.
+        bonus = 0.25 if want_phrase and want_phrase in " ".join(cand_toks) else 0.0
+        scored.append((recall + bonus, len(cand_set), cand))
+    if not scored:
+        return None
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    best_score, _, best = scored[0]
+    if best_score < min_recall:
+        return None
+    if len(scored) > 1 and best_score - scored[1][0] < margin:
+        return None  # ambiguous — fail closed, do not guess
+    return best
+
+
 def _action_locator(page: Any, action: dict[str, Any]) -> tuple[Any | None, str]:
     locator, label = _generic_locator(
         page,
