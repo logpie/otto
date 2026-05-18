@@ -2245,6 +2245,29 @@ def _subtree_verify_start_sh(
         deploy_budget_s = timeout_s * 3 + port_wait_s
         deadline = time.time() + deploy_budget_s
         start_exited_early = False
+        # Per-port LISTEN/connect TIMELINE. The final `Port holders` snapshot
+        # (captured after the loop) could not tell whether a server bound
+        # late vs. was listening-but-unreachable the whole window. Sampling
+        # lsof LISTEN state + connect result over time disambiguates that on
+        # the next failure (e.g. ":5173 lsof=nothing until t=280s" → the dev
+        # server was starved by the concurrent cold backend install, not a
+        # probe bug; ":5173 lsof=node/PID from t=2s connect=fail" → bound but
+        # not serving). Diagnostic only — does not change pass/fail.
+        loop_t0 = time.time()
+        timeline: list[str] = []
+        _iter = 0
+        _last_state: dict[int, str] = {}
+
+        def _sample_timeline() -> None:
+            el = int(time.time() - loop_t0)
+            for port in declared_ports:
+                st = _port_listeners([port])
+                conn = "ok" if port in listening else "fail"
+                key = f"{st}:{conn}"
+                if _last_state.get(port) != key:
+                    _last_state[port] = key
+                    timeline.append(f"t={el}s {st} connect={conn}")
+
         while time.time() < deadline:
             ret = proc.poll()
             if ret is not None and ret != 0 and not start_exited_early:
@@ -2274,6 +2297,9 @@ def _subtree_verify_start_sh(
             if declared_ports and listening == set(declared_ports):
                 log("verify_from_clean: all declared ports listening")
                 break
+            _iter += 1
+            if declared_ports and _iter % 6 == 1:
+                _sample_timeline()
             time.sleep(1.5)
 
         steps.append("port_probe")
@@ -2282,12 +2308,15 @@ def _subtree_verify_start_sh(
             if missing:
                 tail = _deploy_tail()
                 who = _port_listeners(missing)
+                _sample_timeline()
+                tl = " | ".join(timeline[-18:]) or "(no state changes)"
                 return (
                     False,
                     "ports_not_listening",
                     f"After clean-state deploy, ports {missing} did not bind "
                     f"within {deploy_budget_s}s (install-inclusive). Listening: "
                     f"{sorted(listening) or 'none'}. Port holders [{who}]. "
+                    f"Bind timeline: {tl}. "
                     f"start.sh output (tail): {tail[-1200:]!r}",
                     steps,
                     sorted(listening),

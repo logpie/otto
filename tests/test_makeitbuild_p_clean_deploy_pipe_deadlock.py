@@ -94,3 +94,9 @@ def test_failure_path_captures_startsh_output(tmp_path: Path) -> None:
     assert "SENTINEL_NEVERBIND_9999" in (msg or ""), (
         "failure message must persist start.sh output for diagnosis"
     )
+    # The per-port LISTEN/connect timeline must be present so the next
+    # failure is root-causable (bound-late vs listening-but-unreachable).
+    assert "Bind timeline:" in (msg or ""), (
+        "ports_not_listening must include the bind/listen timeline"
+    )
+    assert "Port holders [" in (msg or "")
