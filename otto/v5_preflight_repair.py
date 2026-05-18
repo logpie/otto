@@ -562,6 +562,110 @@ def _changed_paths_since_repair_start(
     return sorted(dict.fromkeys(paths))
 
 
+def _charter_feature_owned_map(
+    product_contract: dict[str, Any],
+) -> dict[str, list[str]]:
+    """Architect-authoritative, worktree-relative feature ownership from the
+    CHARTER Information Architecture contract carried in the repair packet.
+
+    Returns ``{}`` when the CHARTER is absent / unparseable so callers fall
+    back to the original allowed_paths with no behavior change.
+    """
+    charter = (
+        product_contract.get("charter")
+        if isinstance(product_contract, dict)
+        else None
+    )
+    text = charter.get("text") if isinstance(charter, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return {}
+    try:
+        from otto.v5_capability_inventory import (
+            parse_feature_owned_paths_from_charter,
+        )
+
+        owned_map, _findings = parse_feature_owned_paths_from_charter(text)
+    except Exception:  # pragma: no cover - defensive: never break the gate
+        return {}
+    if not isinstance(owned_map, dict):
+        return {}
+    return {
+        str(tid): [str(p) for p in (paths or []) if str(p).strip()]
+        for tid, paths in owned_map.items()
+        if str(tid).strip()
+    }
+
+
+def _common_top_dir(paths: list[str]) -> str:
+    """The single shared leading path segment across ALL ``paths``, else "".
+
+    Recovers the product sub-directory the architect scaffolded the product
+    into (e.g. ``itracker``) from authoritative worktree-relative CHARTER
+    paths. A structured signal from the architect's own contract — not prose
+    parsing and not a "strip one arbitrary segment" heuristic.
+    """
+    tops: set[str] = set()
+    for raw in paths:
+        norm = str(raw or "").strip().strip("/")
+        if not norm:
+            continue
+        head = norm.split("/", 1)[0]
+        if head:
+            tops.add(head)
+    return next(iter(tops)) if len(tops) == 1 else ""
+
+
+def _reconcile_scope_allowed_paths(
+    *,
+    product_contract: dict[str, Any],
+    task_id: str,
+    allowed_paths: list[str],
+    conflict_scope_paths: list[str],
+) -> list[str]:
+    """Reconcile the repair scope into git's worktree-relative coordinate
+    system before the composite-gate scope check.
+
+    At child-verify time ``repair_unit.allowed_paths`` can be the architect's
+    stale *product-relative* initial-decomposition scope (e.g.
+    ``backend/routers/auth.py``) while git ``changed_paths`` are
+    worktree-relative (e.g. ``itracker/backend/routers/auth.py``) because the
+    architect scaffolds the product under a sub-directory. Comparing the two
+    raw coordinate systems flags every repair edit as a scope_violation and
+    exhausts the bounded repair budget (2026-05-18 setupfix3, child
+    v5-13ba9d13c4a2).
+
+    Reconciliation (consistent-by-construction, NOT gate-weakening):
+      * add the architect's AUTHORITATIVE worktree-relative
+        ``feature_owned_paths[task_id]`` from the CHARTER IA in the packet —
+        same coordinate system as git;
+      * derive the product sub-directory from the common top directory of the
+        authoritative CHARTER paths and also admit the stale product-relative
+        ``allowed_paths`` re-expressed under that KNOWN prefix (covers the
+        case where the CHARTER has no entry for the task but other tasks pin
+        the product root).
+
+    Only ADDS paths the architect's own authoritative contract attributes to
+    this task (or the same stale scope re-expressed in the worktree
+    coordinate system). A path genuinely outside the task's ownership still
+    violates. Exact original behavior when the CHARTER is absent/unparseable.
+    """
+    base = [*allowed_paths, *conflict_scope_paths]
+    owned_map = _charter_feature_owned_map(product_contract)
+    if not owned_map:
+        return sorted(dict.fromkeys(base))
+    extra: list[str] = list(owned_map.get(str(task_id), []))
+    product_root = _common_top_dir(
+        [p for paths in owned_map.values() for p in paths]
+    )
+    if product_root:
+        prefix = product_root.strip("/")
+        for raw in allowed_paths:
+            rel = str(raw or "").strip().strip("/")
+            if rel and rel.split("/", 1)[0] != prefix:
+                extra.append(f"{prefix}/{rel}")
+    return sorted(dict.fromkeys([*base, *extra]))
+
+
 def _evaluate_composite_gate(
     packet: RepairPacket,
     oracle_result: CleanOracleResult,
@@ -574,8 +678,18 @@ def _evaluate_composite_gate(
     changed_since_baseline = _changed_paths_since_repair_start(packet, worktree, baseline)
     allowed_paths = [str(path) for path in (packet.repair_unit.get("allowed_paths") or [])]
     conflict_scope_paths = _conflict_scope_paths(packet)
-    effective_allowed_paths = sorted(dict.fromkeys([*allowed_paths, *conflict_scope_paths]))
     scope_policy = str(packet.repair_unit.get("scope_policy") or "unrestricted")
+    if scope_policy == "allowed_paths":
+        effective_allowed_paths = _reconcile_scope_allowed_paths(
+            product_contract=packet.product_contract,
+            task_id=str(packet.repair_unit.get("task_id") or ""),
+            allowed_paths=allowed_paths,
+            conflict_scope_paths=conflict_scope_paths,
+        )
+    else:
+        effective_allowed_paths = sorted(
+            dict.fromkeys([*allowed_paths, *conflict_scope_paths])
+        )
     scope_violations = (
         [
             path for path in changed_since_baseline
