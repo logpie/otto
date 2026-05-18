@@ -58,3 +58,101 @@ output/
 # Phase 5 live-harness artifacts (videos/screenshots/logs from real-LLM runs)
 # — local evidence only; pushed via PR description, not git.
 bench-results/
+
+# --- otto v5 default ignores (BEGIN) ---
+# Otto-managed default ignore set. Build/test agents commonly produce these
+# artifacts; without them in .gitignore, agent commits include cache files
+# that block parent integration merges across worktrees.
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg
+.venv/
+venv/
+env/
+
+# Also match SYMLINKS named the same way (no trailing slash matches
+# symlinks where the trailing-slash pattern only matches real dirs).
+# Otto's install-dir-sharing propagates these as symlinks; without the
+# no-slash patterns git tracks them and breaks subsequent merges.
+.venv
+venv
+
+# Node
+node_modules/
+node_modules
+.npm/
+.pnpm-store/
+.yarn/
+*.log
+npm-debug.log*
+yarn-error.log
+.parcel-cache/
+.next/
+.nuxt/
+.turbo/
+.cache/
+.vite/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Test runtime artifacts
+playwright-report/
+test-results/
+coverage/
+
+# Otto runtime / orchestration artifacts
+.worktrees/
+.worktrees
+otto_logs/
+otto_logs
+# Otto's own side-channels (merge-conflict packets, amendment requests,
+# self-check). Written under .otto/ DURING integration by v5_branching/
+# build; if not ignored they leave the tree dirty and block
+# git_checkout_clean — and because .otto/ is filtered from agent-facing
+# surfaces, the repair agent is structurally blind to the blocker and
+# burns its whole wall. Same class as otto_logs/.
+.otto/
+.otto
+uploads/
+uploads
+
+# TypeScript incremental build cache — frequent cause of cross-worktree
+# merge conflicts (different siblings produce different .tsbuildinfo for
+# the same project). Tooling regenerates these on demand; don't commit.
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+tsconfig.*.tsbuildinfo
+
+# Runtime artifacts — SQLite DBs, logs, pids. Same shape as tsbuildinfo:
+# agents run their code, the runtime creates these files, `git add -A`
+# tracks them, then merges conflict because each sibling has a divergent
+# binary. Live run on 2026-05-13 had `api/itracker.db` block a merge.
+*.db
+*.db.bak
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.db-journal
+*.db-wal
+*.db-shm
+*-wal
+*-shm
+*.pid
+*.log
+# --- otto v5 default ignores (END) ---
