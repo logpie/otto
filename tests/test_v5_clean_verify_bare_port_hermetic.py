@@ -103,3 +103,65 @@ def test_ephemeral_plan_remaps_bare_PORT_no_fixed_8000_in_probe(
     assert 5173 not in probe, (
         f"fixed 5173 still in probe set; probe={probe}"
     )
+
+
+# --- alias-env collapse (linkboard-p0seed-200150, 2026-05-18) --------------
+#
+# Root cause (FRESH Linkboard P0-seed run, terminal
+# `clean_deploy_ports_not_listening [block]: ports [58605] did not bind`,
+# both servers actually up): the P0-seeded start.sh declares
+# ``FRONTEND_PORT="${FRONTEND_PORT:-5173}"`` and aliases the conventional
+# external port via ``PORT="${PORT:-$FRONTEND_PORT}"``; the generated
+# CHARTER port table also exposes that SAME single Vite server under the
+# name ``PORT`` (``| Frontend | 5173 | PORT | / |``). So
+# ``_parse_declared_port_envs`` correctly returns BOTH named envs for the
+# one logical frontend port: ``[('FRONTEND_PORT', 5173), ('PORT', 5173),
+# ('API_PORT', 8000)]``. ``_ephemeral_port_plan`` then allocated a SEPARATE
+# ephemeral port per distinct env_name — two different ephemerals for the
+# one Vite listener — so the probe set had 3 ports but only 2 ever bound,
+# producing a false ``ports_not_listening`` hard-block. The pre-existing
+# ``orig_to_eph`` "same original port == same logical service" collapse was
+# consulted ONLY for unnamed prose duplicates, never for two distinct NAMED
+# envs aliasing the same port.
+#
+# Fix (consistent-by-construction, NOT gate-weakening): a named env whose
+# original logical port was already remapped by an earlier named env reuses
+# that shared ephemeral instead of allocating a second one nothing binds —
+# the same invariant the prose-duplicate collapse already relies on. The
+# clean-deploy / ports-not-listening gates are unchanged; the probe set is
+# made to match the actual listener count.
+
+
+def test_aliased_named_envs_for_one_port_collapse_to_one_ephemeral() -> None:
+    """Two distinct NAMED envs that point at the same original logical port
+    (``FRONTEND_PORT`` from start.sh + ``PORT`` from the CHARTER table, both
+    5173, one Vite listener) must remap to the SAME ephemeral, and the probe
+    set must have exactly two ports (frontend + backend) — not three."""
+    port_envs = [("FRONTEND_PORT", 5173), ("PORT", 5173), ("API_PORT", 8000)]
+    overrides, probe, effective = _ephemeral_port_plan(port_envs)
+    assert overrides["FRONTEND_PORT"] == overrides["PORT"], (
+        f"aliased frontend envs got different ephemerals (phantom 3rd port "
+        f"-> false ports_not_listening); overrides={overrides}"
+    )
+    assert overrides["API_PORT"] != overrides["FRONTEND_PORT"], (
+        f"backend collapsed onto frontend; overrides={overrides}"
+    )
+    assert len(probe) == 2, (
+        f"probe must match the 2 real listeners (1 Vite + 1 uvicorn), "
+        f"not 3; probe={probe} effective={effective}"
+    )
+    eff = {en: p for en, p in effective}
+    assert eff["FRONTEND_PORT"] == eff["PORT"]
+    assert str(eff["FRONTEND_PORT"]) == overrides["FRONTEND_PORT"]
+
+
+def test_distinct_logical_ports_still_get_distinct_ephemerals() -> None:
+    """Guard: envs with DIFFERENT original ports must still each get their
+    own ephemeral (no over-collapse)."""
+    overrides, probe, _effective = _ephemeral_port_plan(
+        [("PORT", 8000), ("FRONTEND_PORT", 5173)]
+    )
+    assert overrides["PORT"] != overrides["FRONTEND_PORT"], (
+        f"distinct logical ports wrongly collapsed; overrides={overrides}"
+    )
+    assert len(probe) == 2, f"probe={probe}"

@@ -1840,10 +1840,26 @@ def _ephemeral_port_plan(
     used: set[int] = set()
     for env_name, port in port_envs:
         if env_name and env_name not in overrides:
-            p = _free_ephemeral_port(used)
-            overrides[env_name] = p
-            used.add(p)
-            orig_to_eph.setdefault(port, p)
+            # Two distinct NAMED envs that point at the SAME original
+            # logical port are ONE listener, not two: e.g. the seeded
+            # start.sh declares ``FRONTEND_PORT=${FRONTEND_PORT:-5173}``
+            # and aliases the conventional external port via
+            # ``PORT="${PORT:-$FRONTEND_PORT}"`` while the CHARTER port
+            # table exposes that same Vite server again as ``PORT``. The
+            # frontend binds once. Reuse the ephemeral already chosen for
+            # that logical port instead of allocating a second one nothing
+            # binds (which made the probe set out-number the real listeners
+            # and fired a false ``ports_not_listening``) — the very
+            # "same original port == same logical service" invariant the
+            # prose-duplicate collapse in ``_eff`` already relies on.
+            shared = orig_to_eph.get(port)
+            if shared is not None:
+                overrides[env_name] = shared
+            else:
+                p = _free_ephemeral_port(used)
+                overrides[env_name] = p
+                used.add(p)
+                orig_to_eph[port] = p
 
     def _eff(env_name: str | None, port: int) -> int:
         if env_name and env_name in overrides:
