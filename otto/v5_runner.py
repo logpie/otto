@@ -4690,6 +4690,20 @@ async def run_v5_pipeline(
                     on_event=on_event,
                 )
             if _preflight_repair_escalated(preflight_result):
+                # Phase 1.2 / Task #8: the escalated path skips
+                # _commit_integration_agent_changes, so a timed-out repair
+                # agent's near-complete work would be discarded. Preserve
+                # it (commit what it was killed mid-committing) so it LANDS.
+                _pres_ok, _pres_det = _preserve_timed_out_repair_work(project_dir)
+                _emit(on_event, {
+                    "event": "integration_repair_work_preserved",
+                    "task_id": ROOT_TASK_ID,
+                    "preserved": bool(_pres_ok),
+                    "detail": _pres_det,
+                    "_written_at": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                    ),
+                })
                 integration_result = _preflight_blocked_result(
                     task_id=ROOT_TASK_ID,
                     preflight_result=preflight_result,
@@ -6908,6 +6922,29 @@ def _integration_terminal_verdict(
     ):
         return "merge_blocked", reason
     return "partial", reason
+
+
+def _preserve_timed_out_repair_work(project_dir: Path) -> tuple[bool, str]:
+    """Phase 1.2 / Task #8: a timed-out/escalated integration-repair agent
+    may have left near-complete work uncommitted (Linkboard e2e: a
+    tsc-clean BookmarksPage.tsx fix killed mid `git add -A && git commit`
+    at the 1199s wall, then discarded). Preserve it — commit the worktree
+    the agent was killed mid-committing so the work LANDS (Part A makes the
+    terminal `partial`+annotated) instead of being thrown away. Locked
+    invariant: bugs are acceptable output; discarded work is not."""
+    from otto.v5_branching import commit_worktree, git_status_porcelain
+
+    dirty = git_status_porcelain(project_dir)
+    if not dirty:
+        return False, "worktree clean — nothing to preserve"
+    ok, detail = commit_worktree(
+        worktree_path=project_dir,
+        message=(
+            "otto: preserve timed-out integration-repair work "
+            "(Phase 1.2 Task #8)"
+        ),
+    )
+    return bool(ok), str(detail)
 
 
 def _record_task_merge_blocked_reason(
