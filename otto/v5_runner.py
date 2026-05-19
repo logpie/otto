@@ -8634,6 +8634,31 @@ def _run_integration_smoke_preflight(
             phase,
             worktree_path,
         )
+        # FOUNDATION-GATE CLEAN-BOOT PROBE scope (consistent-by-construction
+        # with the foundation child's OWN verify_result). The probe exists to
+        # catch the boot/build-clean class EARLY — does the MERGED foundation
+        # scaffold install/build/start/serve clean before the ~50min feature
+        # children absorb a broken env. The product ``behavior_journeys`` are
+        # Feature scope: a passed foundation legitimately ships only shared
+        # infra + stub pages, and its own verify_result classifies the
+        # behavior journeys ``passed=False`` "not runnable at foundation
+        # level — Feature A/B will implement the real pages" while STILL
+        # passing the foundation. Running those journeys here against the
+        # stub-only foundation is a category error — they can never pass, and
+        # they burn the entire bounded foundation-clean-boot repair turn
+        # re-implementing Feature scope (observed p0fix3: 8 commits, 1199s
+        # timeout, architect re-entry, budget-terminal merge_blocked). Pass an
+        # explicit EMPTY behavior-journey list for this phase only: it
+        # short-circuits ``_load_clean_oracle_journeys`` BEFORE the schema_v4
+        # ``>=1 behavior journey`` validator, so 0 behavior journeys run while
+        # the clean_deploy/install/build/start/health step DAG — which is
+        # independent of behavior_journeys and is the entire reason this probe
+        # exists — stays FULLY gated (NOT gate-weakening; the p0fix2
+        # npm-run-build rollup block would still fire here). Every other
+        # phase keeps the default (None => the full compiled journeys).
+        _probe_behavior_journeys: list[dict[str, Any]] | None = (
+            [] if phase == "foundation_clean_boot" else None
+        )
         clean_oracle_result = verify_from_clean_oracle(
             worktree_path,
             scope="subtree",
@@ -8643,6 +8668,7 @@ def _run_integration_smoke_preflight(
             journey_scope=journey_scope,
             spec_path=spec_path,
             journey_artifact_dir=journey_artifact_dir,
+            behavior_journeys=_probe_behavior_journeys,
         )
         payload["clean_oracle_result"] = clean_oracle_result.to_jsonable()
         smoke_issues = preflight_issues_from_clean_oracle(

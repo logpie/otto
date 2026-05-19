@@ -245,3 +245,110 @@ def test_seed_idempotent_when_probe_spec_already_present(
     assert _seed_foundation_gate_spec(fg) is True
     # not overwritten by the canonical copy
     assert (fg / "spec" / "spec.json").read_text() == '{"already": "here"}'
+
+
+# --- the C1 PROBE-SCOPING root-fix (p0fix3, 2026-05-18) ----------------------
+#
+# Root cause (FRESH Linkboard p0fix3 / linkboard-p0fix3-215219, terminal
+# `Verdict: merge_blocked, $0, 2400.0s`), PROVEN from the foundation child's
+# OWN summary.json (task v5-b0fb62a87036, verdict=pass, verify verdict=pass):
+#   journeys[e2e_register_bookmark_tag]   passed=False
+#     "UI journey not runnable at foundation level — stub pages only.
+#      Feature A and B will implement the real pages."
+#   journeys[api_register_tag_bookmark_filter] passed=False
+#     "API journey not runnable yet — Feature A/B scope. Smoke tests verify
+#      app boots and /api/health returns 200."
+# Otto's foundation verify CORRECTLY passes the foundation (those journeys
+# are Feature scope, deferred) — but the foundation_clean_boot probe then ran
+# the full compiled behavior_journeys against the merged stub-only foundation
+# (`detail: required control absent: role='button' name='Register'`) and
+# blocked `ui_journey_failed`, burning the entire bounded repair turn
+# re-implementing Feature scope (8 commits, 1199s timeout, architect
+# re-entry, budget-terminal). db1fcb559 had ALREADY eliminated the
+# npm-run-build rollup class (the probe got PAST clean_deploy to journeys —
+# the exact p0fix2 terminal was gone), isolating this as a pure
+# probe-SCOPING defect.
+#
+# Fix (consistent-by-construction with the foundation's own verify boundary,
+# NOT gate-weakening): for phase 'foundation_clean_boot' the preflight passes
+# an explicit EMPTY behavior-journey list — it short-circuits
+# _load_clean_oracle_journeys BEFORE the schema_v4 ">=1 behavior journey"
+# validator (so 0 journeys run, no spec-load rejection) while the
+# clean_deploy/install/build/start/health step DAG — independent of
+# behavior_journeys and the entire reason e6cd82173 exists — stays FULLY
+# gated. Every OTHER phase keeps the default (None => full compiled
+# journeys): no regression to integration/feature verification.
+
+
+def test_foundation_clean_boot_runs_zero_behavior_journeys(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """phase 'foundation_clean_boot' => verify_from_clean_oracle is called
+    with behavior_journeys == [] (explicit empty list: 0 behavior journeys,
+    boot/build smoke only). RED before the fix (the call passed no
+    behavior_journeys kwarg at all)."""
+    import otto.v5_runner as R
+
+    captured: dict[str, object] = {}
+
+    class _FakeResult:
+        def to_jsonable(self) -> dict[str, object]:
+            return {}
+
+    def _fake_verify(_worktree_path: Path, **kw: object) -> _FakeResult:
+        captured["behavior_journeys"] = kw.get("behavior_journeys", "ABSENT")
+        return _FakeResult()
+
+    monkeypatch.setattr(R, "verify_from_clean_oracle", _fake_verify)
+    monkeypatch.setattr(
+        R, "preflight_issues_from_clean_oracle", lambda *_a, **_k: []
+    )
+
+    R._run_integration_smoke_preflight(
+        worktree_path=tmp_path,
+        task_id="v5-foundation",
+        phase="foundation_clean_boot",
+        spec_path=tmp_path / "spec" / "spec.json",
+    )
+    assert captured["behavior_journeys"] == [], (
+        "foundation_clean_boot probe must run ZERO behavior journeys "
+        "(boot/build smoke); got "
+        f"{captured['behavior_journeys']!r}"
+    )
+
+
+def test_other_phases_keep_full_behavior_journeys_no_regression(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No-regression guard: every phase OTHER than foundation_clean_boot must
+    keep behavior_journeys=None (=> the full compiled journeys load) so
+    integration / feature / subtree clean-verify is unchanged."""
+    import otto.v5_runner as R
+
+    captured: dict[str, object] = {}
+
+    class _FakeResult:
+        def to_jsonable(self) -> dict[str, object]:
+            return {}
+
+    def _fake_verify(_worktree_path: Path, **kw: object) -> _FakeResult:
+        captured["behavior_journeys"] = kw.get("behavior_journeys", "ABSENT")
+        return _FakeResult()
+
+    monkeypatch.setattr(R, "verify_from_clean_oracle", _fake_verify)
+    monkeypatch.setattr(
+        R, "preflight_issues_from_clean_oracle", lambda *_a, **_k: []
+    )
+
+    for phase in ("integration_smoke", "subtree_integration", "pre_integration"):
+        captured.clear()
+        R._run_integration_smoke_preflight(
+            worktree_path=tmp_path,
+            task_id="v5-x",
+            phase=phase,
+            spec_path=tmp_path / "spec" / "spec.json",
+        )
+        assert captured["behavior_journeys"] is None, (
+            f"phase {phase!r} must keep full compiled journeys "
+            f"(behavior_journeys=None); got {captured['behavior_journeys']!r}"
+        )
