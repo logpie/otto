@@ -80,7 +80,6 @@ from otto.queue.task_graph import (
     children_of,
     clear_contract_amendment_blocked_state,
     clear_contract_amendment_blocked_tasks,
-    clear_verdict_for_retry,
     get_retry_count,
     get_retry_reason,
     get_task,
@@ -5196,31 +5195,16 @@ async def _reenter_or_block_architect_contract(
             child_results[architect_tid] = result
             return True
 
-    current_retries = get_retry_count(project_dir, architect_tid)
+    # Phase 5 (2026-05-19): NO fresh-Lead re-decomposition. Architect
+    # contract failure lands `partial`+annotation via the chokepoint
+    # (Part A) immediately — uniform for first-time and N-th occurrence.
+    # The retry branch (clear_verdict_for_retry + child_results.pop)
+    # was the cascade trigger and is gone. Scheduler restarts via the
+    # outer-while loop (return True) on the architect's new verdict.
     reason = _architect_contract_feedback_reason(feedback)
-    if current_retries < MAX_ARCHITECT_RETRIES:
-        new_count = clear_verdict_for_retry(project_dir, architect_tid, reason)
-        completed.discard(architect_tid)
-        child_results.pop(architect_tid, None)
-        logger.warning(
-            "architect %s contract gate failed (attempt %d/%d): re-dispatching",
-            architect_tid,
-            new_count,
-            MAX_ARCHITECT_RETRIES,
-        )
-        _emit(on_event, {
-            "event": "architect_retry",
-            "task_id": architect_tid,
-            "retry_count": new_count,
-            "max_retries": MAX_ARCHITECT_RETRIES,
-            "reason_tail": str(feedback.get("message") or reason)[:200],
-            "structured_reason": feedback,
-        })
-        return True
-
     result = child_results.get(architect_tid) or LeadResult(
         task_id=architect_tid,
-        verdict="merge_blocked",
+        verdict="partial",
     )
     completed.discard(architect_tid)
     _record_task_merge_blocked_reason(
@@ -5232,15 +5216,9 @@ async def _reenter_or_block_architect_contract(
         structured_reason=feedback,
     )
     child_results[architect_tid] = result
-    logger.error(
-        "architect %s contract gate failed after %d retries; marking merge_blocked",
-        architect_tid,
-        MAX_ARCHITECT_RETRIES,
-    )
     _emit(on_event, {
-        "event": "architect_retry_exhausted",
+        "event": "architect_contract_landed_partial",
         "task_id": architect_tid,
-        "retry_count": current_retries,
         "structured_reason": feedback,
     })
     return True
@@ -5678,51 +5656,35 @@ async def _process_children(
                 blocking_messages
                 and _scaffold_oracle_contract_structurally_invalid(scaffold_result)
             ):
-                current_retries = get_retry_count(project_dir, architect_tid)
-                if current_retries < MAX_ARCHITECT_RETRIES:
-                    reason = (
-                        "The scaffold oracle found a structured product-contract "
-                        "contradiction. Re-enter the architect because the contract "
-                        "itself must be corrected before code repair can be scoped "
-                        "safely:\n\n"
-                        + "\n".join(f"  - {m}" for m in blocking_messages)
-                        + "\n\nFix the contract/scaffold contradiction, then "
-                        "re-emit the scaffold."
-                    )
-                    new_count = clear_verdict_for_retry(
-                        project_dir, architect_tid, reason
-                    )
-                    completed.discard(architect_tid)
-                    child_results.pop(architect_tid, None)
-                    logger.warning(
-                        "architect %s scaffold preflight failed (attempt %d/%d): re-dispatching",
-                        architect_tid,
-                        new_count,
-                        MAX_ARCHITECT_RETRIES,
-                    )
-                    _emit(on_event, {
-                        "event": "architect_retry",
-                        "task_id": architect_tid,
-                        "retry_count": new_count,
-                        "max_retries": MAX_ARCHITECT_RETRIES,
-                        "reason_tail": blocking_messages[-1][:200],
-                    })
-                    # The architect is now eligible for re-dispatch, but
-                    # the `ready` list computed at the top of this loop
-                    # iteration is stale (the architect wasn't in it).
-                    # Re-enter the loop so take_ready picks it up.
-                    retry_architect = True
-                    break
-                logger.error(
-                    "architect %s scaffold preflight failed after %d retries; "
-                    "descendants will remain blocked",
-                    architect_tid,
-                    MAX_ARCHITECT_RETRIES,
+                # Phase 5 (2026-05-19): NO fresh-Lead re-decomposition.
+                # Killed the p0fix2/3/4 cascade — `clear_verdict_for_retry +
+                # child_results.pop + retry_architect=True + break` would
+                # re-dispatch a fresh Architect that re-decomposes from
+                # zero, discarding all prior child work and starving the
+                # budget. Land the architect `partial`+annotation via the
+                # chokepoint (Part A) instead; features land best-effort
+                # and the contract issue is annotated for human review.
+                _arch_reason = (
+                    "Scaffold oracle found a structured product-contract "
+                    "contradiction; landing architect partial+annotated "
+                    "rather than fresh-Lead re-decomposing (Phase 5):\n\n"
+                    + "\n".join(f"  - {m}" for m in blocking_messages)
                 )
+                _arch_result = child_results.get(architect_tid) or LeadResult(
+                    task_id=architect_tid, verdict="partial",
+                )
+                _record_task_merge_blocked_reason(
+                    project_dir=project_dir,
+                    task_id=architect_tid,
+                    result=_arch_result,
+                    reason=_arch_reason,
+                    origin="contract",  # → VERIFICATION → LAND partial
+                )
+                child_results[architect_tid] = _arch_result
                 _emit(on_event, {
-                    "event": "architect_retry_exhausted",
+                    "event": "architect_contract_landed_partial",
                     "task_id": architect_tid,
-                    "retry_count": current_retries,
+                    "reason_tail": blocking_messages[-1][:200],
                 })
                 continue
 
