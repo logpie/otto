@@ -36,6 +36,7 @@ from otto.agent import make_agent_options
 from otto.journey_contracts import (
     PASS_MODEL_KEYS,
     PROBE_KINDS,
+    STRONG_OBSERVABLE_KINDS,
     VERIFICATION_LEVELS,
     VerificationContractError,
     normalize_journey_contracts,
@@ -470,6 +471,15 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+# Derived from the single source of truth in journey_contracts so the prompt
+# and the pass-model adequacy validator can never drift: a state-changing
+# action's success_observable is only "strong" if its `kind` is EXACTLY one
+# of these. Spelling this closed allowlist out in the prompt is what stops
+# the spec agent emitting a plausible-but-rejected kind (e.g. `route_change`)
+# and the bounded contract-repair loop oscillating to exhaustion.
+_STRONG_KINDS_STR = " | ".join(sorted(STRONG_OBSERVABLE_KINDS))
+
+
 _PROMPT_TEMPLATE = """You are a product spec compiler. Read the user's intent and emit a compact JSON product contract for Otto v5.
 
 INTENT:
@@ -579,7 +589,7 @@ Use this shape. Keep it compact; empty arrays are fine for supporting fields whe
 Guidance:
 - Behavior journeys are representative user-language samples and must include typed executable verification fields.
 - Webapp UI journeys use `verification_level: "ui"` and a pass_model with accessible locators: role/name for controls, label/name for inputs, and text/role/name/label assertions for resulting UI. Avoid CSS selectors and data-testids unless no accessible locator exists.
-- Every state-changing UI pass_model action must include `success_observables` with a non-tautological post-action observable tied to one of that journey's covered primary actions or to a concrete entity/effect. Example: after `comment.mention`, assert that the mentioned user's inbox contains the comment/issue title; do not merely assert "comment text appears" or "route loaded".
+- Every state-changing UI pass_model action must include `success_observables` with a non-tautological post-action observable tied to one of that journey's covered primary actions or to a concrete entity/effect. At least one observable on EVERY state-changing action MUST have a `kind` that is EXACTLY one of: {strong_kinds}. Any other `kind` — `route_change`, `route_loaded`, `text_visible`, `element_present`, `toast`, `http_status`, etc. — does NOT satisfy the contract for a state-changing action and will be rejected (a URL/route change or a toast alone does not prove the entity actually changed). A state-changing action with ONLY a `route_change`/`route_loaded` observable is the single most common rejection — fix it by asserting the persisted effect instead. Example for a `user.register` action (state-changing): use `{{"kind": "persisted_data_visible", "primary_action_id": "user.register", "description": "The authenticated-only Add bookmark form is present, proving the account exists and the session is active.", "role": "button", "name": "Add bookmark"}}` — NOT `{{"kind": "route_change", "text": "/bookmarks"}}`. Example: after `comment.mention`, assert that the mentioned user's inbox contains the comment/issue title; do not merely assert "comment text appears" or "route loaded".
 - The action-level observable, top-level `success_observables`, and `final_dom_assertions` should all point at the same post-action entity/effect so the runner can prove the button actually changed user-visible state.
 - `pass_model.setup` establishes the journey's `start_state` from a COLD clean deployment (empty database, no session) BEFORE `entry_route` is opened. If `start_state` is one of the declared `cold_start_states` ids, `setup` MUST be `[]` — the journey's own `actions` bootstrap everything. For ANY other `start_state` (e.g. a seeded workspace, an existing issue, a second member), `setup` MUST be a non-empty ORDERED list of CONCRETE EXECUTABLE steps that create that precondition by driving the real product exactly as a first-time user would, each step using the SAME primitives as `actions`: an optional navigation `route` and/or an accessible `role`/`name`/`label`/`text` locator plus `inputs`. NEVER emit an abstract declaration such as `{{"action":"seed","entity":"issue","fields":{{...}}}}` — the verifier runs against a black-box deployment and cannot seed a database it does not own; an empty OR abstract `setup` for a non-cold `start_state` is a hard schema failure. Concrete executable setup example for `start_state: "workspace_with_issue"`, `entry_route: "/issues/ENG-1"`: `"setup": [{{"id":"setup.register","route":"/register","role":"button","name":"Create account","inputs":[{{"label":"Email","value":"alice@example.com"}},{{"label":"Password","value":"Passw0rd!"}}]}}, {{"id":"setup.workspace","role":"button","name":"Create workspace","inputs":[{{"label":"Workspace name","value":"Acme"}},{{"label":"Team identifier","value":"ENG"}}]}}, {{"id":"setup.issue","route":"/acme/eng/issues","role":"button","name":"Create issue","inputs":[{{"label":"Title","value":"Set up CI pipeline"}}]}}]` — the cold-start path a real user takes to reach `start_state`.
 - API/CLI/library/service journeys use `verification_level: "api"`, the adapter `probe_kind`, and a strong pass_model: http_api needs response payload assertions/extracted state; cli_command needs stdout/stderr or filesystem effects; library_call needs expect_return or expect_raises; service_health needs health plus payload assertion.
@@ -614,11 +624,20 @@ Keep the same top-level JSON object and keep all other journeys, claims, entitie
 routes, and product fields unchanged. Fix the SPECIFIC failure named in `reason`
 above. The repaired pass_model must satisfy ALL of these hard rules:
 - Every state-changing action includes at least one `success_observables[]`
-  entry that is a non-tautological post-action observable tied to a covered
-  primary action or entity effect — an executable DOM assertion (text/role/
-  name/label) for the created, updated, deleted, sent, exported, or notified
-  entity. Never route-loaded, HTTP-200, body-present, skeleton, or generic
-  text as the only success observable.
+  entry whose `kind` is EXACTLY one of: {strong_kinds}. Any other `kind`
+  ({{"route_change","route_loaded","text_visible","element_present","toast",
+  "http_status", ...}}) does NOT satisfy this contract for a state-changing
+  action and will be rejected again. If `reason` says "lacks a
+  non-tautological post-action observable", the offending action almost
+  certainly has only a `route_change`/`route_loaded`/text observable — change
+  its `kind` to one of the allowed kinds above and assert the persisted
+  entity/effect (e.g. for a register/login action assert an
+  authenticated-only element via `persisted_data_visible`, NOT the post-login
+  route). The entry must also be a non-tautological post-action observable
+  tied to a covered primary action or entity effect — an executable DOM
+  assertion (text/role/name/label) for the created, updated, deleted, sent,
+  exported, or notified entity. Never route-loaded, HTTP-200, body-present,
+  skeleton, or generic text as the only success observable.
 - If `start_state` is NOT one of the declared `cold_start_states` ids,
   `pass_model.setup` is a non-empty ordered list of concrete EXECUTABLE steps
   (each an optional navigation `route` and/or an accessible role/name/label/
@@ -774,6 +793,7 @@ def _render_contract_repair_prompt(
             path=request.error.path,
             message=request.error.message,
             target=request.target,
+            strong_kinds=_STRONG_KINDS_STR,
             previous_json=json.dumps(request.payload, indent=2, sort_keys=True),
         )
     )
@@ -1041,7 +1061,9 @@ async def compile_flat_spec(
         },
     )
 
-    initial_prompt_text = _PROMPT_TEMPLATE.format(intent=intent)
+    initial_prompt_text = _PROMPT_TEMPLATE.format(
+        intent=intent, strong_kinds=_STRONG_KINDS_STR
+    )
     provider = str(getattr(options, "provider", None) or "")
     model = str(getattr(options, "model", None) or "")
     key_payload = cache_key_payload(
