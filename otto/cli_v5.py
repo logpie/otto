@@ -102,6 +102,13 @@ def register_v5_command(main: click.Group) -> None:
         help="Decomposition preset. solo=force inline; lead=allow subtasks; "
              "modular=require Architecture-first thinking; auto=Lead chooses.",
     )
+    @click.option(
+        "--fresh",
+        is_flag=True,
+        help="Force a fresh from-scratch run; refuse to resume even if a "
+             "resumable checkpoint exists for this project. "
+             "(Equivalent to v5_resume_from_checkpoint: false in otto.yaml.)",
+    )
     def run_cmd(
         intent: str,
         budget: int,
@@ -116,6 +123,7 @@ def register_v5_command(main: click.Group) -> None:
         slice_context: bool,
         full_context: bool,
         tier: str,
+        fresh: bool,
     ) -> None:
         """Run a v5 Lead session against the intent.
 
@@ -211,10 +219,28 @@ def register_v5_command(main: click.Group) -> None:
                     f"  [yellow]⚠ budget cap hit:[/yellow] spent ${payload['spent']:.2f} "
                     f"of ${payload['cap']:.2f}; refusing new dispatches"
                 )
+            elif ev == "v5_resume_from_checkpoint":
+                # Phase 1.2-A: a previously-failed run was resumed; the
+                # pipeline SKIPPED compile + decompose + child rebuild and
+                # is re-entering integration on the persisted task graph +
+                # per-child branches. Make this loudly visible so the user
+                # knows they're iterating, not starting fresh.
+                console.print(
+                    f"  [bold cyan]♻ resumed from checkpoint[/bold cyan] "
+                    f"({payload.get('emitted', 0)} child branches preserved; "
+                    f"skipped compile + decompose + child builds → "
+                    f"re-entering integration)"
+                )
 
         # Pass review-first-decomp + tier preset into the v5 pipeline.
         if review_first_decomp:
             config["v5_review_first_decomp"] = True
+        if fresh:
+            # Phase 1.2-A polish: explicit user override to refuse resume
+            # even when a resumable checkpoint exists (partial / merge_blocked
+            # root) for this project. Equivalent to setting
+            # v5_resume_from_checkpoint: false in otto.yaml.
+            config["v5_resume_from_checkpoint"] = False
         config["v5_tier"] = tier
 
         result = asyncio.run(run_v5_pipeline(
