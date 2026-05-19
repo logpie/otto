@@ -170,6 +170,170 @@ def _intent_has_unsupported_token(
     return None
 
 
+# The literal first line of every profile's gitignore-block.txt. Used to
+# (a) append the block idempotently and (b) detect the R4#1 crash window
+# (block committed into .gitignore but the contract write/commit interrupted).
+GITIGNORE_MARKER = "# >>> otto scaffold-profile managed"
+
+SCAFFOLD_CONTRACT_FILENAME = "scaffold-contract.json"
+
+
+def scaffold_contract_path(project_dir: Path) -> Path:
+    """Tracked root path (NOT under .otto/ — Codex#4)."""
+    return project_dir / SCAFFOLD_CONTRACT_FILENAME
+
+
+def read_existing_contract(project_dir: Path) -> dict[str, object] | None:
+    p = scaffold_contract_path(project_dir)
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text())
+    except (ValueError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _gitignore_has_marker(project_dir: Path) -> bool:
+    gi = project_dir / ".gitignore"
+    if not gi.is_file():
+        return False
+    try:
+        return GITIGNORE_MARKER in gi.read_text()
+    except OSError:
+        return False
+
+
+@dataclass(frozen=True)
+class SeedPlan:
+    """Hydrate-first decision (R4#1). ``action`` is one of:
+    ``hydrate`` (valid contract already present — surface, do NOT reseed/commit),
+    ``seed`` (greenfield guard passed — write+commit ``profile_id``),
+    ``skip`` (guard says no — observable ``reason``, pipeline untouched),
+    ``invalid`` (seed-state corruption / crash window — terminal, never silent).
+    """
+
+    action: str
+    profile_id: str | None
+    reason: str
+    contract: dict[str, object] | None
+
+
+def plan_scaffold_seed(
+    *,
+    project_dir: Path,
+    intent_text: str,
+    project_kind: str,
+    has_ui_journey: bool,
+    scaffold_profile_override: str | None,
+    repo_relpaths: Iterable[str],
+) -> SeedPlan:
+    """Pure seed decision. Hydrate-first: a valid existing contract wins over
+    the greenfield guard (the guard applies ONLY to never-seeded repos), and a
+    contract that does not verify — or seed files committed with no/!valid
+    contract — is a terminal ``invalid`` (R4#1), never a silent skip."""
+    existing = read_existing_contract(project_dir)
+    if existing is not None:
+        pid = existing.get("profile_id")
+        if not isinstance(pid, str) or pid not in set(list_profiles()):
+            return SeedPlan(
+                "invalid", None, "scaffold_seed_state_invalid:unknown_profile", existing
+            )
+        if existing.get("profile_hash") != profile_hash(pid):
+            return SeedPlan(
+                "invalid", None, "scaffold_seed_state_invalid:hash_mismatch", existing
+            )
+        return SeedPlan("hydrate", pid, "hydrate_existing_contract", existing)
+
+    # No contract. If a prior seed committed its .gitignore block but the
+    # contract write/commit was interrupted, that is the crash window — fail
+    # loud, do not re-run the greenfield guard against the half-seeded tree.
+    if _gitignore_has_marker(project_dir):
+        return SeedPlan(
+            "invalid", None, "scaffold_seed_state_invalid:gitignore_without_contract",
+            None,
+        )
+
+    decision = select_profile(
+        intent_text=intent_text,
+        project_kind=project_kind,
+        has_ui_journey=has_ui_journey,
+        repo_relpaths=repo_relpaths,
+        scaffold_profile_override=scaffold_profile_override,
+    )
+    if decision.profile_id is None:
+        return SeedPlan("skip", None, decision.reason, None)
+    return SeedPlan("seed", decision.profile_id, decision.reason, None)
+
+
+@dataclass(frozen=True)
+class SeedMaterialization:
+    """Result of writing a profile to disk (git is the caller's concern)."""
+
+    profile_id: str
+    written_paths: tuple[str, ...]
+    gitignore_appended: bool
+    contract: dict[str, object]
+
+
+def materialize_seed(
+    *, project_dir: Path, profile_id: str, head_sha: str | None = None
+) -> SeedMaterialization:
+    """Write the profile's seed files, append the gitignore block (idempotent),
+    and write the record-only scaffold-contract.json. Filesystem only — the
+    caller stages/commits and enforces the branch/clean-tree invariants."""
+    prof = load_profile(profile_id)
+    written: list[str] = []
+    for rel, content in sorted(prof.files.items()):
+        dst = project_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(content)
+        if rel == "start.sh":
+            dst.chmod(0o755)
+        written.append(rel)
+
+    appended = False
+    if prof.gitignore_block.strip() and not _gitignore_has_marker(project_dir):
+        gi = project_dir / ".gitignore"
+        prefix = ""
+        if gi.is_file():
+            cur = gi.read_text()
+            if cur and not cur.endswith("\n"):
+                prefix = "\n"
+        with gi.open("a") as fh:
+            fh.write(prefix + prof.gitignore_block)
+            if not prof.gitignore_block.endswith("\n"):
+                fh.write("\n")
+        appended = True
+
+    contract = build_scaffold_contract(prof, head_sha=head_sha)
+    scaffold_contract_path(project_dir).write_text(
+        json.dumps(contract, indent=2, sort_keys=True) + "\n"
+    )
+    return SeedMaterialization(
+        profile_id=profile_id,
+        written_paths=tuple(written),
+        gitignore_appended=appended,
+        contract=contract,
+    )
+
+
+def scaffold_surface_note(contract: dict[str, object]) -> str:
+    """The authoritative-files note injected into the lead / foundation
+    runtime context (R2#1) so the agent never rewrites the env scaffold."""
+    pid = contract.get("profile_id")
+    paths = contract.get("seeded_paths") or []
+    paths_str = ", ".join(str(p) for p in paths) if isinstance(paths, list) else ""
+    return (
+        f"SEEDED SCAFFOLD (profile {pid}): Otto has already created and "
+        f"committed the env-critical scaffold ({paths_str}) plus "
+        f"{SCAFFOLD_CONTRACT_FILENAME}. These files are AUTHORITATIVE — do NOT "
+        "rewrite, replace, or restructure start.sh, the package/build manifests, "
+        "tsconfig/vite config, or the backend pyproject. Build product code "
+        "AROUND them; you may add dependencies to the existing manifests."
+    )
+
+
 def select_profile(
     *,
     intent_text: str,

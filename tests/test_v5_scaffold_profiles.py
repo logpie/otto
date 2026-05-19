@@ -31,8 +31,13 @@ from otto.scaffold_profiles import (
     build_scaffold_contract,
     list_profiles,
     load_profile,
+    materialize_seed,
+    plan_scaffold_seed,
     profile_hash,
+    read_existing_contract,
     render_seed_files,
+    scaffold_contract_path,
+    scaffold_surface_note,
     select_profile,
 )
 
@@ -248,3 +253,119 @@ def test_guard_explicit_override_bypasses_heuristics_but_validates_id() -> None:
     )
     assert bad.profile_id is None
     assert "override_unknown_profile" in bad.reason
+
+
+# --- the seed planner + materializer (R4#1 hydrate-first) ----------------
+
+
+def test_plan_seed_greenfield_then_materialize_then_hydrate(tmp_path) -> None:
+    proj = tmp_path
+    (proj / "intent.md").write_text("Build a React + FastAPI webapp.")
+    (proj / ".gitignore").write_text("otto_logs/\n")
+
+    p1 = plan_scaffold_seed(
+        project_dir=proj,
+        intent_text="Build a React + FastAPI webapp.",
+        project_kind="webapp",
+        has_ui_journey=True,
+        scaffold_profile_override=None,
+        repo_relpaths=["intent.md", ".gitignore"],
+    )
+    assert p1.action == "seed" and p1.profile_id == PID
+
+    mat = materialize_seed(project_dir=proj, profile_id=p1.profile_id, head_sha="abc123")
+    assert (proj / "start.sh").is_file()
+    assert (proj / "frontend/package.json").is_file()
+    assert (proj / "backend/.python-version").read_text().strip() == "3.12"
+    assert mat.gitignore_appended is True
+    # generated-lockfile ignore is now in .gitignore (R4#2)
+    assert "package-lock.json" in (proj / ".gitignore").read_text()
+    contract = read_existing_contract(proj)
+    assert contract is not None and contract["profile_id"] == PID
+    assert contract["head_sha"] == "abc123"
+    assert scaffold_contract_path(proj).is_file()
+
+    # Re-plan on the now-seeded repo: hydrate (NOT reseed) even though the
+    # tree is no longer greenfield (R4#1: guard only never-seeded repos).
+    p2 = plan_scaffold_seed(
+        project_dir=proj,
+        intent_text="Build a React + FastAPI webapp.",
+        project_kind="webapp",
+        has_ui_journey=True,
+        scaffold_profile_override=None,
+        repo_relpaths=["intent.md", ".gitignore", "start.sh", "frontend/package.json"],
+    )
+    assert p2.action == "hydrate"
+    assert p2.profile_id == PID
+    assert p2.contract == contract
+
+
+def test_materialize_gitignore_append_is_idempotent() -> None:
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as d:
+        proj = Path(d)
+        (proj / ".gitignore").write_text("node_modules\n")
+        materialize_seed(project_dir=proj, profile_id=PID)
+        once = (proj / ".gitignore").read_text()
+        # second materialize must NOT duplicate the managed block
+        materialize_seed(project_dir=proj, profile_id=PID)
+        twice = (proj / ".gitignore").read_text()
+        assert once.count("otto scaffold-profile managed") == twice.count(
+            "otto scaffold-profile managed"
+        )
+
+
+def test_plan_seed_invalid_on_hash_mismatch(tmp_path) -> None:
+    scaffold_contract_path(tmp_path).write_text(
+        json.dumps({"profile_id": PID, "profile_hash": "deadbeef"})
+    )
+    p = plan_scaffold_seed(
+        project_dir=tmp_path,
+        intent_text="x",
+        project_kind="webapp",
+        has_ui_journey=True,
+        scaffold_profile_override=None,
+        repo_relpaths=[],
+    )
+    assert p.action == "invalid"
+    assert "scaffold_seed_state_invalid" in p.reason
+
+
+def test_plan_seed_invalid_on_gitignore_block_without_contract(tmp_path) -> None:
+    """R4#1 crash window: block committed, contract write interrupted."""
+    (tmp_path / ".gitignore").write_text(
+        "# >>> otto scaffold-profile managed (P0) >>>\nuv.lock\n"
+    )
+    p = plan_scaffold_seed(
+        project_dir=tmp_path,
+        intent_text="x",
+        project_kind="webapp",
+        has_ui_journey=True,
+        scaffold_profile_override=None,
+        repo_relpaths=[".gitignore"],
+    )
+    assert p.action == "invalid"
+    assert "gitignore_without_contract" in p.reason
+
+
+def test_plan_seed_skip_is_observable_not_invalid(tmp_path) -> None:
+    p = plan_scaffold_seed(
+        project_dir=tmp_path,
+        intent_text="A CLI tool.",
+        project_kind="cli",
+        has_ui_journey=False,
+        scaffold_profile_override=None,
+        repo_relpaths=[],
+    )
+    assert p.action == "skip"
+    assert p.reason and p.profile_id is None
+
+
+def test_surface_note_marks_scaffold_authoritative() -> None:
+    note = scaffold_surface_note(build_scaffold_contract(load_profile(PID)))
+    assert "AUTHORITATIVE" in note
+    assert "do NOT" in note
+    assert PID in note
+    assert "start.sh" in note
