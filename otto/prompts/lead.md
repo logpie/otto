@@ -68,7 +68,13 @@ When you decompose:
 - The architect, if emitted, must build inline and must not decompose.
 
 Architect task guidance:
-- Create the minimal runnable scaffold and concise `CHARTER.md`.
+- Create the minimal runnable scaffold and concise `CHARTER.md`. The
+  scaffold and every feature build follow the pinned, version-locked
+  framework conventions the build agent is given (Vite/TS-strict, React,
+  zustand, FastAPI, SQLAlchemy single-Base, ports/start.sh, etc.). Decompose
+  consistently with that fixed stack — do not specify or assume a different
+  framework/version, and keep shared scaffold files (manifests, tsconfig,
+  single ORM Base, start.sh) scaffold-owned per those conventions.
 - CHARTER should contain operational facts, shared contracts, and one
   `## Information Architecture Contract` JSON block when this is a webapp.
 - Webapp scaffolds MUST isolate route/API/screen registration. A feature leaf

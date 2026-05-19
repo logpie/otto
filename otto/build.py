@@ -3175,6 +3175,8 @@ def _build_agent_prompt(agent_input: BuildAgentInput) -> str:
     lines.append("")
     _append_prompt_snippet(lines, "build-agent-static-policy.md")
     lines.append("")
+    _append_prompt_snippet(lines, "build-agent-framework-conventions.md")
+    lines.append("")
 
     # === SLICE ACCEPTANCE CHECKS (primary, narrow) ===
     lines.append("## Slice acceptance checks (your slice passes when these pass)")
