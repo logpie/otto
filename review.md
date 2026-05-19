@@ -1446,3 +1446,98 @@ origins map explicitly; unmapped origins log a warning.
 Unit suite is NOT a reliable gate here (integration-heavy, no per-test
 timeout, env-fragile). Real thesis test = Linkboard e2e: does always-land
 break the convergence/cascade failure. Pending next.
+
+### Linkboard e2e VERDICT (2026-05-19, session 2026-05-19-173946-98bf6c)
+
+**KEYSTONE THESIS VALIDATED on a live run.** Authoritative task_graph.json:
+- foundation `v5-7072f73474e1`: verdict=`pass`
+- feature `v5-6f7993287989`: verdict=`partial`, `landed_with_annotation=True`
+- feature `v5-e91e2922b59d`: verdict=`partial`, `landed_with_annotation=True`
+- ALL `merge_blocked_origin=None`; run.out merge_blocked/cascade grep = 0;
+  no architect_retry / reenter / fresh-lead anywhere.
+
+Both feature children carry the EXACT keystone chokepoint signature
+(`partial` + `landed_with_annotation=True`) instead of `merge_blocked`.
+The prior-session failure mode (feature child merge_blocked → fresh-lead
+cascade → budget starvation → non-convergence) is ELIMINATED. Product was
+built on disk (backend/ app+pyproject+tests, frontend/ index+package+
+node_modules, start.sh, CHARTER.md, scaffold-contract.json).
+
+**Caveat (NOT a keystone regression — the deferred Phase 1.2 issue,
+empirically confirmed):** the run did not reach a clean final ROOT verdict;
+root stayed `pending_children` because the bounded integration-smoke
+repair turn-1 WEDGED ~6+ min past the 40-min budget (python child 0% CPU,
+zero writes 6+ min). This is exactly the Phase 1.2 BUDGET_EXHAUSTED /
+landing-transaction gap (Codex Plan-Gate R2#4 / R3#4): a single
+bounded-repair turn is not wall-clock-bounded and can overrun/wedge,
+preventing the terminal landing transaction. Now proven by a live run →
+this is the next highest-value protocol work.
+
+Orthogonal: journey `register_tag_bookmark_filter` never passed — a real
+product bug (Add-bookmark button visibility / no POST /api/tags) the
+bounded repair was chasing. Product-quality, not keystone (land-vs-refuse).
+
+**Task #5 ("convert Linkboard-path terminal callers") is largely MOOT:**
+the e2e proves the helper chokepoint already covers the Linkboard
+suffocation (child-merge/cascade) path end-to-end. The real remaining gap
+is Phase 1.2 (budget-bounded repair / landing transaction), a
+protocol-level deferred plan item.
+
+### CORRECTION (2026-05-19, after the run actually terminated)
+
+The verdict above was PREMATURE — written before the e2e finished; I
+called the long repair turn "hung/wedged" (slow-vs-hung error, twice) and
+declared Task #5 moot. The run then exited cleanly (exit 0, 2766s/~46min)
+with **`Verdict: merge_blocked` at ROOT**. Corrected truth:
+
+- **Child level: keystone IS validated** (foundation `pass`; both features
+  `partial`+`landed_with_annotation=True`; no child merge_blocked; no
+  cascade; no architect-reentry). This stands.
+- **Root level: STILL REFUSED.** `Agent timed out after 1199s` →
+  `integration root: merge_blocked` → root verdict `merge_blocked`. The run
+  did NOT land end-to-end. Linkboard suffocation is NOT fully fixed.
+- **Exact refusing site (Task #5 — NOT moot):**
+  `otto/v5_runner.py:4757` `integration_result.verdict = "merge_blocked"`
+  (direct literal, deferred baseline, NOT chokepoint-routed) → `:4768`
+  verify_result → `:4790` `set_verdict(ROOT_TASK_ID, integration_result
+  .verdict)`. Trigger = the 1199s integration-agent single-turn timeout
+  (`:2599`/`:8772` confirm this is the known p0fix3 prior-session cause).
+- Net: keystone Phase-1 = real PARTIAL win (child cascade eliminated,
+  proven) but end-to-end convergence NOT achieved — the same merge_blocked
+  bug class survives at the integration-root terminal because Phase-1 only
+  rerouted the 2 helpers, not this direct literal + the 1199s
+  integration-agent timeout (Phase 1.2 / Task #5 both implicated).
+- Process integrity note: I declared "hung" twice on long-but-progressing
+  work. Lesson: a 0%-CPU/no-write snapshot during an LLM/agent turn is NOT
+  proof of hang; an agent turn can be silent for many minutes. Verify with
+  the agent-turn timeout (here 1199s), not a single ps snapshot.
+
+### Integration-failure ROOT CAUSE + fix plan (2026-05-19)
+
+Read the 580-line integration-repair narrative. The repair agent was NOT
+stuck/broken — it productively fixed cascading real product bugs (POST
+/api/tags → 201 ✓; diagnosed select-vs-input; edited BookmarksPage.tsx;
+`tsc --noEmit` CLEAN) and was killed **mid `git add -A && git commit`** by
+the hard 1199s single-turn timeout. Work discarded → post-agent smoke
+re-ran against unfixed code → `_integration_smoke_blocks` true →
+`v5_runner.py:4757` direct `merge_blocked` → `:4789` ROOT override.
+
+Root cause = (1) 1199s integration-repair single-turn cap too short for
+legitimate multi-bug repair; (2) on timeout the agent's in-progress work
+is thrown away; (3) the integration terminal at 4753-4790 is a deferred
+direct literal not routed through the chokepoint. Exactly the fail-closed
+"discard near-complete work + refuse" pathology, surviving at the
+integration layer.
+
+FIX (evidence-driven, no-Codex this session):
+- **Part A / Task #5:** extract 4753-4781 → testable helper routing
+  through `resolve_terminal_outcome`; post-agent smoke-block = VERIFICATION
+  cause → LAND `partial`+annotation (the blocking issues become the
+  honest annotation), never `merge_blocked`. Root override then carries
+  `partial`.
+- **Part B / Phase 1.2 slice:** before the post-agent terminal, the
+  runner commits any uncommitted repair-agent worktree changes (safety
+  commit) so near-complete work is preserved + the smoke evaluates the
+  real repaired state, not the discarded one.
+A makes it LAND; B makes what lands contain the repair. Together = the
+end-to-end Linkboard fix. Deeper boot-maximization stays full-Phase-3.

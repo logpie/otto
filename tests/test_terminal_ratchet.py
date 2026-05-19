@@ -25,6 +25,9 @@ CHOKEPOINT_FUNCS = {
     "_record_task_merge_blocked_reason",
     "_record_structured_merge_failed",
     "_cause_from_origin",
+    # Routes the post-agent integration terminal through the chokepoint
+    # (Task #5, 2026-05-19) — legitimately contains the verdict literals.
+    "_integration_terminal_verdict",
 }
 
 

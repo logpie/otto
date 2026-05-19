@@ -4754,8 +4754,7 @@ async def run_v5_pipeline(
                 integration_result.verdict != "catastrophic"
                 and _integration_smoke_blocks(post_preflight_result)
             ):
-                integration_result.verdict = "merge_blocked"
-                integration_result.failure_reason = (
+                _it_reason = (
                     "Post-agent smoke_clean_deploy still has blocking issues: "
                     + "; ".join(
                         str(issue.get("message") or issue.get("kind"))
@@ -4764,19 +4763,37 @@ async def run_v5_pipeline(
                         and issue.get("severity") in ("error", "block")
                     )
                 )
+                # Chokepoint: a post-agent smoke block is VERIFICATION →
+                # LAND (partial)+annotation, never merge_blocked (Task #5).
+                _it_verdict, _it_reason = _integration_terminal_verdict(
+                    blocks=True,
+                    current_verdict=integration_result.verdict,
+                    reason=_it_reason,
+                )
+                integration_result.verdict = _it_verdict
+                integration_result.failure_reason = _it_reason
                 if isinstance(integration_result.verify_result, dict):
-                    integration_result.verify_result["verdict"] = "merge_blocked"
-                    integration_result.verify_result["summary"] = integration_result.failure_reason
+                    integration_result.verify_result["verdict"] = _it_verdict
+                    integration_result.verify_result["summary"] = _it_reason
+                    if _it_verdict != "merge_blocked":
+                        integration_result.verify_result["landed_with_annotation"] = True
+                        integration_result.verify_result.setdefault(
+                            "annotations", []
+                        ).append({
+                            "origin": "integration_post_agent_smoke",
+                            "detail": _it_reason,
+                            "cause": "verification",
+                        })
                 set_verdict(
                     project_dir,
                     ROOT_TASK_ID,
-                    "merge_blocked",
+                    _it_verdict,
                     cost_usd=integration_result.cost_usd,
                 )
                 _emit(on_event, {
                     "event": "integration_smoke_failed",
                     "task_id": ROOT_TASK_ID,
-                    "verdict": "merge_blocked",
+                    "verdict": _it_verdict,
                     "worktree": str(project_dir),
                 })
             result.integration_results[ROOT_TASK_ID] = integration_result
@@ -6872,6 +6889,25 @@ def _cause_from_origin(origin: str, phase: str | None) -> TerminalCause:
         phase,
     )
     return TerminalCause.PRODUCT
+
+
+def _integration_terminal_verdict(
+    *, blocks: bool, current_verdict: str, reason: str
+) -> tuple[str, str]:
+    """Post-agent integration terminal, routed through the chokepoint
+    (Task #5, 2026-05-19; Linkboard e2e proved v5_runner.py:4757 was a
+    deferred direct refusal that timed-out repair work hit). A post-agent
+    smoke block is a VERIFICATION cause → LAND (`partial`) + annotation,
+    never `merge_blocked`. `catastrophic` preserved; non-blocking passes
+    through."""
+    if current_verdict == "catastrophic" or not blocks:
+        return current_verdict, (reason if blocks else "")
+    if (
+        resolve_terminal_outcome(cause=TerminalCause.VERIFICATION)
+        is TerminalAction.HONEST_TERMINAL
+    ):
+        return "merge_blocked", reason
+    return "partial", reason
 
 
 def _record_task_merge_blocked_reason(
