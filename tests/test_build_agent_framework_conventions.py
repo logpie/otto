@@ -113,3 +113,38 @@ def test_pack_pointer_in_lead_prompt() -> None:
     assert "pinned" in lead and "framework conventions" in lead, (
         "lead.md missing the pinned-stack pointer"
     )
+
+
+def test_pack_has_enforced_pre_return_self_check() -> None:
+    """ENFORCEMENT (not merely doc-appended): the e2e (linkboard-fwconv-174858)
+    proved a wired pack is ignored as prose. The preamble must carry an
+    explicit pre-return SCAFFOLD CONFORMANCE SELF-CHECK that names the exact
+    deviations that failed clean-boot, so the agent (which optimizes for
+    checks, not buried prose) must self-verify before returning."""
+    body = _pack()
+    assert "SCAFFOLD CONFORMANCE SELF-CHECK" in body
+    assert "BEFORE you confirm completion" in body
+    low = body.lower()
+    # the precise fwconv-174858 violations must be called out as fail bullets
+    assert "bespoke `backend_port`" in low or "not a bespoke" in low
+    assert "--strictport" in low
+    assert "never bare" in low and "python: command not found" in low
+    assert "tsc -b && vite build" in body and "tsc --noEmit && vite build" in body
+    assert 'vite `^6`' in body.lower() or "vite `^6`" in body.lower()
+    assert 'do not return' in low
+
+
+def test_final_instruction_points_at_scaffold_self_check() -> None:
+    """build-final-instruction.md is the LAST snippet the agent sees
+    (appended after everything). It must gate completion on the scaffold
+    self-check so the contract is reinforced at maximum salience."""
+    fin = render_prompt("build-final-instruction.md")
+    assert "SCAFFOLD CONFORMANCE\nSELF-CHECK" in fin or "SCAFFOLD CONFORMANCE SELF-CHECK" in fin.replace(
+        "\n", " "
+    )
+    assert "Before you confirm completion" in fin
+    assert "$PORT" in fin and "--strictPort" in fin
+    src = (_REPO / "otto" / "build.py").read_text()
+    assert '_append_prompt_snippet(lines, "build-final-instruction.md")' in src, (
+        "build-final-instruction.md must remain the final appended snippet"
+    )

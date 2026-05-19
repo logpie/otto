@@ -4,6 +4,27 @@ You are building on a fixed, mutually-verified stack. Guessing framework
 versions or APIs is the single largest cause of scaffolds that will not
 strict-`tsc`-build or boot. This section removes the guessing.
 
+**SCAFFOLD CONFORMANCE SELF-CHECK — run this BEFORE you confirm completion.**
+If you created or edited any of `start.sh`, `package.json`, `tsconfig*.json`,
+`vite.config.*`, `pyproject.toml`/`requirements.txt`, the ORM base, or the
+zustand store, every line below must be TRUE for the files you actually wrote.
+A "no" is a defect you must fix before returning — these are exactly the
+deviations that fail clean-boot and force an expensive re-dispatch:
+
+- `start.sh` binds the backend to the otto-injected port: it reads
+  `${PORT:-...}` (NOT a bespoke `BACKEND_PORT`/hard-coded port) and the dev
+  server uses `--strictPort` (never silently drifts 5173→5174).
+- `start.sh` invokes Python as `python3`/a venv interpreter (NEVER bare
+  `python` — it is not on PATH; `python: command not found` = this defect)
+  and installs deps hermetically per the ports/start.sh section.
+- `package.json` pins the EXACT majors from *Canonical Manifests* (e.g.
+  Vite `^6`, not `^5`); the build script is `tsc -b && vite build` (NOT
+  `tsc --noEmit && vite build`); no `latest`/`*`/invented versions.
+- Every scaffold-critical file matches its template below except the marked
+  `<<PRODUCT_SLOT: ...>>` regions; no framework substituted/up/down-graded.
+
+If any answer is "no", you have not met the contract — fix it, do not return.
+
 Rules:
 
 - For **scaffold-critical files** (every config/manifest/skeleton with a
