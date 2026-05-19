@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import enum
 import fcntl
 import hashlib
 import logging
@@ -6800,6 +6801,79 @@ async def _run_child(
     return result
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Terminal-outcome chokepoint (v5 one-hard-gate keystone, 2026-05-19).
+# Locked design: research-linkboard-overconstraint.md. The SINGLE place that
+# decides land vs. terminal. Only INFRA_CORRUPT refuses (and only after
+# bounded git recovery, decided at the merge layer — NOT here). Everything
+# else lands and is annotated. An unmapped origin → PRODUCT (LAND) is the
+# SAFE default in this inverted design: refusal does not live in these
+# recording helpers, so landing can never hide a needed refusal.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TerminalCause(enum.Enum):
+    PRODUCT = "product"
+    VERIFICATION = "verification"
+    CONFLICT_RESIDUAL = "conflict_residual"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+    ENV_UNMEASURED = "env_unmeasured"
+    INFRA_CORRUPT = "infra_corrupt"
+
+
+class TerminalAction(enum.Enum):
+    LAND_CONTINUE = "land_continue"
+    LAND_STOP = "land_stop"
+    HONEST_TERMINAL = "honest_terminal"
+
+
+def resolve_terminal_outcome(*, cause: TerminalCause) -> TerminalAction:
+    """The only land-vs-terminal decision. No default cause: a missing
+    classification must be a hard error, never a silent default."""
+    if cause is TerminalCause.INFRA_CORRUPT:
+        return TerminalAction.HONEST_TERMINAL
+    if cause in (TerminalCause.BUDGET_EXHAUSTED, TerminalCause.ENV_UNMEASURED):
+        return TerminalAction.LAND_STOP
+    return TerminalAction.LAND_CONTINUE
+
+
+# Explicit origin/phase → cause map. Unmapped → PRODUCT (safe LAND) + warn.
+_ORIGIN_CAUSE_MAP: dict[str, TerminalCause] = {
+    "verification": TerminalCause.VERIFICATION,
+    "foundation_clean_boot": TerminalCause.VERIFICATION,
+    "contract": TerminalCause.VERIFICATION,
+    "spec_contract": TerminalCause.VERIFICATION,
+    "subtree_propagation": TerminalCause.CONFLICT_RESIDUAL,
+    "merge_repair_helper": TerminalCause.CONFLICT_RESIDUAL,
+    "merge": TerminalCause.CONFLICT_RESIDUAL,
+    "union_guard": TerminalCause.CONFLICT_RESIDUAL,
+    "budget": TerminalCause.BUDGET_EXHAUSTED,
+    "deadline": TerminalCause.BUDGET_EXHAUSTED,
+    "missing_toolchain": TerminalCause.ENV_UNMEASURED,
+    "env": TerminalCause.ENV_UNMEASURED,
+}
+
+
+def _cause_from_origin(origin: str, phase: str | None) -> TerminalCause:
+    """Derive a TerminalCause from the existing origin/phase strings the
+    recording helpers already receive. Unmapped → PRODUCT (LAND): the safe
+    fail direction (cannot hide a needed refusal — see chokepoint note)."""
+    key = (origin or "").strip().lower()
+    if key in _ORIGIN_CAUSE_MAP:
+        return _ORIGIN_CAUSE_MAP[key]
+    pkey = (phase or "").strip().lower()
+    for token, cause in _ORIGIN_CAUSE_MAP.items():
+        if token in key or (pkey and token in pkey):
+            return cause
+    logger.warning(
+        "terminal chokepoint: unmapped origin=%r phase=%r → PRODUCT (LAND, "
+        "safe default); add to _ORIGIN_CAUSE_MAP if a different cause fits",
+        origin,
+        phase,
+    )
+    return TerminalCause.PRODUCT
+
+
 def _record_task_merge_blocked_reason(
     *,
     project_dir: Path,
@@ -6809,29 +6883,69 @@ def _record_task_merge_blocked_reason(
     origin: str,
     structured_reason: dict[str, Any] | None = None,
 ) -> None:
-    metadata: dict[str, Any] = {
+    # Terminal chokepoint (v5 one-hard-gate keystone, 2026-05-19). Only
+    # INFRA_CORRUPT refuses; every other cause LANDS + is annotated.
+    cause = _cause_from_origin(origin, None)
+    if resolve_terminal_outcome(cause=cause) is TerminalAction.HONEST_TERMINAL:
+        metadata: dict[str, Any] = {
+            "failure_reason": reason,
+            "merge_blocked_origin": origin,
+            "merge_blocked_reason": reason,
+            "contract_amendment_retry_merge": False,
+            "contract_amendment_retry_in_progress": False,
+        }
+        if structured_reason is not None:
+            metadata["merge_blocked_structured_reason"] = structured_reason
+        set_verdict_and_metadata(
+            project_dir,
+            task_id,
+            "merge_blocked",
+            cost_usd=result.cost_usd,
+            metadata=metadata,
+        )
+        result.verdict = "merge_blocked"
+        result.failure_reason = reason
+        if result.verify_result is None:
+            result.verify_result = {}
+        if isinstance(result.verify_result, dict):
+            result.verify_result["verdict"] = "merge_blocked"
+            result.verify_result["summary"] = reason
+            if structured_reason is not None:
+                result.verify_result["structured_reason"] = structured_reason
+        return
+
+    # LAND: annotate, never refuse. The branch lands; the finding is
+    # recorded for the proof packet, not used as a gate.
+    land_metadata: dict[str, Any] = {
         "failure_reason": reason,
-        "merge_blocked_origin": origin,
-        "merge_blocked_reason": reason,
+        "landed_with_annotation": True,
+        "annotation_origin": origin,
+        "annotation_detail": reason,
+        "annotation_cause": cause.value,
         "contract_amendment_retry_merge": False,
         "contract_amendment_retry_in_progress": False,
     }
     if structured_reason is not None:
-        metadata["merge_blocked_structured_reason"] = structured_reason
+        land_metadata["annotation_structured_reason"] = structured_reason
     set_verdict_and_metadata(
         project_dir,
         task_id,
-        "merge_blocked",
+        "partial",
         cost_usd=result.cost_usd,
-        metadata=metadata,
+        metadata=land_metadata,
     )
-    result.verdict = "merge_blocked"
+    result.verdict = "partial"
     result.failure_reason = reason
     if result.verify_result is None:
         result.verify_result = {}
     if isinstance(result.verify_result, dict):
-        result.verify_result["verdict"] = "merge_blocked"
+        result.verify_result["verdict"] = "partial"
         result.verify_result["summary"] = reason
+        anns = result.verify_result.setdefault("annotations", [])
+        if isinstance(anns, list):
+            anns.append(
+                {"origin": origin, "detail": reason, "cause": cause.value}
+            )
         if structured_reason is not None:
             result.verify_result["structured_reason"] = structured_reason
 
@@ -6847,17 +6961,26 @@ def _record_structured_merge_failed(
     structured_reason: dict[str, Any],
     on_event: Any = None,
 ) -> None:
+    # Chokepoint-aware staging: only INFRA_CORRUPT keeps merge_blocked;
+    # every other cause LANDS as 'partial' (delegate annotates). origin+phase
+    # here vs origin-only in the delegate never diverge on the land/terminal
+    # decision (unmapped → PRODUCT/LAND either way).
+    _smf_terminal = (
+        resolve_terminal_outcome(cause=_cause_from_origin(origin, phase))
+        is TerminalAction.HONEST_TERMINAL
+    )
+    _smf_verdict = "merge_blocked" if _smf_terminal else "partial"
     try:
-        result.verdict = "merge_blocked"
+        result.verdict = _smf_verdict
         result.failure_reason = reason
         if not isinstance(result.verify_result, dict):
             result.verify_result = {}
-        result.verify_result["verdict"] = "merge_blocked"
+        result.verify_result["verdict"] = _smf_verdict
         result.verify_result["summary"] = reason
         result.verify_result["structured_reason"] = structured_reason
     except Exception as exc:  # noqa: BLE001 - terminal fallback must not raise
         logger.warning(
-            "failed to stage in-memory merge_blocked reason for %s: %s",
+            "failed to stage in-memory terminal reason for %s: %s",
             task_id,
             exc,
         )

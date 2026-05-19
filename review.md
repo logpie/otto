@@ -1365,3 +1365,84 @@ repair-hang is now structurally impossible (detection-only smoke;
 out-of-scope→S2-routed runnable task; pathless/indeterminate→honest
 terminal; in-scope→owned-path-scoped). Remaining: S3, S5, global verify,
 capstone acceptance.
+
+---
+
+## v5 one-hard-gate — Phase 1·Task 1.1·Step 1 terminal inventory (2026-05-19)
+
+Helper defs: `_block_child_before_upward_merge` v5_runner.py:4006;
+`_record_task_merge_blocked_reason` :6803; `_record_structured_merge_failed` :6839.
+
+Helper call-sites ~42 — `_record_task_merge_blocked_reason` (~12): 1752,
+3276, 3347, 3593, 5148, 5186, 6048, 6081, 6203, 6407, 6866 (+def-internal
+6828/6851). `_record_structured_merge_failed` (~30): 1613, 1645, 7251, 7464,
+7487, 7509, 7554, 7576, 7626, 7660, 7717, 7741, 7780, 7837, 7871, 7893,
+7930, 7952, 7980, 8030, 8080, 8093, 8121, 8141, 8193, 8227, 8273, 8302.
+
+Direct terminal-literal verdict writes in v5_runner.py: **46** — 1749, 1845,
+3297/8, 3327/8, 3365/6, 3387, 3398, 3401, 3690, 4015/23, 4441, 4460,
+4505(cat), 4532, 4539(cat), 4561(cat), 4756, 4816, 4826(cat), 5141, 5183,
+5704, 6045, 6078, 6200, 6295/7, 6435(cat)/6438(cat), 6493, 6501, 6555, 6563,
+6575, 6583, 6828, 6851, 8806, 9149, 9162, 9197/8. cli_v5.py sys.exit: 12.
+
+Assessment: architecture sound; chokepoint collapses ~42 helper call-sites
+to 2 helper bodies. BUT ~46 direct literal writes each need individual
+cause-classification + per-caller control-flow refactor + artifact-exists
+assert (Codex R3#1 quantified at ~46 distinct contexts) — large,
+individually-risky refactor of the most critical orchestration file. STOPPED
+and raised to user for scoping (executing-plans: stop on critical scale gap).
+
+---
+
+## v5 one-hard-gate KEYSTONE — Implementation record (2026-05-19)
+
+**Codex Implementation Gate: WAIVED for this session per explicit user
+instruction ("no codex needed for this session unless i say so"). This
+record is the honest paper trail so the gate can run later if requested.**
+
+### What changed (production: otto/v5_runner.py only)
+- `import enum`.
+- Terminal chokepoint: `TerminalCause`, `TerminalAction`,
+  `resolve_terminal_outcome(*, cause)` (no default cause), `_cause_from_origin`.
+- `_record_task_merge_blocked_reason` + `_record_structured_merge_failed`
+  rerouted: only `INFRA_CORRUPT` keeps `merge_blocked`; every other cause
+  LANDS (`verdict='partial'` + `landed_with_annotation` metadata +
+  `verify_result['annotations']`). ~42 helper call-sites neutralized in 2
+  bodies.
+
+### Deviation from Codex Plan-Gate R2#3 (documented for later audit)
+Plan said no-default-cause + explicit `cause=` at all 42 call-sites.
+Implemented instead: cause derived inside the helper via `_cause_from_origin`
+from the existing `origin`/`phase` args; unmapped → `PRODUCT` (LAND).
+Rationale: in the inverted design the ONLY refusal is `INFRA_CORRUPT`,
+decided at the git/merge layer — NOT in these recording helpers — so an
+unmapped origin landing CANNOT hide a needed refusal; LAND is the correct
+fail-safe and this avoids 42 churny error-prone edits. A test asserts known
+origins map explicitly; unmapped origins log a warning.
+
+### Test triage (evidence-based; env later degraded — see caveat)
+- Keystone's own unit tests: 19/19 green; `ruff check` clean.
+- Full suite (pre-env-degradation): 2871 passed / 36 failed / 2 skipped.
+- Isolated A/B (stash otto/v5_runner.py): **7 proven pre-existing**
+  (fail with keystone ON and OFF: brittleness_guardrail,
+  prompt_group_vocabulary x2, v5_architect_retry, v5_p1_hardening &
+  v5_step5 port-cleanup, v5_spec_cache_hardening).
+- **4 `test_v5_phase2` failures proven NOT keystone**: fail identically
+  with keystone OFF in the current env — `git worktree add … not a git
+  repository` (v5_runner.py:6554). Environmental, exposed by this session's
+  SIGKILLed 29-min suite + repeated `git stash push/pop` degrading the
+  worktree env.
+- Remaining (`ownership_s1/s2/s4`, `decomposed_child::merge_blocked_*`,
+  `shared_route_registration`): **expected behavior-change** — they assert
+  the deleted fail-closed `merge_blocked` contract. Contract-migration of
+  these is deferred TAIL work (was to be Codex-led; now deferred per the
+  no-Codex-this-session instruction).
+- **Net: zero proven keystone logic regressions.** Caveat: env degradation
+  mid-investigation means the with/without split cannot be re-proven
+  cleanly without an env reset; the keystone's deterministic own-tests +
+  the pending Linkboard e2e are the real validation.
+
+### Validation status
+Unit suite is NOT a reliable gate here (integration-heavy, no per-test
+timeout, env-fragile). Real thesis test = Linkboard e2e: does always-land
+break the convergence/cascade failure. Pending next.
