@@ -4331,8 +4331,14 @@ def _resume_root_from_checkpoint(
 
     Returns ``None`` (→ unchanged fresh-run behavior) unless ALL hold:
       * the task graph has the root task with ≥1 emitted child,
-      * root is NOT already terminal (pass/partial/merge_blocked/catastrophic
-        — a finished run should re-run fresh, not "resume" a done product),
+      * root is NOT a "done" terminal (``pass`` = success, nothing to retry;
+        ``catastrophic`` = unrecoverable, refusing fresh logic). Phase 1.2-A
+        (2026-05-19): ``partial`` and ``merge_blocked`` ARE resumable — the
+        fast fix→resume→re-run-integration-only loop. The user fixes code,
+        resumes, and the pipeline skips the ~40min rebuild and re-enters
+        integration on the persisted task graph + per-child branches; the
+        integration phase overwrites the persisted root verdict with its
+        new outcome.
       * the persisted root intent matches (guards against intent drift —
         resuming an old decomposition for a changed intent would be wrong),
       * a persisted spec.json checkpoint exists.
@@ -4354,7 +4360,9 @@ def _resume_root_from_checkpoint(
     ]
     if not child_ids:
         return None
-    if root_t.get("verdict") in {"pass", "partial", "merge_blocked", "catastrophic"}:
+    # Phase 1.2-A: only "done" terminals block resume. `partial` /
+    # `merge_blocked` are iteration targets (fix → resume → re-run integration).
+    if root_t.get("verdict") in {"pass", "catastrophic"}:
         return None
     persisted_intent = str(root_t.get("intent") or "").strip()
     if persisted_intent and persisted_intent != str(intent).strip():

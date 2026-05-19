@@ -70,9 +70,32 @@ def test_fresh_project_no_graph_returns_none() -> None:
     )
 
 
-def test_terminal_root_returns_none() -> None:
-    # A finished product should re-run fresh, not "resume" a done run.
-    for verdict in ("pass", "partial", "merge_blocked", "catastrophic"):
+def test_failed_but_iterable_root_is_resumable() -> None:
+    # Phase 1.2-A (2026-05-19): the fast fix→resume→re-run-integration-only
+    # loop. A run that ended `partial` or `merge_blocked` is iterable — after
+    # fixing code, resume must skip the ~40min rebuild and re-enter
+    # integration on the persisted task graph + per-child branches.
+    for verdict in ("partial", "merge_blocked"):
+        tasks = dict(_RESUMABLE)
+        tasks["root"] = {"intent": "build X", "verdict": verdict}
+        d, rs = _project(tasks)
+        out = _resume_root_from_checkpoint(
+            project_dir=d, config={}, root_session_dir=rs, intent="build X"
+        )
+        assert out is not None, f"{verdict} must be resumable for iteration"
+        _spec, root_result = out
+        # Synth root re-enters as pending_children; integration phase will
+        # overwrite the persisted verdict with its new outcome.
+        assert root_result.task_id == ROOT_TASK_ID
+        assert root_result.decomposition == "emit"
+        assert sorted(root_result.emitted_subtask_ids) == ["c1", "c2"]
+
+
+def test_success_or_catastrophic_root_returns_none() -> None:
+    # Only success (`pass`) and unrecoverable `catastrophic` block resume.
+    # The remaining `_RESUMABLE`-pattern terminals (partial, merge_blocked)
+    # are intentionally resumable — see test_failed_but_iterable_root above.
+    for verdict in ("pass", "catastrophic"):
         tasks = dict(_RESUMABLE)
         tasks["root"] = {"intent": "build X", "verdict": verdict}
         d, rs = _project(tasks)
