@@ -1,0 +1,13 @@
+{
+  "profile_id": "webapp.react-vite-fastapi.py312",
+  "description": "React + TypeScript + Vite frontend, FastAPI + SQLAlchemy backend, uv with pinned Python 3.12, launched by a single Bash-3 start.sh. Deterministic and version-pinned so the build agent never guesses the env-critical scaffold.",
+  "services": {
+    "frontend": { "env": "PORT", "default": 5173, "probe": "/" },
+    "backend": { "env": "API_PORT", "default": 8000, "probe": "/api/health" }
+  },
+  "unsupported_stack_tokens": [
+    "next.js", "nextjs", "django", "rails", "ruby on rails", "svelte",
+    "sveltekit", "vue", "vuejs", "angular", "remix", "nuxt", "gatsby",
+    "spring boot", "flask", "express.js", "deno", "golang", "rust backend"
+  ]
+}

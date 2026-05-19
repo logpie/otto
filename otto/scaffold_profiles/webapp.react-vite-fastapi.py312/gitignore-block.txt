@@ -1,0 +1,12 @@
+# >>> otto scaffold-profile managed (P0: no committed lockfiles) >>>
+# Generated lockfiles must stay ignored so the clean verifier never flips to
+# `npm ci` / `uv --locked` before the P1 dependency-amendment path exists.
+package-lock.json
+frontend/package-lock.json
+uv.lock
+backend/uv.lock
+node_modules/
+**/node_modules/
+.venv/
+**/.venv/
+# <<< otto scaffold-profile managed <<<
