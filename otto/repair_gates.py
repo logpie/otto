@@ -38,6 +38,12 @@ _NON_REPAIRABLE_REASONS_BY_CODE = {
     "provider_auth_missing": "provider authentication is missing; a coding agent cannot create credentials",
     "provider_permission_denied": "provider permissions deny the request; code repair cannot grant access",
     "provider_quota_exhausted": "provider quota is exhausted; code repair cannot add quota",
+    # Environment, not a product defect: the host lacks a usable uv /
+    # Python 3.12 toolchain. A coding agent cannot install a system
+    # interpreter — repairing product code would never fix it (Codex Plan
+    # Gate R3#2). Surfaced by the Otto-seeded start.sh (exit 86).
+    "missing_toolchain": "the host lacks a usable uv / Python 3.12 toolchain; a coding agent cannot provision a system interpreter",
+    "clean_deploy_missing_toolchain": "the host lacks a usable uv / Python 3.12 toolchain; a coding agent cannot provision a system interpreter",
 }
 
 

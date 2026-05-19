@@ -294,6 +294,11 @@ def preflight_issues_from_clean_oracle(
             legacy_kind = "clean_deploy_port_busy"
         elif kind == "copy_failed":
             legacy_kind = "clean_deploy_copy_failed"
+        elif kind == "missing_toolchain":
+            # Environment failure (no usable uv / Python 3.12) — keep it
+            # DISTINCT, never collapsed into the generic start/smoke kinds,
+            # so it routes as non-repairable infra (Codex Plan Gate R3#2).
+            legacy_kind = "clean_deploy_missing_toolchain"
         elif kind in {"install_failed", "build_failed", "py_compile_failed", "start_failed"}:
             legacy_kind = "clean_deploy_start_failed"
         elif kind == "ports_not_listening":

@@ -233,7 +233,17 @@ def register_v5_command(main: click.Group) -> None:
         if result.failure_reason:
             console.print(f"  [yellow]reason:[/yellow] {result.failure_reason}")
 
-        # Exit code: 0 unless catastrophic.
+        # Exit code: 0 unless catastrophic (1). A `missing_toolchain` block is
+        # an ENVIRONMENT failure, not a product defect or an Otto crash — give
+        # it a DISTINCT non-success exit (3) so CI / callers can tell "fix your
+        # host toolchain" apart from "Otto/product broke" (Codex Plan Gate
+        # R3#2; never reported as a product merge_blocked success).
+        if "missing_toolchain" in (result.failure_reason or ""):
+            console.print(
+                "  [yellow]environment:[/yellow] no usable uv / Python 3.12 "
+                "toolchain on this host — not a product defect"
+            )
+            sys.exit(3)
         if result.verdict == "catastrophic":
             sys.exit(1)
 

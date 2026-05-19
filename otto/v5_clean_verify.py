@@ -67,6 +67,7 @@ FailureKind = Literal[
     "no_start_sh",
     "port_busy",
     "start_failed",
+    "missing_toolchain",
     "ports_not_listening",
     "ui_journey_failed",
     "oracle_infra_error",
@@ -2448,6 +2449,23 @@ def _subtree_verify_start_sh(
             if ret is not None and ret != 0 and not start_exited_early:
                 start_exited_early = True
                 out = _deploy_tail()
+                # The Otto-seeded scaffold's start.sh exits 86 (and prints a
+                # `missing_toolchain` sentinel) when there is no usable uv /
+                # python3.12 toolchain — an ENVIRONMENT failure, not a product
+                # defect. Classify it distinctly so it is routed as
+                # non-repairable infra (never architect re-entry / bounded
+                # child repair / product merge_blocked). Codex Plan Gate R3#2.
+                if ret == 86 or "missing_toolchain" in out:
+                    return (
+                        False,
+                        "missing_toolchain",
+                        "start.sh could not find a usable uv / Python 3.12 "
+                        f"toolchain (exit {ret}). This is an environment "
+                        "failure, not a product defect. "
+                        f"Last output (truncated): {out[-800:]!r}",
+                        steps,
+                        sorted(listening),
+                    )
                 return (
                     False,
                     "start_failed",
