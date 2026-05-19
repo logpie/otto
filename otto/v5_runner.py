@@ -3780,6 +3780,17 @@ def _foundation_clean_boot_probe_targets(
     return foundation_ids, ready_features
 
 
+def _foundation_failure_action(*, probe_blocks: bool) -> str:
+    """Phase 4 (2026-05-19): the locked-design decision for when the
+    foundation clean-boot probe blocks. Always DEGRADE to the
+    deterministic P0 scaffold (materialize_seed) so feature children can
+    still build/merge on a working base — never strip features from the
+    ready queue. Pure decision; the actual materialize happens at the
+    caller. Combines with Phase 5 (foundation's own verdict lands
+    `partial`+annotation via the chokepoint, not merge_blocked)."""
+    return "degrade_to_scaffold" if probe_blocks else "proceed"
+
+
 def _seed_foundation_gate_spec(fg_session: Path) -> bool:
     """Make the FOUNDATION-GATE CLEAN-BOOT PROBE's session dir spec-bearing.
 
@@ -6166,8 +6177,9 @@ async def _process_children(
                             "message": (
                                 "merged foundation scaffold failed the "
                                 "clean-boot probe before feature dispatch; "
-                                "re-enter the foundation to fix it before "
-                                "the feature builds absorb it"
+                                "degrading to P0 scaffold so features can "
+                                "still build/merge (Phase 4); foundation "
+                                "verdict lands partial+annotation (Phase 5)"
                             ),
                             "parent_task_id": parent_task_id,
                             "foundation_task_ids": _fg_foundation_ids,
@@ -6180,6 +6192,52 @@ async def _process_children(
                             "task_id": _fg_fid,
                             "structured_reason": _fg_feedback,
                         })
+                        # Phase 4 (2026-05-19): degrade to P0 scaffold so
+                        # features can still build/merge on a working base.
+                        # The clean-boot probe revealed the merged foundation
+                        # doesn't boot; replace it with the deterministic
+                        # scaffold and let feature dispatch proceed.
+                        if (
+                            _foundation_failure_action(probe_blocks=True)
+                            == "degrade_to_scaffold"
+                        ):
+                            try:
+                                from otto.scaffold_profiles import (
+                                    PROFILE_WEBAPP_REACT_VITE_FASTAPI_PY312,
+                                    materialize_seed,
+                                )
+                                from otto.v5_branching import commit_worktree
+                                materialize_seed(
+                                    project_dir=project_dir,
+                                    profile_id=PROFILE_WEBAPP_REACT_VITE_FASTAPI_PY312,
+                                )
+                                commit_worktree(
+                                    worktree_path=project_dir,
+                                    message=(
+                                        "otto: degrade foundation to P0 "
+                                        "scaffold after clean-boot failure "
+                                        "(Phase 4)"
+                                    ),
+                                )
+                                _emit(on_event, {
+                                    "event": "foundation_clean_boot_degraded_to_scaffold",
+                                    "task_id": _fg_fid,
+                                    "_written_at": time.strftime(
+                                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                                    ),
+                                })
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "Phase 4 degrade-to-scaffold failed for "
+                                    "%s: %s; foundation will land partial "
+                                    "without scaffold replacement",
+                                    _fg_fid,
+                                    exc,
+                                )
+                        # Phase 5: foundation's own verdict lands `partial`
+                        # +annotation via the chokepoint (no fresh-Lead
+                        # cascade). Feature dispatch then proceeds on the
+                        # degraded scaffold.
                         await _reenter_or_block_architect_contract(
                             project_dir=project_dir,
                             architect_tid=_fg_fid,
@@ -6190,36 +6248,15 @@ async def _process_children(
                             config=config,
                             on_event=on_event,
                         )
-                        if str(
-                            (get_task(project_dir, _fg_fid) or {}).get("verdict")
-                            or ""
-                        ) != "merge_blocked":
-                            continue
-                        for _fg_entry in _fg_ready_features:
-                            _fg_ftid = str(_fg_entry.get("task_id") or "")
-                            _fg_res = child_results.get(_fg_ftid) or LeadResult(
-                                task_id=_fg_ftid,
-                                verdict="merge_blocked",
-                                decomposition="inline",
-                            )
-                            _record_task_merge_blocked_reason(
-                                project_dir=project_dir,
-                                task_id=_fg_ftid,
-                                result=_fg_res,
-                                reason=str(_fg_feedback["message"]),
-                                origin="foundation_clean_boot",
-                                structured_reason=_fg_feedback,
-                            )
-                            child_results[_fg_ftid] = _fg_res
-                        _fg_blocked = {
-                            str(_e.get("task_id") or "")
-                            for _e in _fg_ready_features
-                        }
-                        ready = [
-                            _e
-                            for _e in ready
-                            if str(_e.get("task_id") or "") not in _fg_blocked
-                        ]
+                        # The previous feature-blocking loop (mark every
+                        # ready feature merge_blocked + strip them from
+                        # the ready queue) was the discard-pathology at
+                        # the foundation-gate scope. After Phase 5 the
+                        # foundation's verdict is `partial` not
+                        # `merge_blocked`, so the prior block branch was
+                        # already unreachable; explicitly removed for
+                        # clarity. Features stay in `ready` and proceed.
+                        continue
 
         # Spawn ready tasks up to max_parallel.
         spawned_any = False
