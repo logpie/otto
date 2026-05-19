@@ -330,7 +330,15 @@ def scaffold_surface_note(contract: dict[str, object]) -> str:
         f"{SCAFFOLD_CONTRACT_FILENAME}. These files are AUTHORITATIVE — do NOT "
         "rewrite, replace, or restructure start.sh, the package/build manifests, "
         "tsconfig/vite config, or the backend pyproject. Build product code "
-        "AROUND them; you may add dependencies to the existing manifests."
+        "AROUND them; you may add dependencies to the existing manifests. "
+        "The frontend entry is seeded and build-clean: index.html and "
+        "src/main.tsx are AUTHORITATIVE invariants (do NOT rewrite them); "
+        "src/App.tsx is the extend-point — build the product UI there and in "
+        "the modules it statically imports. Add pages/components with EAGER "
+        "static imports (import X from \"./...\"); NEVER React.lazy(() => "
+        "import(\"./...\")) or otherwise dynamic-import a module that does "
+        "not exist yet — rollup cannot resolve it and `npm run build` "
+        "(enforced at the foundation clean-boot gate) fails."
     )
 
 

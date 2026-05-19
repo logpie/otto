@@ -58,6 +58,9 @@ def test_profile_renders_the_expected_seed_files() -> None:
         "frontend/tsconfig.json",
         "frontend/tsconfig.node.json",
         "frontend/vite.config.ts",
+        "frontend/index.html",
+        "frontend/src/main.tsx",
+        "frontend/src/App.tsx",
         "backend/pyproject.toml",
         "backend/.python-version",
     ):
@@ -369,3 +372,140 @@ def test_surface_note_marks_scaffold_authoritative() -> None:
     assert "do NOT" in note
     assert PID in note
     assert "start.sh" in note
+
+
+# --- the build-clean frontend entry skeleton -----------------------------
+#
+# Root cause (FRESH Linkboard linkboard-p0fix2-205454, 2026-05-18, terminal
+# `Verdict: merge_blocked` $0 2405s — foundation-clean-boot probe e6cd82173
+# fired, caught a GENUINE `npm run build` failure, bounded repair root-caused
+# it but ran out of the 40min hard-budget): the P0 frontend profile was
+# CONFIG-ONLY (package.json/tsconfig*/vite.config.ts) with NO `index.html`,
+# NO `src/main.tsx`, NO `src/App.tsx`. So the foundation agent had to invent
+# the entire Vite/React entry from scratch and reached for a
+# ``React.lazy(() => import("./features/..."))`` router referencing feature
+# pages that do not exist at foundation-build time -> rollup
+# ``ModuleLoader.resolveDynamicImport`` cannot resolve them -> ``npm run
+# build`` exit 1. A config-only frontend that cannot ``npm run build``
+# standalone re-introduces the exact "agent guesses the env/build-critical
+# scaffold" moving target the P0 profile exists to eliminate, one layer up.
+#
+# Fix (consistent-by-construction with P0's seed-the-invariant thesis, NOT a
+# prose patch): the profile now also seeds a minimal build-clean
+# eager-import entry skeleton. ``index.html`` (Vite entry) and
+# ``src/main.tsx`` (React-18 root mount) are pure invariants; ``src/App.tsx``
+# is the minimal product-owned starting point the agent EXTENDS with eager
+# static imports. The seeded src must itself contain ZERO dynamic
+# ``import(`` / lazy code-splitting so the foundation frontend
+# ``npm run build``s clean by construction.
+
+_FRONTEND_ENTRY = ("frontend/index.html", "frontend/src/main.tsx",
+                    "frontend/src/App.tsx")
+
+
+def test_profile_seeds_build_clean_frontend_entry() -> None:
+    files = render_seed_files(PID)
+    for rel in _FRONTEND_ENTRY:
+        assert rel in files and files[rel].strip(), (
+            f"profile must seed a non-empty {rel} (was config-only -> agent "
+            f"guessed an unbuildable React.lazy router)"
+        )
+    html = files["frontend/index.html"]
+    assert '<div id="root"></div>' in html or 'id="root"' in html, (
+        f"index.html must mount #root; got {html!r}"
+    )
+    assert "/src/main.tsx" in html, (
+        "index.html must load the seeded Vite entry /src/main.tsx"
+    )
+    main = files["frontend/src/main.tsx"]
+    assert "createRoot" in main and 'from "react-dom/client"' in main, (
+        "main.tsx must be the React-18 createRoot mount"
+    )
+    assert 'from "./App"' in main, "main.tsx must render the seeded App"
+    app = files["frontend/src/App.tsx"]
+    assert "export default" in app, "App.tsx must default-export the entry component"
+
+
+def test_seeded_frontend_src_has_no_dynamic_imports() -> None:
+    """The exact rollup ``resolveDynamicImport`` killer: the seeded frontend
+    entry must contain NO dynamic ``import( )`` call, NO ``React.lazy``, and
+    NO bare ``lazy(`` so the foundation frontend builds clean by
+    construction. (Same discipline as the seeded start.sh: the whole file is
+    scanned, so even the guidance comment must stay free of the forbidden
+    tokens — only eager static ``import X from "..."`` is allowed.)"""
+    files = render_seed_files(PID)
+    dyn = re.compile(r"\bimport\s*\(")
+    lazy = re.compile(r"\bReact\.lazy\b|\blazy\s*\(")
+    for rel in ("frontend/src/main.tsx", "frontend/src/App.tsx"):
+        src = files[rel]
+        assert not dyn.search(src), (
+            f"{rel} contains a dynamic import() — rollup cannot resolve it at "
+            f"`npm run build` (the linkboard-p0fix2 terminal block)"
+        )
+        assert not lazy.search(src), (
+            f"{rel} references React.lazy/lazy() — forbidden in the seeded "
+            f"entry (caused the foundation-clean-boot rollup failure)"
+        )
+        # the entry must use ordinary eager static imports
+        assert re.search(r'^\s*import\s+[^(]+\sfrom\s+"', src, re.M), (
+            f"{rel} must use eager static `import X from \"...\"` statements"
+        )
+
+
+def test_surface_note_forbids_dynamic_import_and_marks_entry_authoritative() -> None:
+    """Consistent-by-construction: the surfaced authoritative-files note must
+    also tell the agent the frontend entry is seeded, that index.html /
+    main.tsx are invariants, and that feature pages are added as EAGER
+    imports — never lazily loading a not-yet-existing module (the exact
+    foundation-clean-boot rollup root cause)."""
+    note = scaffold_surface_note(build_scaffold_contract(load_profile(PID)))
+    assert "index.html" in note and "main.tsx" in note, (
+        "note must name the seeded frontend entry invariants"
+    )
+    assert "App.tsx" in note, "note must point the agent at the extend-point"
+    low = note.lower()
+    assert "eager" in low, "note must require eager static imports"
+    assert "react.lazy" in low or "lazy(" in low or "dynamic import" in low, (
+        "note must explicitly forbid lazy/dynamic-importing a missing module"
+    )
+
+
+def test_seeded_frontend_npm_build_is_clean() -> None:
+    """The real generated-scaffold assertion (not doc-presence): materialize
+    the profile and run the seeded ``npm run build``; it must exit 0.
+
+    Opt-in / environment-gated so the fast offline suite stays fast: needs
+    ``npm`` on PATH and ``OTTO_SCAFFOLD_BUILD_E2E=1`` (it does a real
+    ``npm install`` + ``tsc -b && vite build``). The FRESH Linkboard run is
+    the campaign-level e2e proof; this is the local guard."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    import pytest
+
+    if not os.environ.get("OTTO_SCAFFOLD_BUILD_E2E"):
+        pytest.skip("set OTTO_SCAFFOLD_BUILD_E2E=1 to run the real npm build")
+    if shutil.which("npm") is None:
+        pytest.skip("npm not on PATH")
+
+    with tempfile.TemporaryDirectory() as d:
+        proj = Path(d)
+        materialize_seed(project_dir=proj, profile_id=PID)
+        fe = proj / "frontend"
+        inst = subprocess.run(
+            ["npm", "install", "--no-audit", "--no-fund"],
+            cwd=fe, capture_output=True, text=True, timeout=600,
+        )
+        assert inst.returncode == 0, f"npm install failed:\n{inst.stderr[-2000:]}"
+        bld = subprocess.run(
+            ["npm", "run", "build"],
+            cwd=fe, capture_output=True, text=True, timeout=600,
+        )
+        assert bld.returncode == 0, (
+            f"seeded frontend `npm run build` failed (the rollup "
+            f"resolveDynamicImport class must be impossible by "
+            f"construction):\n{bld.stdout[-2000:]}\n{bld.stderr[-2000:]}"
+        )
