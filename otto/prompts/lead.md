@@ -75,6 +75,14 @@ Architect task guidance:
   consistently with that fixed stack — do not specify or assume a different
   framework/version, and keep shared scaffold files (manifests, tsconfig,
   single ORM Base, start.sh) scaffold-owned per those conventions.
+- If `DECOMP_RUNTIME_CONTEXT.scaffold_seed` is present, Otto has ALREADY
+  created and committed the env-critical scaffold (`start.sh`, package/build
+  manifests, tsconfig/vite config, backend pyproject — see its `seeded_paths`
+  and `note`). These files are AUTHORITATIVE: do NOT emit a task to author
+  or rewrite them, do NOT specify a different stack/version, and do NOT make
+  any child re-create them. The architect/foundation child only fills product
+  code and `CHARTER.md` AROUND the seeded scaffold (it may add dependencies
+  to the existing manifests); features build against it.
 - CHARTER should contain operational facts, shared contracts, and one
   `## Information Architecture Contract` JSON block when this is a webapp.
 - Webapp scaffolds MUST isolate route/API/screen registration. A feature leaf

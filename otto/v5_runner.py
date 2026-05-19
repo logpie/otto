@@ -3813,6 +3813,146 @@ def _seed_foundation_gate_spec(fg_session: Path) -> bool:
     return True
 
 
+def _seed_scaffold_profile(
+    *,
+    project_dir: Path,
+    spec: Any,
+    intent: str,
+    config: dict[str, Any],
+    root_branch: str,
+    on_event: Any = None,
+) -> tuple[str, str]:
+    """P0 scaffold-profile SEED phase (plan-scaffold-profiles.md, Codex Plan
+    Gate thread 019e3df2..., 17 findings folded).
+
+    Runs AFTER flat compile and BEFORE root Lead so the architect decomposes
+    around an Otto-owned, version-pinned env scaffold instead of guessing it
+    (3 consecutive moving-target clean-boot cascades: tsc -> ports/bare-python
+    -> python3.14). Hydrate-first (R4#1): a valid existing
+    ``scaffold-contract.json`` wins over the greenfield guard; a corrupt /
+    half-seeded state is a terminal ``invalid`` the caller MUST surface as
+    catastrophic (never silent). When ``action == "seed"`` the seed is written
+    AND committed on ``root_branch`` with a clean-tree assertion BEFORE the
+    caller proceeds — child worktrees branch from the parent integration
+    branch, so an uncommitted seed would not propagate (R3#3). Mirrors the
+    pure-helper + thin-wiring pattern of ``_seed_foundation_gate_spec``.
+
+    Returns ``(action, reason)`` where action is hydrate|seed|skip|invalid.
+    The agent-facing surface note is derived downstream by
+    ``_build_decomp_runtime_context`` from the committed contract (single
+    source of truth — no state threading).
+    """
+    from otto.scaffold_profiles import materialize_seed, plan_scaffold_seed
+    from otto.v5_branching import (
+        commit_worktree,
+        git_current_branch,
+        git_status_porcelain,
+    )
+
+    try:
+        tracked = subprocess.run(
+            ["git", "ls-files"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        repo_relpaths = [
+            p for p in (tracked.stdout or "").splitlines() if p.strip()
+        ]
+    except Exception:  # noqa: BLE001
+        repo_relpaths = []
+
+    journeys = getattr(spec, "behavior_journeys", None)
+    journeys = journeys if isinstance(journeys, list) else []
+    has_ui = any(
+        isinstance(j, dict) and str(j.get("verification_level") or "") == "ui"
+        for j in journeys
+    )
+    override = config.get("scaffold_profile")
+    plan = plan_scaffold_seed(
+        project_dir=project_dir,
+        intent_text=intent,
+        project_kind=str(getattr(spec, "project_kind", "") or "webapp"),
+        has_ui_journey=has_ui,
+        scaffold_profile_override=override if isinstance(override, str) else None,
+        repo_relpaths=repo_relpaths,
+    )
+
+    if plan.action == "hydrate":
+        _emit(on_event, {
+            "event": "scaffold_seed_hydrated",
+            "profile_id": plan.profile_id,
+            "reason": plan.reason,
+        })
+        return "hydrate", plan.reason
+    if plan.action == "skip":
+        _emit(on_event, {"event": "scaffold_seed_skipped", "reason": plan.reason})
+        return "skip", plan.reason
+    if plan.action == "invalid":
+        _emit(on_event, {
+            "event": "scaffold_seed_state_invalid", "reason": plan.reason,
+        })
+        return "invalid", plan.reason
+
+    # action == "seed": hard-commit invariant (R3#3).
+    current = git_current_branch(project_dir)
+    if current != root_branch:
+        reason = (
+            f"branch_mismatch: on {current!r}, expected root_branch "
+            f"{root_branch!r}"
+        )
+        _emit(on_event, {
+            "event": "scaffold_seed_state_invalid", "reason": reason,
+        })
+        return "invalid", reason
+
+    def _head() -> str | None:
+        try:
+            hp = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(project_dir),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return (hp.stdout or "").strip() or None
+        except Exception:  # noqa: BLE001
+            return None
+
+    mat = materialize_seed(
+        project_dir=project_dir,
+        profile_id=str(plan.profile_id),
+        head_sha=_head(),
+    )
+    ok, detail = commit_worktree(
+        worktree_path=project_dir,
+        message=f"otto: seed scaffold profile {plan.profile_id}",
+    )
+    if not ok:
+        reason = f"seed_commit_failed: {detail}"
+        _emit(on_event, {
+            "event": "scaffold_seed_state_invalid", "reason": reason,
+        })
+        return "invalid", reason
+    leftover = git_status_porcelain(project_dir)
+    if leftover:
+        reason = f"seed_tree_not_clean: {leftover[:5]}"
+        _emit(on_event, {
+            "event": "scaffold_seed_state_invalid", "reason": reason,
+        })
+        return "invalid", reason
+
+    _emit(on_event, {
+        "event": "scaffold_seed_committed",
+        "profile_id": plan.profile_id,
+        "profile_hash": mat.contract.get("profile_hash"),
+        "head_sha": _head(),
+        "seeded_paths": list(mat.written_paths),
+    })
+    return "seed", plan.reason
+
+
 def _child_result_allows_upward_merge(
     project_dir: Path,
     task_id: str,
@@ -4351,6 +4491,20 @@ async def run_v5_pipeline(
                 intent=intent,
                 integration_branch=None,
             )
+            # Hydrate-first (R4#1): verify the seed state on resume. Never
+            # reseed / 2nd commit; a corrupt state is terminal, not silent.
+            _seed_action, _seed_reason = _seed_scaffold_profile(
+                project_dir=project_dir,
+                spec=spec,
+                intent=intent,
+                config=config,
+                root_branch=root_branch,
+                on_event=on_event,
+            )
+            if _seed_action == "invalid":
+                result.verdict = "catastrophic"
+                result.failure_reason = f"scaffold_seed_state_invalid: {_seed_reason}"
+                return result
         else:
             # ---- Phase B: Compile flat spec ----
             _emit(on_event, {"event": "compile_start"})
@@ -4393,6 +4547,20 @@ async def run_v5_pipeline(
                 intent=intent,
                 integration_branch=None,
             )
+
+            # ---- Phase B.5: Otto-owned scaffold seed (before decomposition)
+            _seed_action, _seed_reason = _seed_scaffold_profile(
+                project_dir=project_dir,
+                spec=spec,
+                intent=intent,
+                config=config,
+                root_branch=root_branch,
+                on_event=on_event,
+            )
+            if _seed_action == "invalid":
+                result.verdict = "catastrophic"
+                result.failure_reason = f"scaffold_seed_state_invalid: {_seed_reason}"
+                return result
 
             # ---- Phase C: Run root Lead ----
             _emit(on_event, {"event": "lead_start", "task_id": ROOT_TASK_ID})
@@ -9553,6 +9721,7 @@ def _build_decomp_runtime_context(
         },
         "spec_profile": _spec_profile(spec_payload),
         "feature_partition_targets": feature_partition_targets,
+        "scaffold_seed": _scaffold_seed_runtime_context(project_dir),
         "runtime_policy": {
             "tier": str(config.get("v5_tier") or "auto"),
             "root_only_decomposition": _root_only_decomposition_enabled(config),
@@ -9561,6 +9730,32 @@ def _build_decomp_runtime_context(
             "provider": str(provider),
         },
     }
+
+
+def _scaffold_seed_runtime_context(project_dir: Path) -> dict[str, Any] | None:
+    """Surface the committed Otto-owned scaffold (R2#1) to the architect/lead
+    AND to architect-contract re-entry — both go through
+    ``_build_decomp_runtime_context``. Reads the persisted, committed
+    ``scaffold-contract.json`` (single source of truth) so no state has to be
+    threaded and it stays correct across resume / re-decomposition. Returns
+    None when no profile was seeded (skip path) — the key is simply absent."""
+    try:
+        from otto.scaffold_profiles import (
+            read_existing_contract,
+            scaffold_surface_note,
+        )
+
+        contract = read_existing_contract(project_dir)
+        if not contract:
+            return None
+        return {
+            "profile_id": contract.get("profile_id"),
+            "seeded_paths": contract.get("seeded_paths"),
+            "services": contract.get("services"),
+            "note": scaffold_surface_note(contract),
+        }
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _spec_payload(*, spec: FlatSpec | None, spec_path: Path | None) -> dict[str, Any]:
