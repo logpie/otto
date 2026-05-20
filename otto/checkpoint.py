@@ -392,9 +392,7 @@ def resolve_resume(
         agent_session_id=_checkpoint_agent_session_id(checkpoint),
         start_round=current_round + 1,
         total_cost=float(checkpoint.get("total_cost", 0.0) or 0.0),
-        total_duration=float(
-            checkpoint.get("total_duration_so_far", checkpoint.get("total_duration", 0.0)) or 0.0
-        ),
+        total_duration=float(checkpoint.get("total_duration", 0.0) or 0.0),
         rounds=list(checkpoint.get("rounds", []) or []),
         resumed=True,
         prior_command=prior_cmd,
@@ -544,9 +542,7 @@ def write_checkpoint(
         "agent_session_id": session_id,
         "current_round": current_round,
         "total_cost": float(total_cost),
-        "total_cost_so_far": float(total_cost),
         "total_duration": float(total_duration),
-        "total_duration_so_far": float(total_duration),
         "rounds": rounds or [],
         "child_session_ids": sorted(
             set(child_session_ids or (prior.get("child_session_ids", []) if prior else []) or [])
@@ -759,10 +755,8 @@ def complete_checkpoint(
         data.update(_normalize_checkpoint_data(data))
         data["status"] = "completed"
         data["total_cost"] = float(total_cost)
-        data["total_cost_so_far"] = float(total_cost)
         if total_duration is not None:
             data["total_duration"] = float(total_duration)
-            data["total_duration_so_far"] = float(total_duration)
         if current_round is not None:
             data["current_round"] = current_round
         if rounds is not None:
