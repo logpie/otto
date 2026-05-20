@@ -11,7 +11,19 @@ Audit reports backing these items live in `archive/audits/{,round3,round4}/`.
 
 ---
 
-## Prompt content — 27 findings (Round 4)
+## ~~Prompt content — 27 findings (Round 4)~~ — DONE (R4 follow-up)
+
+All 27 findings applied to `otto/prompts/lead.md` (+134 LOC) and
+`otto/prompts/lead-integration.md` (+41 LOC). Each section ends with a
+`<!-- audit:F-NN applied -->` marker for traceability. Constraints
+respected: webapp/React/FastAPI guidance kept as the canonical example;
+non-webapp branches added; JSON-schema strict-check work left in code
+(intentional — only the prompt was tightened). Linkboard e2e run
+afterward verified the prompt rewrites don't regress passing flows.
+
+---
+
+## Prompt content (original audit) — pre-Round-4 historical
 
 `otto/prompts/{lead.md,lead-integration.md,setup-claude.md}` were
 deep-audited for brittleness, magic numbers, contradictions, and
