@@ -198,16 +198,38 @@ _TERMINAL_FOR_REDISPATCH_VERDICTS = frozenset({
 _NON_RUNNABLE_VERDICTS = _TERMINAL_FOR_REDISPATCH_VERDICTS | {"pending_children"}
 
 
-def _verdict_satisfies_dependency(verdict: Any, review_state: Any = None) -> bool:
+def _verdict_satisfies_dependency(
+    entry_or_verdict: Any, review_state: Any = None
+) -> bool:
     """Return whether a completed upstream can unlock a dependent task.
 
-    This is deliberately stricter than "non-runnable." Failed terminal states
-    must not be redispatched, but they also must not satisfy dependents. Raw
-    partials are not enough either; only the P0 reviewed-partial gate is.
+    Delegates to `task_graph.entry_is_satisfactory_terminal` so this
+    predicate stays in sync with the upward-merge predicates (the
+    historical drift between them caused unmerged annotated-partial
+    work; see [[project_v5_one_hard_gate_redesign]] + Codex Plan Gate
+    R2#1). Annotated partials (chokepoint LAND path) DO satisfy
+    dependents now.
+
+    Backward-compat: this used to take `(verdict, review_state)` scalars
+    only — callers that still pass two scalars get reconstituted into a
+    minimal entry dict. New callers should pass the full task entry
+    dict, which carries `landed_with_annotation` + blocker metadata.
+    Per Codex Plan Gate R5#2 we widen the signature; the two-scalar
+    form stays only so existing callers don't break mid-refactor.
     """
-    if verdict == "pass":
-        return True
-    return verdict == "partial" and review_state == "reviewed_partial"
+    from otto.queue.task_graph import entry_is_satisfactory_terminal
+
+    if isinstance(entry_or_verdict, dict):
+        return entry_is_satisfactory_terminal(entry_or_verdict)
+    # Legacy two-arg form: reconstruct a minimal entry. NOTE: this path
+    # CANNOT see `landed_with_annotation` because the caller didn't pass
+    # it — so for the chokepoint-LAND case the legacy callers will keep
+    # the pre-fix behavior. New callers should pass the full task
+    # entry dict.
+    return entry_is_satisfactory_terminal({
+        "verdict": entry_or_verdict,
+        "review_state": review_state,
+    })
 
 
 def _globally_dependency_satisfied_task_ids(project_dir: Path) -> set[str]:
@@ -226,8 +248,10 @@ def _globally_dependency_satisfied_task_ids(project_dir: Path) -> set[str]:
         return set()
     done: set[str] = set()
     for tid, t in (graph.get("tasks") or {}).items():
-        verdict = t.get("verdict")
-        if _verdict_satisfies_dependency(verdict, t.get("review_state")):
+        # Pass the full task entry so the predicate can see
+        # `landed_with_annotation` + blocker metadata, not just
+        # (verdict, review_state). Codex Plan Gate R5#2.
+        if _verdict_satisfies_dependency(t if isinstance(t, dict) else None):
             done.add(tid)
     return done
 
