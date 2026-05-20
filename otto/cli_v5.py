@@ -223,13 +223,21 @@ def register_v5_command(main: click.Group) -> None:
                 # Phase 1.2-A: a previously-failed run was resumed; the
                 # pipeline SKIPPED compile + decompose + child rebuild and
                 # is re-entering integration on the persisted task graph +
-                # per-child branches. Make this loudly visible so the user
-                # knows they're iterating, not starting fresh.
+                # per-child branches. Phase 1.2-B: if prior repair packets
+                # were carried, the repair agent will resume its prior SDK
+                # session (option.resume=agent_session_id) instead of
+                # starting fresh — surface that too.
+                carried = int(payload.get("repair_packets_carried", 0) or 0)
+                carried_note = (
+                    f"; carried {carried} prior repair packet(s) "
+                    f"— agent will continue prior conversation"
+                    if carried > 0 else ""
+                )
                 console.print(
                     f"  [bold cyan]♻ resumed from checkpoint[/bold cyan] "
                     f"({payload.get('emitted', 0)} child branches preserved; "
                     f"skipped compile + decompose + child builds → "
-                    f"re-entering integration)"
+                    f"re-entering integration{carried_note})"
                 )
 
         # Pass review-first-decomp + tier preset into the v5 pipeline.

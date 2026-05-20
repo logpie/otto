@@ -4321,6 +4321,101 @@ async def _ensure_child_merge_ready(
     )
 
 
+def _carry_prior_repair_packets(
+    project_dir: Path,
+    new_root_session_dir: Path,
+) -> int:
+    """Phase 1.2-B (2026-05-19): copy the most recent prior session's
+    ``integration/repair/<unit>/repair_packet.json`` (+ events.jsonl)
+    into the new session's mirror path, rewriting the serialized
+    ``packet_dir`` field to the new location. Most-recent-per-unit
+    wins. This lets ``_run_preflight_payload_repair_session``'s
+    load-if-exists fire across runs → the repair agent's Claude SDK
+    session is resumed (``options.resume=agent_session_id``) instead
+    of starting fresh, eliminating the per-resume re-orientation
+    overhead (the agent continues its prior conversation).
+
+    Schema bug it fixes: ``packet_dir`` is serialized as a full path
+    including the OLD ``session_dir``; without rewriting, a subsequent
+    ``persist()`` would write back to the old location (research-phase-
+    1.2-b.md). Codex was waived this session — extra-careful TDD via
+    test_phase_1_2_b_carry_repair_packet.py."""
+    import shutil
+
+    prior_packets = sorted(
+        project_dir.glob(
+            "otto_logs/sessions/*/integration/repair/*/repair_packet.json"
+        ),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,  # most recent first
+    )
+    if not prior_packets:
+        return 0
+
+    seen_units: set[str] = set()
+    carried = 0
+    for prior_packet in prior_packets:
+        unit_name = prior_packet.parent.name
+        if unit_name in seen_units:
+            continue
+        seen_units.add(unit_name)
+        # Self-copy guard (Path.is_relative_to is 3.9+; codebase is 3.12).
+        try:
+            if prior_packet.is_relative_to(new_root_session_dir):
+                continue
+        except (AttributeError, ValueError):  # noqa: BLE001 - belt-and-suspenders
+            pass
+
+        new_packet_dir = (
+            new_root_session_dir / "integration" / "repair" / unit_name
+        )
+        new_packet_path = new_packet_dir / "repair_packet.json"
+        try:
+            payload = json.loads(prior_packet.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Phase 1.2-B: skipping unreadable prior packet %s: %s",
+                prior_packet,
+                exc,
+            )
+            continue
+        # The schema-bug fix: rewrite packet_dir to the NEW location so
+        # subsequent persist() goes there, not the prior session's path.
+        payload["packet_dir"] = str(new_packet_dir)
+
+        try:
+            new_packet_dir.mkdir(parents=True, exist_ok=True)
+            new_packet_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True, default=str)
+                + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning(
+                "Phase 1.2-B: failed to write carried packet %s: %s",
+                new_packet_path,
+                exc,
+            )
+            continue
+
+        prior_events = prior_packet.parent / "repair_packet.events.jsonl"
+        if prior_events.is_file():
+            try:
+                shutil.copy2(
+                    prior_events,
+                    new_packet_dir / "repair_packet.events.jsonl",
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Phase 1.2-B: failed to copy events.jsonl from %s: %s",
+                    prior_events,
+                    exc,
+                )
+        carried += 1
+
+    return carried
+
+
 def _resume_root_from_checkpoint(
     *,
     project_dir: Path,
@@ -4401,12 +4496,27 @@ def _resume_root_from_checkpoint(
         cost_usd=0.0,
         final_text="resumed from checkpoint",
     )
+    # Phase 1.2-B (2026-05-19): also carry the prior session's
+    # integration repair packets so the resumed run's repair agent
+    # picks up its prior Claude SDK session (resume=agent_session_id),
+    # not just the orchestrator. Best-effort: failures here logged but
+    # don't block resume — agent simply starts fresh in that case.
+    try:
+        carried = _carry_prior_repair_packets(project_dir, root_session_dir)
+    except Exception as exc:  # noqa: BLE001 - resume is best-effort
+        logger.warning(
+            "Phase 1.2-B: _carry_prior_repair_packets failed: %s; "
+            "proceeding without carried packets",
+            exc,
+        )
+        carried = 0
     _emit(on_event, {
         "event": "v5_resume_from_checkpoint",
         "task_id": ROOT_TASK_ID,
         "emitted": len(child_ids),
         "child_task_ids": child_ids,
         "spec_checkpoint": str(specs[0]),
+        "repair_packets_carried": carried,
     })
     return None, root_result
 
