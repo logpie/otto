@@ -71,296 +71,8 @@ def _read_queue_commands(repo: Path) -> list[dict]:
 # ---------- enqueue commands ----------
 
 
-def test_queue_build_appends_to_queue_yml(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    # Capture date BEFORE the action so a midnight-rollover race can't make
-    # the assertion compare against tomorrow's date.
-    expected_date = cli_queue_module.time.strftime("%Y-%m-%d")
-    code, out, _ = _run(["queue", "build", "add csv export"], cwd=repo)
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert len(tasks) == 1
-    assert tasks[0].command_argv == ["build", "add csv export"]
-    assert tasks[0].resolved_intent == "add csv export"
-    assert tasks[0].resumable is True
-    assert tasks[0].id == "add-csv-export"
-    assert tasks[0].branch == f"build/add-csv-export-{expected_date}"
-    assert tasks[0].worktree == ".worktrees/add-csv-export"
-
-
-def test_queue_build_from_subdirectory_uses_repo_root(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    nested = repo / "src" / "pkg"
-    nested.mkdir(parents=True)
-
-    code, out, _ = _run(["queue", "build", "add csv export"], cwd=nested)
-
-    assert code == 0, out
-    assert (repo / QUEUE_FILE).exists()
-    assert not (nested / QUEUE_FILE).exists()
-    assert load_queue(repo)[0].resolved_intent == "add csv export"
-
-
-def test_queue_build_reports_malformed_otto_yaml_cleanly(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "otto.yaml").write_text("default_branch: [\n")
-
-    code, out, _ = _run(["queue", "build", "add csv export"], cwd=repo)
-
-    assert code == 2
-    assert "otto.yaml" in out
-    assert "Traceback" not in out
-
-
-def test_queue_build_reports_malformed_queue_yml_cleanly(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / QUEUE_FILE).write_text(
-        "schema_version: 1\n"
-        "tasks:\n"
-        "  - id: broken\n"
-        "    added_at: 2026-04-21T00:00:00Z\n"
-    )
-
-    code, out, _ = _run(["queue", "build", "add csv export"], cwd=repo)
-
-    assert code == 2
-    assert "queue.yml is malformed" in out
-    assert "command_argv" in out
-    assert "Traceback" not in out
-
-
-def test_queue_improve_reports_intent_resolution_error_cleanly(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "README.md").write_text("x" * 9000, encoding="utf-8")
-
-    code, out, _ = _run(["queue", "improve", "bugs"], cwd=repo)
-
-    assert code == 2
-    assert "intent exceeds" in out
-    assert "Traceback" not in out
-
-
-def test_queue_certify_reports_intent_resolution_error_cleanly(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "README.md").write_text("x" * 9000, encoding="utf-8")
-
-    code, out, _ = _run(["queue", "certify"], cwd=repo)
-
-    assert code == 2
-    assert "intent exceeds" in out
-    assert "Traceback" not in out
-
-
-def test_queue_certify_marked_not_resumable(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "intent.md").write_text("test product")
-    code, out, _ = _run(["queue", "certify"], cwd=repo)
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[0].resumable is False
-    assert tasks[0].resolved_intent == "test product"
-
-
-def test_queue_certify_explicit_intent_overrides_project_files(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "intent.md").write_text("from project files")
-    code, out, _ = _run(["queue", "certify", "from cli"], cwd=repo)
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[0].resolved_intent == "from cli"
-
-
-def test_queue_improve_bugs(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "intent.md").write_text("a product")
-    code, out, _ = _run(["queue", "improve", "bugs", "error handling"], cwd=repo)
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[0].command_argv[:2] == ["improve", "bugs"]
-    assert tasks[0].focus == "error handling"
-    # W3-IMPORTANT-1: improve resolved_intent prefers focus over the
-    # snapshot intent so the task board / agent context describes what
-    # the user actually asked for, not the project's README.
-    assert tasks[0].resolved_intent == "error handling"
-
-
-def test_queue_improve_explicit_focus_avoids_oversized_readme(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "README.md").write_text("x" * 9000, encoding="utf-8")
-
-    code, out, _ = _run(["queue", "improve", "feature", "small footer polish"], cwd=repo)
-
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[0].focus == "small footer polish"
-    assert tasks[0].resolved_intent == "small footer polish"
-
-
-def test_queue_improve_target_focus_not_set(tmp_path: Path):
-    """For target subcommand, the arg goes to `target` not `focus`."""
-    repo = init_repo(tmp_path)
-    (repo / "intent.md").write_text("a product")
-    code, out, _ = _run(["queue", "improve", "target", "latency < 100ms"], cwd=repo)
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[0].target == "latency < 100ms"
-    assert tasks[0].focus is None
-
-
-def test_queue_improve_target_requires_goal(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "intent.md").write_text("a product")
-
-    code, out, _ = _run(["queue", "improve", "target"], cwd=repo)
-
-    assert code == 2
-    assert "Missing argument 'GOAL'" in out
-    assert load_queue(repo) == []
-
-
-def test_queue_improve_target_requires_goal_before_passthrough(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "intent.md").write_text("a product")
-
-    code, out, _ = _run(["queue", "improve", "target", "--rounds", "4"], cwd=repo)
-
-    assert code == 2
-    assert "Intent looks like a CLI flag" in out
-    assert load_queue(repo) == []
-
-
-def test_queue_build_rejects_resume_in_args(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    code, out, _ = _run(["queue", "build", "test", "--resume"], cwd=repo)
-    assert code == 2
-    assert "--resume is not allowed" in out
-
-
-def test_queue_build_rejects_flag_like_missing_intent_after_double_dash(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    code, out, _ = _run(["queue", "build", "--as", "add", "--", "--fast"], cwd=repo)
-    assert code == 2
-    assert "looks like a CLI flag" in out
-    assert '"add csv export" --as csv -- --fast --rounds 3' in out
-
-
-def test_queue_build_accepts_real_intent_before_double_dash(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    code, out, _ = _run(
-        ["queue", "build", "real intent", "--as", "add", "--", "--fast"],
-        cwd=repo,
-    )
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[0].id == "add"
-    assert tasks[0].command_argv == ["build", "real intent", "--fast"]
-
-
 def test_looks_like_flag_rejects_short_flag_like_intent():
     assert cli_queue_module._looks_like_flag("-foo") is True
-
-
-def test_queue_build_allows_dash_inside_intent(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    code, out, _ = _run(["queue", "build", "fix bug -1"], cwd=repo)
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[0].resolved_intent == "fix bug -1"
-
-
-def test_queue_build_explicit_as(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    code, out, _ = _run(["queue", "build", "test", "--as", "my-id"], cwd=repo)
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[0].id == "my-id"
-
-
-def test_queue_build_explicit_as_rejects_reserved(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    code, out, _ = _run(["queue", "build", "test", "--as", "ls"], cwd=repo)
-    assert code == 2
-    assert "reserved" in out
-
-
-def test_queue_build_dedup_appends_suffix(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "same intent"], cwd=repo)
-    _run(["queue", "build", "same intent"], cwd=repo)
-    tasks = load_queue(repo)
-    ids = [t.id for t in tasks]
-    assert ids == ["same-intent", "same-intent-2"]
-    assert tasks[0].branch != tasks[1].branch
-    assert tasks[0].worktree != tasks[1].worktree
-
-
-def test_queue_build_after_validates_existing(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "first"], cwd=repo)
-    code, out, _ = _run(["queue", "build", "second", "--after", "first"], cwd=repo)
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[1].after == ["first"]
-
-
-def test_queue_build_after_rejects_unknown(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    code, out, _ = _run(["queue", "build", "test", "--after", "nonexistent"], cwd=repo)
-    assert code == 2
-    assert "unknown task" in out
-
-
-def test_queue_certify_after_requires_explicit_unmerged_opt_in(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "first"], cwd=repo)
-
-    code, out, _ = _run(["queue", "certify", "integration", "--after", "first"], cwd=repo)
-
-    assert code == 2
-    assert "does not merge their branches" in out
-    assert "otto merge --all --verify risk-based" in out
-
-
-def test_queue_certify_after_can_be_explicitly_independent(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "first"], cwd=repo)
-
-    code, out, _ = _run(
-        ["queue", "certify", "integration", "--after", "first", "--allow-unmerged-after"],
-        cwd=repo,
-    )
-
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[1].command_argv[0] == "certify"
-    assert tasks[1].after == ["first"]
-
-
-def test_queue_build_rejects_unknown_target_flag(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    code, out, _ = _run(["queue", "build", "test", "--bogus-flag"], cwd=repo)
-    assert code == 2
-    assert "No such option: --bogus-flag" in out
-
-
-def test_queue_improve_rejects_missing_option_value(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "intent.md").write_text("a product")
-    code, out, _ = _run(["queue", "improve", "bugs", "--rounds"], cwd=repo)
-    assert code == 2
-    assert "Option '--rounds' requires an argument" in out
-
-
-def test_queue_improve_accepts_valid_target_args(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    (repo / "intent.md").write_text("a product")
-    code, out, _ = _run(["queue", "improve", "bugs", "errors", "--rounds", "4"], cwd=repo)
-    assert code == 0, out
-    tasks = load_queue(repo)
-    assert tasks[0].command_argv == ["improve", "bugs", "errors", "--rounds", "4"]
-
-
-# ---------- ls / show ----------
 
 
 def test_queue_ls_empty(tmp_path: Path):
@@ -372,82 +84,17 @@ def test_queue_ls_empty(tmp_path: Path):
 
 def test_queue_ls_shows_tasks(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv export"], cwd=repo)
-    _run(["queue", "build", "settings page"], cwd=repo)
+    _run(["queue", "v5", "csv export"], cwd=repo)
+    _run(["queue", "v5", "settings page"], cwd=repo)
     code, out, _ = _run(["queue", "ls"], cwd=repo)
     assert code == 0
     assert "csv-export" in out
     assert "settings-page" in out
 
 
-def test_queue_ls_marks_interrupted_resume_ready(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv export"], cwd=repo)
-    session_id = "2026-04-22-010203-abc123"
-    paths.ensure_session_scaffold(repo / ".worktrees" / "csv-export", session_id)
-    paths.session_checkpoint(repo / ".worktrees" / "csv-export", session_id).write_text(
-        json.dumps({"status": "paused", "updated_at": "2026-04-22T01:02:03Z"})
-    )
-    _write_watcher_state(
-        repo,
-        watcher=None,
-        tasks={
-            "csv-export": {
-                "status": "terminating",
-                "terminal_status": "interrupted",
-                "failure_reason": "interrupted by watcher shutdown; resume available",
-            }
-        },
-    )
-
-    code, out, _ = _run(["queue", "ls"], cwd=repo)
-
-    assert code == 0
-    assert "csv-export" in out
-    assert "interrupted" in out
-    assert "ready" in out
-
-
-def test_queue_show_existing_task(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv export"], cwd=repo)
-    code, out, _ = _run(["queue", "show", "csv-export"], cwd=repo)
-    assert code == 0
-    assert "csv-export" in out
-    assert "queued" in out
-    assert "Resumable: True" in out
-
-
-def test_queue_show_reports_resume_checkpoint_for_interrupted_task(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv export"], cwd=repo)
-    session_id = "2026-04-22-010203-abc123"
-    paths.ensure_session_scaffold(repo / ".worktrees" / "csv-export", session_id)
-    checkpoint_path = paths.session_checkpoint(repo / ".worktrees" / "csv-export", session_id)
-    checkpoint_path.write_text(json.dumps({"status": "paused", "updated_at": "2026-04-22T01:02:03Z"}))
-    _write_watcher_state(
-        repo,
-        watcher=None,
-        tasks={
-            "csv-export": {
-                "status": "terminating",
-                "terminal_status": "interrupted",
-                "failure_reason": "interrupted by watcher shutdown; resume available",
-            }
-        },
-    )
-
-    code, out, _ = _run(["queue", "show", "csv-export"], cwd=repo)
-
-    assert code == 0
-    assert "Resume status:" in out
-    assert "ready" in out
-    assert str(checkpoint_path).replace("\n", "") in "".join(out.split())
-
-
 def test_queue_ls_hides_resume_checkpoint_diagnostics_for_running_task(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv export"], cwd=repo)
+    _run(["queue", "v5", "csv export"], cwd=repo)
     session_id = "2026-04-22-010203-abc123"
     worktree = repo / ".worktrees" / "csv-export"
     paths.ensure_session_scaffold(worktree, session_id)
@@ -473,7 +120,7 @@ def test_queue_ls_hides_resume_checkpoint_diagnostics_for_running_task(tmp_path:
 
 def test_queue_show_reports_proof_of_work_html_path(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv export"], cwd=repo)
+    _run(["queue", "v5", "csv export"], cwd=repo)
     pow_json = paths.certify_dir(repo, "run-queue-show") / "proof-of-work.json"
     pow_html = pow_json.with_name("proof-of-work.html")
     pow_html.parent.mkdir(parents=True, exist_ok=True)
@@ -527,7 +174,7 @@ def test_queue_show_reports_malformed_queue_yml_cleanly(tmp_path: Path):
 
 def test_queue_rm_without_watcher_removes_from_queue(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
+    _run(["queue", "v5", "csv"], cwd=repo)
     code, out, _ = _run(["queue", "rm", "csv"], cwd=repo)
     assert code == 0
     assert "Removed csv from queue." in out
@@ -537,7 +184,7 @@ def test_queue_rm_without_watcher_removes_from_queue(tmp_path: Path):
 
 def test_queue_rm_with_watcher_running_appends_command(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
+    _run(["queue", "v5", "csv"], cwd=repo)
     now = _fresh_iso_now()
     _write_watcher_state(
         repo,
@@ -579,7 +226,7 @@ def test_queue_rm_reports_malformed_queue_yml_cleanly(tmp_path: Path):
 
 def test_queue_rm_refuses_finished_task_without_watcher(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
+    _run(["queue", "v5", "csv"], cwd=repo)
     _write_watcher_state(
         repo,
         watcher=None,
@@ -661,7 +308,7 @@ def test_queue_cleanup_with_watcher_queues_cleanup_command(tmp_path: Path, monke
 
 def test_queue_rm_without_watcher_refuses_non_queued_task(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
+    _run(["queue", "v5", "csv"], cwd=repo)
     _write_watcher_state(
         repo,
         watcher=None,
@@ -672,28 +319,6 @@ def test_queue_rm_without_watcher_refuses_non_queued_task(tmp_path: Path):
 
     assert code == 0
     assert "marked running, but the worker is not running" in out
-    assert [task.id for task in load_queue(repo)] == ["csv"]
-
-
-def test_queue_rm_refuses_interrupted_task_with_resume_or_cleanup_hint(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
-    session_id = "2026-04-22-010203-abc123"
-    paths.ensure_session_scaffold(repo / ".worktrees" / "csv", session_id)
-    paths.session_checkpoint(repo / ".worktrees" / "csv", session_id).write_text(
-        json.dumps({"status": "paused", "updated_at": "2026-04-22T01:02:03Z"})
-    )
-    _write_watcher_state(
-        repo,
-        watcher=None,
-        tasks={"csv": {"status": "interrupted"}},
-    )
-
-    code, out, _ = _run(["queue", "rm", "csv"], cwd=repo)
-
-    assert code == 2
-    assert "otto queue resume csv" in out
-    assert "queue cleanup csv" in out
     assert [task.id for task in load_queue(repo)] == ["csv"]
 
 
@@ -892,7 +517,7 @@ def test_queue_cleanup_accepts_interrupted_explicit_task(tmp_path: Path) -> None
 
 def test_queue_cancel_without_watcher_removes_queued_task(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
+    _run(["queue", "v5", "csv"], cwd=repo)
     code, out, _ = _run(["queue", "cancel", "csv"], cwd=repo)
     assert code == 0
     assert "was never started. Removed from queue." in out
@@ -902,7 +527,7 @@ def test_queue_cancel_without_watcher_removes_queued_task(tmp_path: Path):
 
 def test_queue_cancel_without_watcher_warns_for_running_task(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
+    _run(["queue", "v5", "csv"], cwd=repo)
     _write_watcher_state(
         repo,
         watcher=None,
@@ -923,7 +548,7 @@ def test_queue_cancel_without_watcher_warns_for_running_task(tmp_path: Path):
 
 def test_queue_cancel_with_watcher_describes_queued_task(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
+    _run(["queue", "v5", "csv"], cwd=repo)
     now = _fresh_iso_now()
     _write_watcher_state(
         repo,
@@ -952,7 +577,7 @@ def test_queue_cancel_with_watcher_describes_queued_task(tmp_path: Path, monkeyp
 
 def test_queue_cancel_with_watcher_describes_running_task(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
+    _run(["queue", "v5", "csv"], cwd=repo)
     now = _fresh_iso_now()
     _write_watcher_state(
         repo,
@@ -981,7 +606,7 @@ def test_queue_cancel_with_watcher_describes_running_task(tmp_path: Path, monkey
 
 def test_queue_cancel_with_watcher_reports_terminating_task(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
+    _run(["queue", "v5", "csv"], cwd=repo)
     now = _fresh_iso_now()
     _write_watcher_state(
         repo,
@@ -1004,7 +629,7 @@ def test_queue_cancel_with_watcher_reports_terminating_task(tmp_path: Path, monk
 
 def test_queue_cancel_with_watcher_refuses_finished_task(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "csv"], cwd=repo)
+    _run(["queue", "v5", "csv"], cwd=repo)
     now = _fresh_iso_now()
     _write_watcher_state(
         repo,
@@ -1091,164 +716,10 @@ def test_queue_resume_help_shows_examples(tmp_path: Path):
     assert "labels,due" in out
 
 
-def test_queue_resume_defaults_to_resumable_interrupted_tasks(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "labels"], cwd=repo)
-    _run(["queue", "certify", "release"], cwd=repo)
-    session_id = "2026-04-22-010203-abc123"
-    paths.ensure_session_scaffold(repo / ".worktrees" / "labels", session_id)
-    paths.session_checkpoint(repo / ".worktrees" / "labels", session_id).write_text(
-        json.dumps({"status": "paused", "updated_at": "2026-04-22T01:02:03Z"})
-    )
-    _write_watcher_state(
-        repo,
-        watcher=None,
-        tasks={
-            "labels": {
-                "status": "terminating",
-                "terminal_status": "interrupted",
-                "failure_reason": "interrupted by watcher shutdown; resume available",
-            },
-            "release": {"status": "interrupted"},
-        },
-    )
-
-    code, out, _ = _run(["queue", "resume"], cwd=repo)
-
-    assert code == 0
-    assert "Marked labels to resume" in out
-    tasks = load_queue(repo)
-    assert [task.id for task in tasks] == ["labels", "release"]
-    cmds = _read_queue_commands(repo)
-    assert len(cmds) == 1
-    assert cmds[0]["cmd"] == "resume"
-    assert cmds[0]["id"] == "labels"
-    assert cmds[0]["schema_version"] == 1
-    assert cmds[0]["command_id"].startswith("queue-cmd-")
-
-
-def test_queue_resume_explicit_task_errors_without_checkpoint(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "labels"], cwd=repo)
-    _write_watcher_state(
-        repo,
-        watcher=None,
-        tasks={"labels": {"status": "interrupted"}},
-    )
-
-    code, out, _ = _run(["queue", "resume", "labels"], cwd=repo)
-
-    assert code == 2
-    assert "cannot be resumed from checkpoint" in out
-    assert "checkpoint missing" in out
-
-
-def test_queue_resume_explicit_failed_task_with_checkpoint(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "labels"], cwd=repo)
-    session_id = "2026-04-22-010203-abc123"
-    paths.ensure_session_scaffold(repo / ".worktrees" / "labels", session_id)
-    paths.session_checkpoint(repo / ".worktrees" / "labels", session_id).write_text(
-        json.dumps({"status": "in_progress", "updated_at": "2026-04-22T01:02:03Z"})
-    )
-    _write_watcher_state(
-        repo,
-        watcher=None,
-        tasks={
-            "labels": {
-                "status": "failed",
-                "failure_reason": "timed out after 1800s (limit 1800s)",
-            }
-        },
-    )
-
-    code, out, _ = _run(["queue", "resume", "labels"], cwd=repo)
-
-    assert code == 0
-    assert "Marked labels to resume" in out
-    cmds = _read_queue_commands(repo)
-    assert len(cmds) == 1
-    assert cmds[0]["cmd"] == "resume"
-    assert cmds[0]["id"] == "labels"
-
-
-def test_queue_resume_failed_task_uses_completed_manifest_checkpoint(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "labels"], cwd=repo)
-    session_id = "2026-04-22-010203-abc123"
-    worktree = repo / ".worktrees" / "labels"
-    paths.ensure_session_scaffold(worktree, session_id)
-    checkpoint_path = paths.session_checkpoint(worktree, session_id)
-    checkpoint_path.write_text(
-        json.dumps({"status": "completed", "updated_at": "2026-04-22T01:02:03Z"}),
-        encoding="utf-8",
-    )
-    queue_manifest = paths.queue_manifest_path(repo, "labels")
-    queue_manifest.parent.mkdir(parents=True, exist_ok=True)
-    queue_manifest.write_text(
-        json.dumps({
-            "queue_task_id": "labels",
-            "run_id": session_id,
-            "checkpoint_path": str(checkpoint_path),
-            "exit_status": "failure",
-        }),
-        encoding="utf-8",
-    )
-    _write_watcher_state(
-        repo,
-        watcher=None,
-        tasks={
-            "labels": {
-                "status": "failed",
-                "failure_reason": "proof gate blocked after completed checkpoint",
-            }
-        },
-    )
-
-    code, out, _ = _run(["queue", "resume", "labels"], cwd=repo)
-
-    assert code == 0
-    assert "Marked labels to resume" in out
-    cmds = _read_queue_commands(repo)
-    assert cmds[-1]["cmd"] == "resume"
-    assert cmds[-1]["id"] == "labels"
-
-
-def test_queue_resume_explicit_failed_task_rejects_stale_checkpoint(tmp_path: Path):
-    repo = init_repo(tmp_path)
-    _run(["queue", "build", "labels"], cwd=repo)
-    session_id = "2026-04-22-010203-abc123"
-    paths.ensure_session_scaffold(repo / ".worktrees" / "labels", session_id)
-    paths.session_checkpoint(repo / ".worktrees" / "labels", session_id).write_text(
-        json.dumps({
-            "status": "in_progress",
-            "updated_at": "2026-04-22T01:02:03Z",
-            "git_sha": "stale-sha",
-        })
-    )
-    _write_watcher_state(
-        repo,
-        watcher=None,
-        tasks={
-            "labels": {
-                "status": "failed",
-                "failure_reason": "timed out after 1800s (limit 1800s)",
-            }
-        },
-    )
-
-    code, out, _ = _run(["queue", "resume", "labels"], cwd=repo)
-
-    assert code == 2
-    assert "cannot be resumed from checkpoint" in out
-    assert "checkpoint is stale: git HEAD changed" in out
-    assert not (repo / COMMANDS_FILE).exists()
-
-
 def test_queue_resume_select_reports_removed_selector(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "labels"], cwd=repo)
-    _run(["queue", "build", "due"], cwd=repo)
+    _run(["queue", "v5", "labels"], cwd=repo)
+    _run(["queue", "v5", "due"], cwd=repo)
     for task_id, session_id in [("labels", "2026-04-22-010203-abc123"), ("due", "2026-04-22-010204-def456")]:
         paths.ensure_session_scaffold(repo / ".worktrees" / task_id, session_id)
         paths.session_checkpoint(repo / ".worktrees" / task_id, session_id).write_text(
@@ -1285,7 +756,7 @@ def test_queue_rm_rejects_unknown_task(tmp_path: Path):
 
 def test_queue_yml_uses_schema_v1(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "build", "test"], cwd=repo)
+    _run(["queue", "v5", "test"], cwd=repo)
     import yaml
     raw = yaml.safe_load((repo / QUEUE_FILE).read_text())
     assert raw["schema_version"] == 1

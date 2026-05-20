@@ -16,26 +16,6 @@ class Allow:
 
 
 ALLOWLIST: dict[str, Allow] = {
-    "otto/checks.py:_malformed_check_evidence:success_on_malformed_path": Allow(
-        reason=(
-            "Documented v2.1 design: malformed per-check payloads are "
-            "non-slice-blocking, but raw.evidence_quality=malformed and "
-            "raw.proof_usable=false make them non-proof for audit."
-        )
-    ),
-    "otto/checks.py:_run_state_invariant:success_on_malformed_path": Allow(
-        reason=(
-            "Documented v2.1 design: malformed StateInvariant expressions are "
-            "diagnostic-only pass; raw.evidence_quality=malformed and "
-            "raw.proof_usable=false prevent treating them as proof."
-        )
-    ),
-    "otto/cli_run.py:_pipeline_base_branch:identity_default_fallback": Allow(
-        reason=(
-            "Legacy root pipeline branch fallback after env/current/config checks; "
-            "not child worktree dependency identity. Kept visible as medium debt."
-        )
-    ),
     "otto/mission_control/service.py:_merge_target:identity_default_fallback": Allow(
         reason=(
             "Legacy Mission Control merge target fallback when otto.yaml is absent "
