@@ -52,6 +52,7 @@ def register_v5_command(main: click.Group) -> None:
     _register_review_commands(v5_group)
     _register_status_command(v5_group)
     _register_reset_verdict_command(v5_group)
+    _register_retry_children_command(v5_group)
 
     @v5_group.command("run")
     @click.argument("intent", required=True)
@@ -709,3 +710,123 @@ def _register_reset_verdict_command(v5_group: click.Group) -> None:
             console.print(
                 f"[green]reset {len(task_ids)} task verdict(s) to {new_verdict}[/green]"
             )
+
+
+def _register_retry_children_command(v5_group: click.Group) -> None:
+    """`otto v5 retry-children` — targeted broken-state recovery."""
+
+    @v5_group.command("retry-children")
+    @click.option(
+        "--task", "task_ids", multiple=True, required=True,
+        help="Task id(s) to retry (repeatable).",
+    )
+    @click.option(
+        "--cascade-dependents", is_flag=True,
+        help="Also retry any downstream tasks that depend on the targets "
+             "and currently have satisfactory verdicts.",
+    )
+    @click.option(
+        "--continue", "continue_dirty", is_flag=True,
+        help="Continue even if a target worktree is dirty.",
+    )
+    @click.option(
+        "--force", is_flag=True,
+        help="Override pass-verdict refusal.",
+    )
+    @click.option(
+        "--dry-run", is_flag=True,
+        help="Show the validated plan without making changes.",
+    )
+    def retry_children_cmd(
+        task_ids: tuple[str, ...],
+        cascade_dependents: bool,
+        continue_dirty: bool,
+        force: bool,
+        dry_run: bool,
+    ) -> None:
+        """Retry specified child tasks. All-or-nothing transaction;
+        rollback on any failure. Targets must be leaf children with
+        persisted worktrees + branches.
+
+        After retry, dispatch via `otto v5 run "<original intent>"`.
+        """
+        require_git()
+        try:
+            project_dir = resolve_project_dir(Path.cwd())
+        except ConfigError as exc:
+            error_console.print(f"[error]{exc}[/error]")
+            sys.exit(2)
+
+        from otto.v5_retry import execute_plan, validate_and_plan
+
+        plan = validate_and_plan(
+            project_dir=project_dir,
+            task_ids=list(task_ids),
+            cascade_dependents=cascade_dependents,
+            allow_continue_dirty=continue_dirty,
+            force_pass=force,
+        )
+
+        console.print(f"[bold]Retry plan for {len(task_ids)} task(s):[/bold]")
+        if plan.targets:
+            console.print(f"  targets ({len(plan.targets)}):")
+            for tid in plan.targets:
+                wt = plan.worktrees.get(tid, "?")
+                sdir = plan.sessions_to_archive.get(tid, "<no session>")
+                console.print(f"    {tid}")
+                console.print(f"      worktree:  {wt}")
+                console.print(f"      session:   {sdir}")
+        if plan.cascaded:
+            console.print(
+                f"  [yellow]cascaded ({len(plan.cascaded)}):[/yellow]"
+            )
+            for tid in plan.cascaded:
+                console.print(f"    {tid}")
+        if plan.failures:
+            console.print(
+                f"  [red]validation failures ({len(plan.failures)}):[/red]"
+            )
+            for f in plan.failures:
+                console.print(f"    [red]{f.task_id}[/red]: {f.reason}")
+
+        if not plan.ok:
+            error_console.print(
+                "[error]plan validation failed; no state changes made.[/error]"
+            )
+            sys.exit(2)
+
+        if dry_run:
+            console.print(
+                "[dim]dry-run — no changes written. Re-run without "
+                "--dry-run to execute.[/dim]"
+            )
+            return
+
+        console.print(
+            "[dim]acquiring retry-children lock + executing...[/dim]"
+        )
+        result = execute_plan(project_dir=project_dir, plan=plan)
+        if result.error:
+            error_console.print(
+                f"[error]execution failed: {result.error}[/error]"
+            )
+            if result.rolled_back:
+                console.print(
+                    "[yellow]rolled back: graph entries restored, archived "
+                    "sessions un-archived.[/yellow]"
+                )
+            sys.exit(3)
+
+        console.print(
+            f"[green]retry-children complete:[/green] "
+            f"reset {len(result.reset_task_ids)} task(s), "
+            f"archived {len(result.archived)} session(s), "
+            f"pending: "
+            f"{result.pending_summary.get('rewritten', [])} rewritten, "
+            f"{result.pending_summary.get('missing', [])} missing, "
+            f"{result.pending_summary.get('superseded_count', 0)} superseded."
+        )
+        console.print(
+            "\n[bold]Next:[/bold] `otto v5 run \"<original intent>\"` "
+            "(no --fresh). The scheduler will pick up the reset entries."
+        )
