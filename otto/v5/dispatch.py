@@ -1510,7 +1510,7 @@ async def _run_lead_with_fallback(
     )
     duration_a = _time.monotonic() - started
     append_attempt(
-        session_dir / "summary.json",
+        session_dir / _paths.SUMMARY_FILENAME,
         provider=provider_a,
         cost_usd=result_a.cost_usd,
         outcome=result_a.verdict,
@@ -1560,7 +1560,7 @@ async def _run_lead_with_fallback(
         execution_scope=execution_scope,
     )
     append_attempt(
-        session_dir / "summary.json",
+        session_dir / _paths.SUMMARY_FILENAME,
         provider=fb,
         cost_usd=result_b.cost_usd,
         outcome=result_b.verdict,

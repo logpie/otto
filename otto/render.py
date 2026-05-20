@@ -42,8 +42,14 @@ from otto.token_usage import format_token_spend
 
 logger = logging.getLogger("otto.render")
 
-PROOF_PACKET_HTML = "proof-packet.html"
-PROOF_PACKET_JSON = "proof-packet.json"
+# Re-exports of the canonical filename constants from otto.paths so existing
+# call-sites in render.py keep the short name. New code should import from
+# otto.paths directly.
+from otto.paths import (
+    PROOF_PACKET_HTML_FILENAME as PROOF_PACKET_HTML,
+    PROOF_PACKET_JSON_FILENAME as PROOF_PACKET_JSON,
+)
+
 PROOF_PACKET_SCHEMA_VERSION = 1
 
 

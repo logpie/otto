@@ -21,6 +21,11 @@ from urllib.parse import quote
 from fastapi import APIRouter, Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
+from otto.paths import (
+    PROOF_PACKET_HTML_FILENAME,
+    PROOF_PACKET_JSON_FILENAME,
+    SUMMARY_FILENAME,
+)
 from otto.mission_control.actions import (
     execute_abort_group,
     execute_pause_run,
@@ -150,7 +155,7 @@ def install_run_view_routes(
     def proof_packet_html(session_id: str) -> HTMLResponse:
         project = _resolve_project_dir()
         session_dir = resolve_session_dir(project, session_id)
-        path = session_dir / "proof-packet.html"
+        path = session_dir / PROOF_PACKET_HTML_FILENAME
         if not path.exists():
             raise HTTPException(status_code=404, detail="proof packet has not been produced")
         try:
@@ -263,8 +268,8 @@ def _summarize_session(session_dir: Path, session_id: str) -> dict[str, Any]:
     raising, so the landing page can render ``"—"`` placeholders without
     failing the whole list.
     """
-    summary = _read_json(session_dir / "summary.json") or {}
-    proof = _read_json(session_dir / "proof-packet.json") or {}
+    summary = _read_json(session_dir / SUMMARY_FILENAME) or {}
+    proof = _read_json(session_dir / PROOF_PACKET_JSON_FILENAME) or {}
     spec = _read_json(session_dir / "spec" / "spec.json") or {}
     lifecycle = _read_json(session_dir / "spec" / "lifecycle.json") or {}
 
@@ -379,8 +384,8 @@ def _session_finished_at(
     # Fallback: mtime of proof-packet (when the run actually wrote its
     # final artifact) or summary.json.
     for candidate in (
-        session_dir / "proof-packet.json",
-        session_dir / "summary.json",
+        session_dir / PROOF_PACKET_JSON_FILENAME,
+        session_dir / SUMMARY_FILENAME,
     ):
         if candidate.exists():
             try:
@@ -425,8 +430,8 @@ def _session_logs_payload(session_dir: Path, *, group_id: str | None = None) -> 
             candidates.extend(sorted(session_dir.glob(pattern)))
     else:
         candidates.extend([
-            session_dir / "summary.json",
-            session_dir / "proof-packet.json",
+            session_dir / SUMMARY_FILENAME,
+            session_dir / PROOF_PACKET_JSON_FILENAME,
         ])
         for pattern in (
             "spec/**/*.log",

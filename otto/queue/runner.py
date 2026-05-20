@@ -384,10 +384,10 @@ def _summary_path_from_manifest(manifest: dict[str, Any]) -> Path | None:
             return Path(value).expanduser()
     checkpoint = manifest.get("checkpoint_path")
     if isinstance(checkpoint, str) and checkpoint.strip():
-        return Path(checkpoint).expanduser().with_name("summary.json")
+        return Path(checkpoint).expanduser().with_name(paths.SUMMARY_FILENAME)
     mirror = manifest.get("mirror_of")
     if isinstance(mirror, str) and mirror.strip():
-        return Path(mirror).expanduser().with_name("summary.json")
+        return Path(mirror).expanduser().with_name(paths.SUMMARY_FILENAME)
     return None
 
 
@@ -2137,7 +2137,7 @@ class Runner:
         if not raw_session_dir:
             return None
         session_dir = Path(raw_session_dir).expanduser()
-        summary_path = session_dir / "summary.json"
+        summary_path = session_dir / paths.SUMMARY_FILENAME
         if not summary_path.exists():
             return None
         try:
@@ -2163,8 +2163,8 @@ class Runner:
         passed = _summary_indicates_product_success(summary)
         if not run_id:
             return None
-        proof_path = session_dir / "proof-packet.json"
-        checkpoint_path = session_dir / "checkpoint.json"
+        proof_path = session_dir / paths.PROOF_PACKET_JSON_FILENAME
+        checkpoint_path = session_dir / paths.CHECKPOINT_FILENAME
         canonical_path = session_dir / "manifest.json"
         payload: dict[str, Any] = {
             "command": command,

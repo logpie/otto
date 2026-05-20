@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from otto.defaults import DEFAULT_RUN_BUDGET_S
+from otto.paths import SUMMARY_FILENAME
 from otto.journey_scope_policy import (
     ExecutionScope,
     infer_execution_scope,
@@ -1376,7 +1377,7 @@ def _extract_verdict_json(text: str) -> dict[str, Any] | None:
 def _write_summary(session_dir: Path, result: LeadResult) -> None:
     """Write summary.json for this Lead's session."""
     session_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = session_dir / "summary.json"
+    summary_path = session_dir / SUMMARY_FILENAME
     data: dict[str, Any] = {
         "schema_version": 1,
         "task_id": result.task_id,

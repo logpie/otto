@@ -82,6 +82,16 @@ LEGACY_CERTIFIER_DIR_NAME = "certifier"
 LEGACY_ROUNDS_DIR_NAME = "rounds"
 LEGACY_RUNS_DIR_NAME = "runs"
 
+# Per-session artifact filenames. The session_summary / session_checkpoint
+# helpers below build full paths from session_id; these bare constants are
+# for the call-sites that already hold a session_dir locally and just need
+# to append a filename — they avoid duplicating the literal across the
+# codebase so a rename stays consistent.
+SUMMARY_FILENAME = "summary.json"
+CHECKPOINT_FILENAME = "checkpoint.json"
+PROOF_PACKET_HTML_FILENAME = "proof-packet.html"
+PROOF_PACKET_JSON_FILENAME = "proof-packet.json"
+
 
 def sidecar_lock_path(path: Path) -> Path:
     """Return the collision-safe sidecar lock path for a target file."""
@@ -225,12 +235,12 @@ def run_gc_tombstones_jsonl(project_dir: Path) -> Path:
 
 def session_checkpoint(project_dir: Path, session_id: str) -> Path:
     """Per-session resume checkpoint (only exists while in-flight/paused)."""
-    return session_dir(project_dir, session_id) / "checkpoint.json"
+    return session_dir(project_dir, session_id) / CHECKPOINT_FILENAME
 
 
 def session_summary(project_dir: Path, session_id: str) -> Path:
     """Post-run summary for completed sessions (permanent final record)."""
-    return session_dir(project_dir, session_id) / "summary.json"
+    return session_dir(project_dir, session_id) / SUMMARY_FILENAME
 
 
 def session_intent(project_dir: Path, session_id: str) -> Path:

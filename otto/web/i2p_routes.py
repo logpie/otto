@@ -38,6 +38,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from otto.paths import PROOF_PACKET_HTML_FILENAME, PROOF_PACKET_JSON_FILENAME
 from otto.spec_state import journal_path, replay
 from otto.web.session_resolver import iter_session_dirs, resolve_session_dir
 
@@ -128,7 +129,7 @@ def install_i2p_routes(
                 logger.warning("replay failed for %s: %s", session_id, exc)
 
         proof_packet = None
-        proof_packet_path = session_dir / "proof-packet.json"
+        proof_packet_path = session_dir / PROOF_PACKET_JSON_FILENAME
         if proof_packet_path.exists():
             try:
                 proof_packet = json.loads(proof_packet_path.read_text(encoding="utf-8"))
@@ -140,13 +141,13 @@ def install_i2p_routes(
             "spec": spec_data,
             "state": run_state,
             "proof_packet": proof_packet,
-            "has_proof_packet_html": (session_dir / "proof-packet.html").exists(),
+            "has_proof_packet_html": (session_dir / PROOF_PACKET_HTML_FILENAME).exists(),
         })
 
     @router.get("/sessions/{session_id}/proof-packet.html")
     def get_proof_packet_html(session_id: str) -> FileResponse:
         session_dir = resolve_session_dir(_resolve_project_dir(), session_id)
-        path = session_dir / "proof-packet.html"
+        path = session_dir / PROOF_PACKET_HTML_FILENAME
         if not path.exists():
             raise HTTPException(status_code=404, detail="proof-packet.html not yet produced")
         return FileResponse(path, media_type="text/html")
@@ -154,7 +155,7 @@ def install_i2p_routes(
     @router.get("/sessions/{session_id}/proof-packet.json")
     def get_proof_packet_json(session_id: str) -> FileResponse:
         session_dir = resolve_session_dir(_resolve_project_dir(), session_id)
-        path = session_dir / "proof-packet.json"
+        path = session_dir / PROOF_PACKET_JSON_FILENAME
         if not path.exists():
             raise HTTPException(status_code=404, detail="proof-packet.json not yet produced")
         return FileResponse(path, media_type="application/json")
@@ -186,7 +187,7 @@ def _session_summary(session_dir: Path) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "session_id": session_dir.name,
         "has_spec": True,
-        "has_proof_packet_html": (session_dir / "proof-packet.html").exists(),
+        "has_proof_packet_html": (session_dir / PROOF_PACKET_HTML_FILENAME).exists(),
     }
     spec_path = session_dir / "spec" / "spec.json"
     try:
@@ -199,7 +200,7 @@ def _session_summary(session_dir: Path) -> dict[str, Any]:
         summary["project_kind"] = ""
         summary["group_count"] = 0
 
-    proof_packet_path = session_dir / "proof-packet.json"
+    proof_packet_path = session_dir / PROOF_PACKET_JSON_FILENAME
     if proof_packet_path.exists():
         try:
             packet = json.loads(proof_packet_path.read_text(encoding="utf-8"))
