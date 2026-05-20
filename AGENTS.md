@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Otto is a Python project with a React/TypeScript web client. Core Python code lives in `otto/`; queue, merge, mission-control, provider, and certifier behavior are split by module. The web client source is in `otto/web/client/src/` and builds into `otto/web/static/`. Tests live in `tests/`. Operational notes and audits live in `docs/`, `audits/`, and `DEBUG.md`.
+Otto is a Python project with a React/TypeScript web client. Core Python code lives in `otto/`; queue, merge, mission-control, provider, and certifier behavior are split by module. The web client source is in `otto/web/client/src/` and builds into `otto/web/static/`. Tests live in `tests/`. Operational notes live in `docs/`; historical debug logs are archived under `archive/debug/`.
 
 ## Build, Test, and Development Commands
 

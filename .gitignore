@@ -59,6 +59,15 @@ output/
 # — local evidence only; pushed via PR description, not git.
 bench-results/
 
+# Loop automation output and generated reports (auto-produced; not for git)
+loop-report.md
+loop-config.json
+loop-evidence/
+e2e-results/
+bench-report.md
+.runlogs/otto-as-user-claude/
+# Keep .runlogs/architecture-debate/ (design docs) but ignore runtime evidence
+
 # --- otto v5 default ignores (BEGIN) ---
 # Otto-managed default ignore set. Build/test agents commonly produce these
 # artifacts; without them in .gitignore, agent commits include cache files

@@ -45,7 +45,7 @@ running, audit pending, etc).
 The loop terminates when ALL of these are true:
 
 - `progress.md` shows every phase from A0 through C marked `[✓]`
-- Sign-off criteria from `research.md §4.8` met:
+- Sign-off criteria from `archive/research/research.md §4.8` met:
   - All Phase A green (units + integration + Bench A + RUA on A4/A5)
   - Phase B green (Microfeed parity passes 2 of 3 runs)
   - Phase C complete (legacy code deleted, full test suite green)
@@ -111,7 +111,7 @@ Any violation → catastrophic; halt; do not commit; do not update progress.md.
 - **Never delete a failing test** to make it green. (Test stays; fix code.)
 - **Never weaken an assertion** to make it pass. (Assertion stays; fix code.)
 - **Never `try/except: pass`** to silence an error. (Error stays; fix root.)
-- **Never modify research.md / plan.md / wireframes** to match wrong code.
+- **Never modify archive/research/research.md / plan.md / wireframes** to match wrong code.
 - **Never add `# pragma: no cover`** or test markers to skip a test.
 - **Never special-case a fixture project** in production code.
 - **Never edit `otto_logs/` or `bench-results/`** as a "fix."
@@ -126,7 +126,7 @@ The loop halts only when continuing would lie:
 
 - Repair packet budget exhausted on the same hard drift
 - Same drift recurs across 3 different repair attempts (going in circles)
-- Plan-vs-impl divergence requires research.md or plan.md edits
+- Plan-vs-impl divergence requires archive/research/research.md or plan.md edits
 - Honest-failure regression unfixable in one tick
 - Two phases of progress lost in a row (regressing, not advancing)
 - Wall cap reached (default 14 days)
@@ -227,11 +227,11 @@ work for *all three* before claiming progress.
   always requires the gate.
 - **Does not silence failures.** Every failure goes into
   `drift-log.md` with full evidence.
-- **Does not modify research.md, plan.md, wireframes** without
+- **Does not modify archive/research/research.md, plan.md, wireframes** without
   explicit `drift-log.md` justification (these are user-signed-off
   designs).
 - **Does not invent new vocabulary.** Sticks to the unified terms
-  in research.md §2.
+  in archive/research/research.md §2.
 - **Does not commit to main.** Works only on `cc-i2p-2` branch.
 - **Does not skip Codex review** (when credits return).
 
@@ -239,7 +239,7 @@ work for *all three* before claiming progress.
 
 | File | Role | Loop access |
 |---|---|---|
-| `research.md` | Design source of truth | read-only |
+| `archive/research/research.md` | Design source of truth | read-only |
 | `plan.md` | Implementation plan | read-only |
 | `docs/otto-wireframes.md` | UI source of truth | read-only |
 | `progress.md` | Phase checklist + drift counters + tick log | read-write |
@@ -255,13 +255,13 @@ Copy this into `/loop` (no leading interval — dynamic mode). It is
 self-contained; the loop re-enters this prompt on each tick.
 
 ```
-/loop AUTONOMOUS OTTO REDESIGN to completion. Work from research.md, plan.md, docs/otto-wireframes.md as design source of truth. progress.md is the live phase checklist. drift-log.md is append-only drift incidents. review.md is append-only phase reviews. loop-report.md is append-only per-tick summaries.
+/loop AUTONOMOUS OTTO REDESIGN to completion. Work from archive/research/research.md, plan.md, docs/otto-wireframes.md as design source of truth. progress.md is the live phase checklist. drift-log.md is append-only drift incidents. review.md is append-only phase reviews. loop-report.md is append-only per-tick summaries.
 
 ON EVERY TICK:
 
 (1) Read progress.md. Identify current phase (first phase not marked [✓]) and the next pending step within it (first item with [ ]).
 
-(2) Implement that step. Use the Edit tool for code changes, Write for new files, Read for inspection. NO new files outside what plan.md specifies for the current phase. NO modifications to research.md / plan.md / wireframes — those are signed off by the user; if a finding requires changing them, write to drift-log.md instead and halt.
+(2) Implement that step. Use the Edit tool for code changes, Write for new files, Read for inspection. NO new files outside what plan.md specifies for the current phase. NO modifications to archive/research/research.md / plan.md / wireframes — those are signed off by the user; if a finding requires changing them, write to drift-log.md instead and halt.
 
 (3) Verify the step:
 - Run unit tests scoped to the modified files (uv run pytest -q tests/test_<scope>.py).
@@ -348,7 +348,7 @@ Use it when:
 
 Don't use it when:
 - Designs are still in flux (loop will halt on the first
-  research.md modification proposal).
+  archive/research/research.md modification proposal).
 - Cost is a real constraint (loop runs to completion regardless of
   spend).
 - You want to manually steer specific implementation decisions.
@@ -357,7 +357,7 @@ Don't use it when:
 
 The loop knows it can drift over many ticks. Mitigations:
 
-- Every tick re-reads research.md / plan.md to refresh design context;
+- Every tick re-reads archive/research/research.md / plan.md to refresh design context;
   doesn't trust any cached understanding.
 - Every 10 ticks, re-runs the full Phase A bench to catch silent
   regressions.
@@ -369,7 +369,7 @@ The loop knows it can drift over many ticks. Mitigations:
 ## Setup checklist before starting
 
 - [ ] All five review reports read by user
-- [ ] research.md / plan.md / wireframes signed off
+- [ ] archive/research/research.md / plan.md / wireframes signed off
 - [ ] progress.md checklists accurate (no `[ ]` marked-`[✓]` items)
 - [ ] drift-log.md and review.md initialized
 - [ ] No uncommitted user-owned changes in working tree (run
