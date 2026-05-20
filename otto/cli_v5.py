@@ -50,6 +50,8 @@ def register_v5_command(main: click.Group) -> None:
         """v5 Lead-driven pipeline (Phase 1: single Lead per task)."""
 
     _register_review_commands(v5_group)
+    _register_status_command(v5_group)
+    _register_reset_verdict_command(v5_group)
 
     @v5_group.command("run")
     @click.argument("intent", required=True)
@@ -459,3 +461,251 @@ def _color_verdict(verdict: str) -> str:
     }
     color = colors.get(verdict, "white")
     return f"[{color}]{verdict}[/{color}]"
+
+
+def _register_status_command(v5_group: click.Group) -> None:
+    """Read-only diagnostic: what state is this project in? What would
+    resume do? This is the "look before you spend" command — answer the
+    cheap question (what's the current checkpoint?) before paying the
+    expensive one (fresh re-run).
+
+    Born out of the iTracker Opus broken-state case (2026-05-20): figuring
+    out resume eligibility required manually grep'ing graph.json and
+    cross-referencing with v5_runner.py:_resume_root_from_checkpoint
+    guard logic. This command surfaces it directly.
+    """
+
+    @v5_group.command("status")
+    @click.option(
+        "--verbose", "-v", is_flag=True,
+        help="Show structured failure reasons + per-child intents.",
+    )
+    def status_cmd(verbose: bool) -> None:
+        """Show v5 pipeline state for this project: phase reached, per-task
+        verdicts, resume eligibility, what a non-fresh `otto v5 run` would
+        do next.
+
+        No mutations. Safe to run any time.
+        """
+        require_git()
+        try:
+            project_dir = resolve_project_dir(Path.cwd())
+        except ConfigError as exc:
+            error_console.print(f"[error]{exc}[/error]")
+            sys.exit(2)
+
+        from otto.queue.task_graph import read_graph
+        from otto.v5_runner import ROOT_TASK_ID
+
+        graph = read_graph(project_dir)
+        tasks = graph.get("tasks") or {}
+        if not tasks:
+            console.print("[dim]no v5 task graph found — fresh run only[/dim]")
+            return
+
+        root = tasks.get(ROOT_TASK_ID) if isinstance(tasks, dict) else None
+        if root is None and isinstance(tasks, list):
+            for t in tasks:
+                if isinstance(t, dict) and t.get("id") == ROOT_TASK_ID:
+                    root = t
+                    break
+        if root is None:
+            console.print("[dim]no root task found[/dim]")
+            return
+
+        root_verdict = str(root.get("verdict") or "unknown")
+        intent_preview = (root.get("intent") or "")[:120].rstrip()
+
+        console.print(f"[bold]Project:[/bold] {project_dir}")
+        console.print(f"[bold]Root intent:[/bold] {intent_preview}...")
+        console.print(f"[bold]Root verdict:[/bold] {_color_verdict(root_verdict)}")
+
+        child_ids = list(root.get("child_task_ids") or [])
+        if not child_ids:
+            console.print("[dim]no children emitted yet — resume not applicable[/dim]")
+        else:
+            console.print(f"\n[bold]Children ({len(child_ids)}):[/bold]")
+            for cid in child_ids:
+                if isinstance(tasks, dict):
+                    child = tasks.get(cid) or {}
+                else:
+                    child = next(
+                        (t for t in tasks if isinstance(t, dict) and t.get("id") == cid),
+                        {},
+                    )
+                v = str(child.get("verdict") or "unknown")
+                intent = (child.get("intent") or "")[:70].rstrip()
+                console.print(f"  {cid}  {_color_verdict(v):24s}  {intent}...")
+                if verbose:
+                    md = child.get("metadata") or {}
+                    for key in (
+                        "merge_blocked_origin",
+                        "merge_blocked_reason",
+                        "annotation_origin",
+                        "annotation_detail",
+                        "landed_with_annotation",
+                        "failure_reason",
+                    ):
+                        if key in md and md[key]:
+                            v = md[key]
+                            preview = (
+                                str(v)[:120] + ("..." if len(str(v)) > 120 else "")
+                            )
+                            console.print(f"      {key}: {preview}")
+
+        # Resume eligibility — match _resume_root_from_checkpoint guard logic.
+        resumable_verdicts = {"partial", "merge_blocked", "unverified", "pending_children"}
+        terminal_done = {"pass", "catastrophic"}
+        spec_path = project_dir / "otto_logs" / "sessions"
+        latest_session_with_spec: str | None = None
+        if spec_path.exists():
+            for sdir in sorted(spec_path.iterdir(), reverse=True):
+                if (sdir / "spec" / "spec.json").exists():
+                    latest_session_with_spec = sdir.name
+                    break
+
+        console.print("\n[bold]Resume eligibility:[/bold]")
+        if root_verdict in terminal_done:
+            console.print(
+                f"  [yellow]NOT resumable[/yellow] — root verdict is "
+                f"'{root_verdict}' (terminal done state). "
+                f"Use [bold]otto v5 run --fresh[/bold] for a new run."
+            )
+        elif not child_ids:
+            console.print(
+                "  [yellow]NOT resumable[/yellow] — no children emitted "
+                "(decomposition didn't complete)."
+            )
+        elif not latest_session_with_spec:
+            console.print(
+                "  [yellow]NOT resumable[/yellow] — no spec.json checkpoint "
+                "found under otto_logs/sessions/*/spec/."
+            )
+        elif root_verdict in resumable_verdicts:
+            console.print(
+                f"  [green]RESUMABLE[/green] — root verdict '{root_verdict}' "
+                f"+ {len(child_ids)} children + spec at session "
+                f"{latest_session_with_spec}."
+            )
+            console.print(
+                "  [dim]Next `otto v5 run` (no --fresh) will skip compile + "
+                "decompose + child rebuild and re-enter at integration phase.[/dim]"
+            )
+            blocked = [
+                cid for cid in child_ids
+                if str(
+                    (tasks.get(cid) if isinstance(tasks, dict) else {}).get("verdict") or ""
+                ) == "merge_blocked"
+            ]
+            if blocked:
+                console.print(
+                    f"  [yellow]Note:[/yellow] {len(blocked)} child(ren) are "
+                    f"merge_blocked. Integration will treat their existing "
+                    f"verdict as final unless you reset them first:"
+                )
+                console.print(
+                    f"    [bold]otto v5 reset-verdict[/bold] "
+                    f"--task {' --task '.join(blocked)}"
+                )
+        else:
+            console.print(
+                f"  [yellow]Unknown state[/yellow] — root verdict '{root_verdict}' "
+                f"isn't in the resumable set. Inspect graph.json manually."
+            )
+
+
+def _register_reset_verdict_command(v5_group: click.Group) -> None:
+    """Reset specified task verdicts to a clean state so a subsequent
+    resume re-attempts them. Targeted recovery for broken-state cases
+    where (a) the verdict was wrong (false demotion from an upstream bug
+    now fixed) or (b) you want to retry a child after fixing otto code.
+
+    Born out of the iTracker Opus broken-state (2026-05-20): 3 children
+    were marked merge_blocked by upstream bugs that are now fixed. To
+    validate the fixes via resume, we needed a way to clear those
+    verdicts. Previously: manual graph.json edit. Now: explicit CLI.
+    """
+
+    @v5_group.command("reset-verdict")
+    @click.option(
+        "--task", "task_ids", multiple=True, required=True,
+        help="Task id(s) whose verdict to clear (repeatable).",
+    )
+    @click.option(
+        "--to", "new_verdict",
+        type=click.Choice(["unverified", "pending_children"]),
+        default="unverified", show_default=True,
+        help="State to reset to. 'unverified' triggers a re-verify on resume; "
+             "'pending_children' is for root tasks whose children should re-merge.",
+    )
+    @click.option(
+        "--dry-run", is_flag=True,
+        help="Show what would change without writing.",
+    )
+    def reset_verdict_cmd(
+        task_ids: tuple[str, ...],
+        new_verdict: str,
+        dry_run: bool,
+    ) -> None:
+        """Reset task verdict(s) so subsequent `otto v5 run` (without
+        --fresh) re-attempts them.
+
+        Use case: an upstream bug demoted children unjustly. After fixing
+        the bug, this command clears the bogus verdicts so resume re-runs
+        the affected children's integration. Does NOT delete files or
+        worktrees — only the verdict + failure_reason metadata.
+        """
+        require_git()
+        try:
+            project_dir = resolve_project_dir(Path.cwd())
+        except ConfigError as exc:
+            error_console.print(f"[error]{exc}[/error]")
+            sys.exit(2)
+
+        from otto.queue.task_graph import (
+            get_task,
+            read_graph,
+            set_verdict,
+            update_task_metadata,
+        )
+
+        graph = read_graph(project_dir)
+        tasks = graph.get("tasks") or {}
+        if isinstance(tasks, list):
+            tasks = {t["id"]: t for t in tasks if isinstance(t, dict)}
+
+        for tid in task_ids:
+            task = get_task(project_dir, tid)
+            if task is None:
+                error_console.print(f"[error]task {tid} not found[/error]")
+                continue
+            old_verdict = task.get("verdict") or "unknown"
+            console.print(
+                f"  {tid}: {_color_verdict(str(old_verdict))} → "
+                f"{_color_verdict(new_verdict)}"
+            )
+            if dry_run:
+                continue
+            from typing import Any as _Any, cast as _cast
+            set_verdict(project_dir, tid, _cast(_Any, new_verdict), cost_usd=0.0)
+            update_task_metadata(
+                project_dir,
+                tid,
+                failure_reason="",
+                merge_blocked_origin="",
+                merge_blocked_reason="",
+                merge_blocked_structured_reason=None,
+                annotation_origin="",
+                annotation_detail="",
+                annotation_cause="",
+                landed_with_annotation=False,
+                annotation_structured_reason=None,
+                reset_via_cli_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            )
+
+        if dry_run:
+            console.print("[dim]dry-run — no changes written[/dim]")
+        else:
+            console.print(
+                f"[green]reset {len(task_ids)} task verdict(s) to {new_verdict}[/green]"
+            )
