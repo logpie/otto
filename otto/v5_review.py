@@ -2,7 +2,7 @@
 
 When `--review-first-decomp` is set, the watcher (v5_runner) holds dispatch
 of root's emitted children until the user approves them via:
-  - the CLI: `otto v5 review <session_id> approve|edit|replace|cancel`
+  - the CLI: `otto review approve|edit|replace|cancel`
   - the MC API (Phase 3 UI): POST to /api/v5/<session_id>/review with action
 
 Review state lives in the v5_pending entries' `review_state` field:

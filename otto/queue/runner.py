@@ -111,12 +111,15 @@ def _json_fingerprint(value: Any) -> str:
 
 def _task_success_requires_clean_worktree(manifest: dict[str, Any]) -> bool:
     command = str(manifest.get("command") or "").strip().lower()
-    return command in {"build", "improve", "certify", "v5"}
+    # Legacy labels "build" / "improve" / "certify" / "v5" kept so in-flight
+    # queue tasks from older sessions continue to be recognized; "run" is
+    # the canonical post-rename label.
+    return command in {"build", "improve", "certify", "v5", "run"}
 
 
 def _task_success_can_commit_generated_lockfiles(manifest: dict[str, Any]) -> bool:
     command = str(manifest.get("command") or "").strip().lower()
-    return command in {"build", "improve", "v5"}
+    return command in {"build", "improve", "v5", "run"}
 
 
 def _summary_indicates_product_success(summary: dict[str, Any]) -> bool:

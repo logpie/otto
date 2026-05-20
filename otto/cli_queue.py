@@ -1,23 +1,21 @@
-"""Otto CLI — `otto queue ...` command group (Phase 2.3-2.7).
+"""Otto CLI — `otto queue ...` command group.
 
-Wrapper syntax: prepend `otto queue` to the otto command you'd already write.
-    otto queue build "add csv export"                  # simple
-    otto queue build "add csv export" --as csv         # explicit task id
-    otto queue build "add csv export" -- --fast        # passthrough flags after --
-    otto queue build "add csv export" --as csv -- --fast --rounds 3
-    otto queue improve bugs "error handling" -- --rounds 3
-    otto queue certify "release candidate" -- --thorough
+Enqueue runs:
+    otto queue run "add csv export"                   # enqueue
+    otto queue run "add csv export" --as csv          # explicit task id
+    otto queue run "add csv export" -- --tier modular # passthrough flags
 
-Plus management verbs:
+Watcher + management verbs:
+    otto queue start --concurrent N    # foreground watcher
     otto queue ls
     otto queue show <id>
     otto queue rm <id>
     otto queue cancel <id>
-    otto queue run --concurrent N
+    otto queue resume
 
 The CLI appends to queue.yml + commands.jsonl and may directly remove a
 queued task from queue.yml when no watcher is running. The watcher
-(`otto queue run`) is the SOLE writer of state.json.
+(`otto queue start`) is the SOLE writer of state.json.
 """
 
 from __future__ import annotations
@@ -312,7 +310,7 @@ def _print_added(task_id: str, project_dir: Path) -> None:
     else:
         console.print(
             f"  [success]Added[/success] [info]{task_id}[/info]. "
-            f"Worker is not running. Start with: [info]otto queue run --concurrent N[/info]"
+            f"Worker is not running. Start with: [info]otto queue start --concurrent N[/info]"
         )
 
 
@@ -330,7 +328,7 @@ def _enqueue(
     target: str | None = None,
     explicit_intent: str | None = None,
 ) -> None:
-    """The shared path for `otto queue build|improve|certify`."""
+    """The shared path for `otto queue run`."""
     from otto.config import ConfigError
     from otto.queue.enqueue import enqueue_task
 
@@ -363,22 +361,17 @@ def register_queue_commands(main: click.Group) -> None:
 
     @main.group(context_settings=CONTEXT_SETTINGS)
     def queue():
-        """Schedule otto build/improve/certify runs in parallel worktrees.
-
-        Wrap any otto command with `otto queue` to defer execution:
+        """Schedule otto runs in parallel worktrees.
 
         \b
-            otto queue build "add csv export"                  # simple
-            otto queue build "add csv export" --as csv         # explicit task id
-            otto queue build "add csv export" -- --fast        # passthrough flags after --
-            otto queue build "add csv export" --as csv -- --fast --rounds 3
-            otto queue improve bugs "error handling" -- --rounds 3
-            otto queue certify "release candidate" -- --thorough
+            otto queue run "add csv export"                   # enqueue
+            otto queue run "add csv export" --as csv          # explicit task id
+            otto queue run "add csv export" -- --tier modular # passthrough flags after --
 
         Then start the watcher to process queued tasks:
 
         \b
-            otto queue run --concurrent 3
+            otto queue start --concurrent 3
         """
 
     @queue.command(context_settings=CONTEXT_SETTINGS)
@@ -390,10 +383,10 @@ def register_queue_commands(main: click.Group) -> None:
         )
         sys.exit(2)
 
-    # ---- enqueue: v5 ----
+    # ---- enqueue: run ----
     @queue.command(
         context_settings={**CONTEXT_SETTINGS, "ignore_unknown_options": True, "allow_extra_args": True},
-        name="v5",
+        name="run",
     )
     @click.argument("intent", required=True)
     @click.option("--tier", type=click.Choice(["auto", "solo", "lead", "modular"]),
@@ -401,29 +394,28 @@ def register_queue_commands(main: click.Group) -> None:
     @click.option("--after", multiple=True, help="Task ID(s) this depends on")
     @click.option("--as", "explicit_as", default=None, help="Explicit task ID")
     @click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
-    def queue_v5(intent: str, tier: str, after: tuple[str, ...],
-                 explicit_as: str | None, extra_args: tuple[str, ...]) -> None:
-        """Enqueue an `otto v5 run` task.
+    def queue_run(intent: str, tier: str, after: tuple[str, ...],
+                  explicit_as: str | None, extra_args: tuple[str, ...]) -> None:
+        """Enqueue an `otto run` task.
 
         \b
-            otto queue v5 "Build a TODO app"
-            otto queue v5 "Multi-subsystem chat" --tier modular
-            otto queue v5 "Add CSV export" --as csv -- --max-parallel 2
+            otto queue run "Build a TODO app"
+            otto queue run "Multi-subsystem chat" --tier modular
+            otto queue run "Add CSV export" --as csv -- --max-parallel 2
 
         Intent must come before `--`. Anything after `--` is passed through
-        to `otto v5 run`.
+        to `otto run`.
         """
-        # raw_args becomes the watcher's argv after the leading `v5` token,
-        # so it must include `run` plus the user-visible flags.
-        raw = ["run", intent, "--tier", tier, *extra_args]
+        # _enqueue prepends command, so raw_args is the rest of `otto run` argv.
+        raw = [intent, "--tier", tier, *extra_args]
         _enqueue(
-            command="v5",
+            command="run",
             raw_args=raw,
             intent=intent,
             explicit_intent=intent,
             after=list(after),
             explicit_as=explicit_as,
-            resumable=False,  # v5 resume is a v6 item
+            resumable=False,  # run-resume is a v6 item
         )
 
     # ---- ls ----
@@ -443,7 +435,7 @@ def register_queue_commands(main: click.Group) -> None:
             error_console.print(f"[error]Failed to load queue: {rich_escape(str(exc))}[/error]")
             sys.exit(1)
         if not tasks:
-            console.print("  Queue is empty. Add tasks with `otto queue build|improve|certify ...`")
+            console.print("  Queue is empty. Add tasks with `otto queue run ...`")
             return
         table = Table(show_header=True, header_style="bold")
         table.add_column("ID")
@@ -482,7 +474,7 @@ def register_queue_commands(main: click.Group) -> None:
         console.print(table)
         if not watcher_alive(state):
             console.print("\n  [yellow]Worker is not running.[/yellow] "
-                          "Start with: [info]otto queue run --concurrent N[/info]")
+                          "Start with: [info]otto queue start --concurrent N[/info]")
 
         if post_merge_preview:
             _print_post_merge_preview(project_dir, tasks, state)
@@ -579,7 +571,7 @@ def register_queue_commands(main: click.Group) -> None:
                     console.print(
                         f"  [yellow]Task [info]{task_id}[/info] is marked {status}, but the worker is "
                         "not running.[/yellow] Start the watcher with: "
-                        "[info]otto queue run --concurrent N[/info] "
+                        "[info]otto queue start --concurrent N[/info] "
                         "for safe cleanup, or send SIGTERM to the child process group manually."
                     )
                     return
@@ -627,7 +619,7 @@ def register_queue_commands(main: click.Group) -> None:
                 console.print(
                     f"  [yellow]Task [info]{task_id}[/info] is marked {status}, but the worker is "
                     "not running.[/yellow] Start the watcher with: "
-                    "[info]otto queue run --concurrent N[/info] "
+                    "[info]otto queue start --concurrent N[/info] "
                     "for safe cleanup, or send SIGTERM to the child process group manually."
                 )
                 return
@@ -761,7 +753,7 @@ def register_queue_commands(main: click.Group) -> None:
             return
         console.print(
             f"  Marked [info]{', '.join(selected_ids)}[/info] to resume. "
-            "Start the watcher with [info]otto queue run --concurrent N[/info]."
+            "Start the watcher with [info]otto queue start --concurrent N[/info]."
         )
 
     # ---- cleanup (Phase 6.4) ----
@@ -892,7 +884,7 @@ def register_queue_commands(main: click.Group) -> None:
         )
 
     # ---- run (the watcher) ----
-    @queue.command(context_settings=CONTEXT_SETTINGS)
+    @queue.command("start", context_settings=CONTEXT_SETTINGS)
     @click.option("--concurrent", "-j", default=None, type=click.IntRange(1),
                   help="Max concurrent tasks (default from otto.yaml queue.concurrent)")
     @click.option("--quiet", is_flag=True,
@@ -904,7 +896,7 @@ def register_queue_commands(main: click.Group) -> None:
         is_flag=True,
         help="Exit cleanly once the queue has no queued or in-flight tasks",
     )
-    def run(
+    def start(
         concurrent: int | None,
         quiet: bool,
         no_dashboard: bool,
@@ -918,7 +910,7 @@ def register_queue_commands(main: click.Group) -> None:
             runner_config_from_otto_config,
         )
         project_dir = _project_dir()
-        # `otto queue build/improve/certify` work without otto.yaml using
+        # `otto queue run` works without otto.yaml using
         # defaults (see _enqueue → `load_config(project_dir / "otto.yaml")`
         # which returns DEFAULT_CONFIG when absent). Be consistent: the
         # watcher uses defaults too if otto.yaml is missing.

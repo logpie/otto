@@ -84,8 +84,8 @@ def test_queue_ls_empty(tmp_path: Path):
 
 def test_queue_ls_shows_tasks(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv export"], cwd=repo)
-    _run(["queue", "v5", "settings page"], cwd=repo)
+    _run(["queue", "run", "csv export"], cwd=repo)
+    _run(["queue", "run", "settings page"], cwd=repo)
     code, out, _ = _run(["queue", "ls"], cwd=repo)
     assert code == 0
     assert "csv-export" in out
@@ -94,7 +94,7 @@ def test_queue_ls_shows_tasks(tmp_path: Path):
 
 def test_queue_ls_hides_resume_checkpoint_diagnostics_for_running_task(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv export"], cwd=repo)
+    _run(["queue", "run", "csv export"], cwd=repo)
     session_id = "2026-04-22-010203-abc123"
     worktree = repo / ".worktrees" / "csv-export"
     paths.ensure_session_scaffold(worktree, session_id)
@@ -120,7 +120,7 @@ def test_queue_ls_hides_resume_checkpoint_diagnostics_for_running_task(tmp_path:
 
 def test_queue_show_reports_proof_of_work_html_path(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv export"], cwd=repo)
+    _run(["queue", "run", "csv export"], cwd=repo)
     pow_json = paths.certify_dir(repo, "run-queue-show") / "proof-of-work.json"
     pow_html = pow_json.with_name("proof-of-work.html")
     pow_html.parent.mkdir(parents=True, exist_ok=True)
@@ -174,7 +174,7 @@ def test_queue_show_reports_malformed_queue_yml_cleanly(tmp_path: Path):
 
 def test_queue_rm_without_watcher_removes_from_queue(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv"], cwd=repo)
+    _run(["queue", "run", "csv"], cwd=repo)
     code, out, _ = _run(["queue", "rm", "csv"], cwd=repo)
     assert code == 0
     assert "Removed csv from queue." in out
@@ -184,7 +184,7 @@ def test_queue_rm_without_watcher_removes_from_queue(tmp_path: Path):
 
 def test_queue_rm_with_watcher_running_appends_command(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv"], cwd=repo)
+    _run(["queue", "run", "csv"], cwd=repo)
     now = _fresh_iso_now()
     _write_watcher_state(
         repo,
@@ -226,7 +226,7 @@ def test_queue_rm_reports_malformed_queue_yml_cleanly(tmp_path: Path):
 
 def test_queue_rm_refuses_finished_task_without_watcher(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv"], cwd=repo)
+    _run(["queue", "run", "csv"], cwd=repo)
     _write_watcher_state(
         repo,
         watcher=None,
@@ -308,7 +308,7 @@ def test_queue_cleanup_with_watcher_queues_cleanup_command(tmp_path: Path, monke
 
 def test_queue_rm_without_watcher_refuses_non_queued_task(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv"], cwd=repo)
+    _run(["queue", "run", "csv"], cwd=repo)
     _write_watcher_state(
         repo,
         watcher=None,
@@ -517,7 +517,7 @@ def test_queue_cleanup_accepts_interrupted_explicit_task(tmp_path: Path) -> None
 
 def test_queue_cancel_without_watcher_removes_queued_task(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv"], cwd=repo)
+    _run(["queue", "run", "csv"], cwd=repo)
     code, out, _ = _run(["queue", "cancel", "csv"], cwd=repo)
     assert code == 0
     assert "was never started. Removed from queue." in out
@@ -527,7 +527,7 @@ def test_queue_cancel_without_watcher_removes_queued_task(tmp_path: Path):
 
 def test_queue_cancel_without_watcher_warns_for_running_task(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv"], cwd=repo)
+    _run(["queue", "run", "csv"], cwd=repo)
     _write_watcher_state(
         repo,
         watcher=None,
@@ -541,14 +541,14 @@ def test_queue_cancel_without_watcher_warns_for_running_task(tmp_path: Path):
     code, out, _ = _run(["queue", "cancel", "csv"], cwd=repo)
     assert code == 0
     assert "is marked running, but the worker is not running." in out
-    assert "otto queue run --concurrent N" in out
+    assert "otto queue start --concurrent N" in out
     assert [task.id for task in load_queue(repo)] == ["csv"]
     assert not (repo / COMMANDS_FILE).exists()
 
 
 def test_queue_cancel_with_watcher_describes_queued_task(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv"], cwd=repo)
+    _run(["queue", "run", "csv"], cwd=repo)
     now = _fresh_iso_now()
     _write_watcher_state(
         repo,
@@ -577,7 +577,7 @@ def test_queue_cancel_with_watcher_describes_queued_task(tmp_path: Path, monkeyp
 
 def test_queue_cancel_with_watcher_describes_running_task(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv"], cwd=repo)
+    _run(["queue", "run", "csv"], cwd=repo)
     now = _fresh_iso_now()
     _write_watcher_state(
         repo,
@@ -606,7 +606,7 @@ def test_queue_cancel_with_watcher_describes_running_task(tmp_path: Path, monkey
 
 def test_queue_cancel_with_watcher_reports_terminating_task(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv"], cwd=repo)
+    _run(["queue", "run", "csv"], cwd=repo)
     now = _fresh_iso_now()
     _write_watcher_state(
         repo,
@@ -629,7 +629,7 @@ def test_queue_cancel_with_watcher_reports_terminating_task(tmp_path: Path, monk
 
 def test_queue_cancel_with_watcher_refuses_finished_task(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "csv"], cwd=repo)
+    _run(["queue", "run", "csv"], cwd=repo)
     now = _fresh_iso_now()
     _write_watcher_state(
         repo,
@@ -669,10 +669,10 @@ def test_queue_dashboard_help_points_to_deprecation(tmp_path: Path):
     assert "Deprecated queue TUI command" in out
 
 
-def test_queue_run_rejects_zero_concurrency(tmp_path: Path):
+def test_queue_start_rejects_zero_concurrency(tmp_path: Path):
     repo = init_repo(tmp_path)
 
-    code, out, _ = _run(["queue", "run", "--concurrent", "0"], cwd=repo)
+    code, out, _ = _run(["queue", "start", "--concurrent", "0"], cwd=repo)
 
     assert code == 2
     assert "Invalid value for '--concurrent'" in out
@@ -686,19 +686,19 @@ def test_queue_ls_outside_git_repo_shows_clean_error(tmp_path: Path):
     assert "Traceback" not in out
 
 
-def test_queue_run_outside_git_repo_shows_clean_error(tmp_path: Path):
-    code, out, _ = _run(["queue", "run", "--no-dashboard", "--exit-when-empty"], cwd=tmp_path)
+def test_queue_start_outside_git_repo_shows_clean_error(tmp_path: Path):
+    code, out, _ = _run(["queue", "start", "--no-dashboard", "--exit-when-empty"], cwd=tmp_path)
 
     assert code == 2
     assert "Not a git repository" in out
     assert "Traceback" not in out
 
 
-def test_queue_run_reports_malformed_otto_yaml_cleanly(tmp_path: Path):
+def test_queue_start_reports_malformed_otto_yaml_cleanly(tmp_path: Path):
     repo = init_repo(tmp_path)
     (repo / "otto.yaml").write_text("default_branch: [\n")
 
-    code, out, _ = _run(["queue", "run", "--no-dashboard", "--exit-when-empty"], cwd=repo)
+    code, out, _ = _run(["queue", "start", "--no-dashboard", "--exit-when-empty"], cwd=repo)
 
     assert code == 2
     assert "otto.yaml" in out
@@ -718,8 +718,8 @@ def test_queue_resume_help_shows_examples(tmp_path: Path):
 
 def test_queue_resume_select_reports_removed_selector(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "labels"], cwd=repo)
-    _run(["queue", "v5", "due"], cwd=repo)
+    _run(["queue", "run", "labels"], cwd=repo)
+    _run(["queue", "run", "due"], cwd=repo)
     for task_id, session_id in [("labels", "2026-04-22-010203-abc123"), ("due", "2026-04-22-010204-def456")]:
         paths.ensure_session_scaffold(repo / ".worktrees" / task_id, session_id)
         paths.session_checkpoint(repo / ".worktrees" / task_id, session_id).write_text(
@@ -756,7 +756,7 @@ def test_queue_rm_rejects_unknown_task(tmp_path: Path):
 
 def test_queue_yml_uses_schema_v1(tmp_path: Path):
     repo = init_repo(tmp_path)
-    _run(["queue", "v5", "test"], cwd=repo)
+    _run(["queue", "run", "test"], cwd=repo)
     import yaml
     raw = yaml.safe_load((repo / QUEUE_FILE).read_text())
     assert raw["schema_version"] == 1
@@ -771,9 +771,9 @@ def test_resolve_otto_bin_fallback_returns_argv(monkeypatch, tmp_path: Path):
     assert cli_queue_module._resolve_otto_bin() == [str(fake_python), "-m", "otto.cli"]
 
 
-def test_queue_run_help_shows_stdout_watcher_and_exit_flags(tmp_path: Path):
+def test_queue_start_help_shows_stdout_watcher_and_exit_flags(tmp_path: Path):
     repo = init_repo(tmp_path)
-    code, out, _ = _run(["queue", "run", "--help"], cwd=repo)
+    code, out, _ = _run(["queue", "start", "--help"], cwd=repo)
     help_text = " ".join(out.split()).replace("in- flight", "in-flight")
     assert code == 0
     assert "--dashboard-mouse" not in help_text

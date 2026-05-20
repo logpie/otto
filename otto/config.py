@@ -1140,7 +1140,7 @@ def ensure_bookkeeping_setup(project_dir: Path, config: dict[str, Any]) -> None:
 
 
 def first_touch_bookkeeping(project_dir: Path, config: dict[str, Any]) -> None:
-    """First-touch helper called from `otto queue build|run` and `otto merge`.
+    """First-touch helper called from `otto queue run` and `otto merge`.
 
     Idempotent. Performs the minimum needed for the queue/merge precondition
     checks to pass for users who skipped `otto setup`:

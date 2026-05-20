@@ -632,14 +632,14 @@ def _exit_legacy_certify_removed() -> None:
 @main.command(context_settings={**CONTEXT_SETTINGS, "ignore_unknown_options": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def build(args):  # noqa: ARG001
-    """[REMOVED] Use `otto v5 run` instead."""
+    """[REMOVED] Use `otto run` instead."""
     _exit_legacy_build_removed()
 
 
 @main.command(context_settings={**CONTEXT_SETTINGS, "ignore_unknown_options": True})
 @click.argument("args", nargs=-1, type=click.UNPROCESSED)
 def certify(args):  # noqa: ARG001
-    """[REMOVED] Use `otto v5 run` instead."""
+    """[REMOVED] Use `otto run` instead."""
     _exit_legacy_certify_removed()
 
 
@@ -660,12 +660,11 @@ register_improve_commands(main)
 from otto.cli_queue import register_queue_commands  # noqa: E402
 register_queue_commands(main)
 
-# Run command (stub — kept as migration landing pad pointing at `otto v5 run`)
+# Canonical run command + review affordances (otto run / list-pending / review)
 from otto.cli_run import register_run_command  # noqa: E402
+from otto.cli_review import register_review_commands  # noqa: E402
 register_run_command(main)
-
-from otto.cli_v5 import register_v5_command  # noqa: E402
-register_v5_command(main)
+register_review_commands(main)
 
 
 if __name__ == "__main__":

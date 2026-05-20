@@ -13,7 +13,7 @@ matching result.
 | `partial` | Built and integrated, but some declared journeys did not pass within retry budget. Honest list in the proof packet. | Read the proof packet; decide which journeys to follow up on. The code is in the branch. |
 | `pending_children` | A parent task whose children haven't all resolved yet. Not terminal. | Wait. Otto's runner will spawn the integration Lead when children complete. |
 | `unverified` | Code committed, but the verifier failed/timed-out, or the Lead never called `mcp__otto__verify`. | Manually inspect or re-run with longer budget. The committed code MAY be correct but Otto cannot certify. |
-| `merge_blocked` | The task built fine but its branch couldn't be merged into the parent's integration branch (conflict, retries exhausted). Worktree preserved. | Resolve the conflict manually or with `otto v5 run --resume`. Sibling tasks were unaffected. |
+| `merge_blocked` | The task built fine but its branch couldn't be merged into the parent's integration branch (conflict, retries exhausted). Worktree preserved. | Resolve the conflict manually or with `otto run --resume`. Sibling tasks were unaffected. |
 | `catastrophic` | Infrastructure failure (provider auth/credits, disk full, etc.). Not a code problem. | Fix the infra issue; resume. Provider auth: check API keys. Credits: configure `fallback_provider` for next time. |
 
 ## Severity ordering

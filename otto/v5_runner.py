@@ -13,7 +13,7 @@ Drives a full v5 run end-to-end:
 Phase 2 design notes:
 
 - Children run in-process (asyncio tasks), not as subprocess. This is simpler
-  than spawning fresh `otto v5 run-child` subprocesses and works at the scale
+  than spawning fresh child-run subprocesses and works at the scale
   v5 targets. If we hit context-budget issues with deep trees, Phase 4 can
   revisit subprocess isolation.
 

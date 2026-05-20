@@ -45,16 +45,16 @@ behaviors does this intent describe?"**
 
 ```bash
 # Single-feature CLI:
-otto v5 run "Convert CSV stdin to JSON stdout" --tier solo
+otto run "Convert CSV stdin to JSON stdout" --tier solo
 
 # Medium app:
-otto v5 run "TODO list with localStorage persistence" --tier auto
+otto run "TODO list with localStorage persistence" --tier auto
 
 # Many features with shared state:
-otto v5 run "Personal finance dashboard with transactions, budgets, charts, CSV import/export" --tier lead
+otto run "Personal finance dashboard with transactions, budgets, charts, CSV import/export" --tier lead
 
 # Multi-subsystem:
-otto v5 run "Slack-style chat: web client + REST API + admin CLI" --tier modular
+otto run "Slack-style chat: web client + REST API + admin CLI" --tier modular
 ```
 
 ## Manual override of decomposition
@@ -63,10 +63,10 @@ If autopilot's decomposition is wrong:
 
 ```bash
 # Force inline even though the intent looks complex:
-otto v5 run "<intent>" --tier solo
+otto run "<intent>" --tier solo
 
 # Force fan-out:
-otto v5 run "<intent>" --tier modular
+otto run "<intent>" --tier modular
 ```
 
 ## When the Lead overrides the tier

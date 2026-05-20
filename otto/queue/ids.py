@@ -71,7 +71,7 @@ def _normalise_explicit(value: str) -> str:
 
 
 def _next_command_seq(command: str, existing: set[str]) -> str:
-    """For intent-less enqueue (e.g. `otto queue improve bugs`), return
+    """For intent-less enqueue (e.g. `otto queue run`), return
     `<command>-N` where N is the next free integer."""
     base = command
     n = 1

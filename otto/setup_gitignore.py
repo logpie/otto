@@ -17,7 +17,7 @@ itself appears as untracked and trips `working_tree_clean()`.
 
 Called from:
 - `otto setup` (explicit init)
-- `otto queue build|improve|certify|run` (first-touch init for users
+- `otto queue run` and `otto queue start` (first-touch init for users
   who skipped `otto setup`)
 - `otto merge` (defensive: ensure clean-tree check passes for users
   who upgraded otto without re-running setup)

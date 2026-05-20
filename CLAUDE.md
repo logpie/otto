@@ -6,10 +6,9 @@ When debugging otto runs, ALWAYS read real logs. Never guess.
 
 ### Quick diagnosis
 ```bash
-otto v5 run "<intent>"                                # i2p entrypoint (flat compile, schema v4) — USE THIS for i2p runs
-otto run "<intent>"                                   # LEGACY pipeline (groups/features compile-spec.md); does NOT converge on large intents — prefer `otto v5 run`
-otto history                                          # Build history with results
-otto pow                                              # Open latest proof-of-work report
+otto run "<intent>"                                   # canonical intent-to-product pipeline (flat compile, schema v4)
+otto proof list                                       # Run history with results
+otto proof open                                       # Open latest proof-of-work report
 cat otto_logs/cross-sessions/history.jsonl            # Machine-readable history
 readlink otto_logs/latest                             # Most recent session
 readlink otto_logs/paused                             # Resumable session (if any)
@@ -17,7 +16,7 @@ readlink otto_logs/paused                             # Resumable session (if an
 
 ### Per-session layout (`otto_logs/sessions/<session-id>/`)
 
-Every `otto run | build | certify | improve` invocation creates one session dir.
+Every `otto run` invocation creates one session dir.
 Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 
 | File / dir | What it tells you |
@@ -36,15 +35,10 @@ Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 | `certify/proof-of-work.md` | Markdown summary |
 | `certify/evidence/*.png` | Browser screenshots |
 | `certify/evidence/recording.webm` | Browser walkthrough video |
-| `proof-packet.html` | i2p path: rendered Proof packet from `otto run` (audit verdict, Feature audits, screenshot grid, audit narrative) |
-| `proof-packet.json` | i2p path: machine-readable Proof packet (verdict, landed/blocked slice ids, cost_usd, quality_score, feature_audits) |
-| `spec/spec.json` | i2p path: compiled spec (validator-passed) consumed by build/audit/merge |
-| `spec-state.jsonl` | i2p path: append-only event journal of slice/group lifecycle |
-| `improve/improvement-report.md` | Final `otto improve` summary + merge instructions |
-| `improve/session-report.md` | Detailed per-run summary from the certify/fix loop |
-| `improve/build-journal.md` | Round-by-round index: action, result, cost |
-| `improve/current-state.md` | Latest certifier findings (handoff to fix agent) |
-| `improve/rounds/<round-id>/` | Per-round evidence: certifier findings, builder summary |
+| `proof-packet.html` | Rendered Proof packet from `otto run` (audit verdict, Feature audits, screenshot grid, audit narrative) |
+| `proof-packet.json` | Machine-readable Proof packet (verdict, landed/blocked slice ids, cost_usd, quality_score, feature_audits) |
+| `spec/spec.json` | Compiled flat spec (validator-passed) consumed by build/audit/merge |
+| `spec-state.jsonl` | Append-only event journal of slice/group lifecycle |
 
 ### Cross-session indexes (`otto_logs/cross-sessions/`)
 

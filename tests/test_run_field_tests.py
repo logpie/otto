@@ -156,6 +156,6 @@ def test_render_report_includes_dry_run_matrix(tmp_path: Path) -> None:
 
     assert "No live Otto runs were executed" in report
     assert "`01-one`" in report
-    assert "otto v5 run <intent>" in report
+    assert "otto run <intent>" in report
     assert "| Scenario | Tier | Expected |" in report
     assert "| `01-one` | `auto` | Inline for a tiny product." in report

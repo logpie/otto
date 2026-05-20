@@ -43,8 +43,8 @@ def enqueue_task(
         raise ValueError(
             f"Intent looks like a CLI flag ({explicit_intent!r}), not a description. "
             "Did you forget to quote the intent? Examples:\n"
-            "    otto queue build \"add csv export\" --as csv\n"
-            "    otto queue build \"add csv export\" --as csv -- --fast --rounds 3\n"
+            "    otto queue run \"add csv export\" --as csv\n"
+            "    otto queue run \"add csv export\" --as csv -- --tier modular\n"
             "  Note: intent must come BEFORE `--`. Anything after `--` is passed through to the inner otto build."
         )
 

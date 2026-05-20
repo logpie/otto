@@ -1,4 +1,4 @@
-"""Smoke test: `otto queue v5` enqueues a task whose argv runs `otto v5 run`."""
+"""Smoke test: `otto queue run` enqueues a task whose argv runs `otto run`."""
 
 from __future__ import annotations
 
@@ -40,8 +40,8 @@ def _otto(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_queue_v5_enqueues_argv(project: Path) -> None:
-    result = _otto(["queue", "v5", "build a tiny CLI", "--as", "tiny"], project)
+def test_queue_run_enqueues_argv(project: Path) -> None:
+    result = _otto(["queue", "run", "build a tiny CLI", "--as", "tiny"], project)
     assert result.returncode == 0, result.stderr or result.stdout
 
     queue_file = project / ".otto-queue.yml"
@@ -51,15 +51,15 @@ def test_queue_v5_enqueues_argv(project: Path) -> None:
     assert len(tasks) == 1
     t = tasks[0]
     assert t["id"] == "tiny"
-    assert t["command_argv"][:2] == ["v5", "run"]
+    assert t["command_argv"][0] == "run"
     assert "build a tiny CLI" in t["command_argv"]
     assert "--tier" in t["command_argv"]
-    assert t["resumable"] is False  # v5 resume deferred to v6
+    assert t["resumable"] is False  # run-resume deferred
 
 
-def test_queue_v5_with_explicit_tier(project: Path) -> None:
+def test_queue_run_with_explicit_tier(project: Path) -> None:
     result = _otto(
-        ["queue", "v5", "multi-subsystem chat", "--tier", "modular", "--as", "chat"],
+        ["queue", "run", "multi-subsystem chat", "--tier", "modular", "--as", "chat"],
         project,
     )
     assert result.returncode == 0, result.stderr or result.stdout
@@ -70,9 +70,9 @@ def test_queue_v5_with_explicit_tier(project: Path) -> None:
     assert argv[tier_idx + 1] == "modular"
 
 
-def test_queue_v5_passthrough_extra_args(project: Path) -> None:
+def test_queue_run_passthrough_extra_args(project: Path) -> None:
     result = _otto(
-        ["queue", "v5", "intent here", "--as", "x", "--",
+        ["queue", "run", "intent here", "--as", "x", "--",
          "--max-parallel", "2", "--tree-budget-usd", "5"],
         project,
     )

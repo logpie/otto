@@ -1,26 +1,29 @@
 # Otto
 
-Otto is a local intent-to-product system for autonomous software work. It turns
-a request like "build an expense approval portal" into a managed run: compile a
-reviewable product spec, build it in scoped groups, merge the groups, audit the
-integrated product, repair what fails, and render proof for a human to review.
+Otto is a local intent-to-product system for autonomous software work. It
+turns a request like "build an expense approval portal" into a managed run:
+compiles a flat product spec, decomposes the work, builds in parallel
+worktrees, merges the children into an integration branch, verifies the
+result against behavior journeys, and renders proof for a human to review.
 
-Otto is not an editor plugin. It is a project operations layer around provider
-agents such as Codex and Claude, with durable logs, queueing, recovery,
-evidence, and a web Mission Control surface for supervising the work.
+Otto is not an editor plugin. It is a project-operations layer around
+provider agents such as Codex and Claude, with durable logs, queueing,
+recovery, evidence, and a web Mission Control surface for supervising the
+work.
 
 ## What Otto Does
 
-- Compiles natural-language intent into an editable product spec.
-- Builds greenfield products and improves/certifies existing projects.
-- Runs group-based build work with deterministic checks and bounded retries.
-- Merges groups into the integrated worktree during `otto run`.
-- Audits the integrated product independently and repairs failed features.
+- Compiles natural-language intent into an editable flat product spec.
+- Runs a root Lead that either builds inline or decomposes into child tasks.
+- Dispatches up to N child tasks in parallel, each on its own worktree.
+- Merges children upward into per-parent integration branches; eventually
+  to `main`.
+- Verifies behavior journeys (API + UI) against the integrated product.
 - Records proof packets, logs, token usage, changed files, screenshots, and
   recovery state under `otto_logs/sessions/<session-id>/`.
-- Queues build, improve, and certify jobs into isolated git worktrees.
-- Provides local web Mission Control for launch, review, retry, cleanup, spec
-  review, and run inspection.
+- Queues runs into isolated git worktrees for parallel/dependent work.
+- Provides local web Mission Control for launch, review, retry, cleanup,
+  and run inspection.
 
 ## Quick Start
 
@@ -33,15 +36,11 @@ From an existing git repository:
 
 ```bash
 otto run "add saved searches to this dashboard"
-otto improve bugs "look for auth and data isolation bugs"
-otto certify "users can save, restore, rename, and delete saved searches"
 ```
 
-The default provider is `codex-app-server`, which uses Codex App Server's
-thread/turn protocol with local Codex subscription auth. Other explicit provider
-choices are `codex` for the older `codex exec --json` adapter and `claude`
-where configured. The API-key based `openai-agents` experiment remains in the
-codebase but is not a normal CLI or Mission Control path.
+The default provider is `claude`. Override with `--provider codex-app-server`
+(Codex App Server's thread/turn protocol with local Codex subscription
+auth), or `--provider codex` for the older `codex exec --json` adapter.
 
 Run the web Mission Control portal:
 
@@ -55,30 +54,26 @@ For phone or remote-device testing on a trusted network:
 otto web --host 0.0.0.0 --port 9000 --allow-remote --project-launcher
 ```
 
-`otto dashboard` remains as a compatibility alias for `otto web`. The old
-Textual TUI has been removed.
-
 ## Core Commands
 
 ```bash
 # Intent-to-product
 otto run "REST API for a todo app with SQLite"
 otto run "expense approval portal" --budget 3600
-otto run --project-kind cli "a small linter"
-otto run --review-gate "build a markdown notebook"
-otto run --resume --auto-approve
-
-# Existing-product workflows
-otto improve bugs "find broken recovery and data isolation paths"
-otto improve feature "make the review workflow clearer"
-otto improve target "all API tests pass and p95 latency < 100ms"
-otto certify "admin users can approve or reject expenses" --standard
+otto run "build a markdown notebook" --review-first-decomp
+otto run "add saved filters" --fresh                  # refuse to resume
 
 # Queue parallel work
-otto queue build "add saved filters" --as saved-filters
-otto queue improve bugs "audit error handling" -- --rounds 3
-otto queue certify "release candidate" -- --standard
-otto queue run --concurrent 3 --exit-when-empty
+otto queue run "add saved filters" --as saved-filters
+otto queue run "add CSV export" --as csv --tier modular
+otto queue ls
+otto queue start --concurrent 3 --exit-when-empty     # foreground watcher
+
+# Review paused decomposition tasks (--review-first-decomp)
+otto list-pending
+otto review approve --task <id>
+otto review cancel --task <id>
+otto review edit --task <id> --intent "new intent"
 
 # Proof and diagnostics
 otto proof list
@@ -93,32 +88,25 @@ otto web
 otto web --project-launcher --projects-root ~/otto-projects
 ```
 
-Compatibility aliases are still discoverable in `otto --help` for older
-scripts and agents:
-
-- `otto build` routes to the i2p stack when selected by config or `--i2p`;
-  prefer `otto run` for new direct intent-to-product usage.
-- `otto history` is an alias for `otto proof list`.
-- `otto render` is an alias for `otto proof render`.
-- `otto pow` is an alias for `otto proof open` / `otto proof path`.
-- `otto replay` is an alias for `otto debug narrative`.
-- `otto cleanup` is an alias for `otto proof cleanup`.
+The legacy `otto build`, `otto certify`, and `otto improve` verbs were
+removed; they now print a migration error pointing at `otto run`.
 
 ## Mission Control
 
-Mission Control is the default product surface for Otto. It is a local web app
-backed by the same queue, run registry, logs, artifacts, and session state used
-by the CLI.
+Mission Control is the default product surface for Otto. It is a local web
+app backed by the same queue, run registry, logs, artifacts, and session
+state used by the CLI.
 
 Use it to:
 
 - Create or switch managed projects.
-- Launch build, improve, certify, and run workflows.
+- Launch and monitor runs.
 - Start and stop the queue watcher.
 - Review live and completed run state.
-- Inspect proof packets, logs, artifacts, diffs, screenshots, and token usage.
-- Edit and approve specs at the review gate.
-- Pause, resume, abort groups, retry, requeue, clean up, or recover runs.
+- Inspect proof packets, logs, artifacts, diffs, screenshots, and token
+  usage.
+- Pause, resume, abort children, retry, requeue, clean up, or recover
+  runs.
 - Review project history and system health.
 
 The web server binds to localhost by default. Remote binding requires
@@ -126,31 +114,36 @@ The web server binds to localhost by default. Remote binding requires
 
 ## Intent-To-Product Pipeline
 
-`otto run` is the canonical direct i2p surface:
+`otto run` is the canonical surface:
 
 ```text
 intent
-  -> compile spec
-  -> optional spec review gate
-  -> seed/audit fixtures when needed
-  -> build groups on branches
-  -> merge eligible groups into the integrated worktree
-  -> audit the integrated product
-  -> repair failed features when possible
+  -> compile flat spec (behavior journeys + non-goals + done criteria)
+  -> root Lead decomposes (or builds inline)
+  -> dispatch child tasks on worktrees, in parallel
+  -> verify each child against its journeys
+  -> merge child branches upward to integration
+  -> clean-deploy oracle (bootable + coherent)
   -> render proof-packet.html and proof-packet.json
 ```
 
 The spec is the product contract for a run. It captures project kind,
-structure, groups, dependencies, owned paths, checks, non-goals, and done
-criteria. Runtime terminology is **Group**: older design notes may still use
-"slice" in historical context.
+behavior journeys, owned paths, non-goals, and done criteria.
+
+Decomposition tiers (`--tier`):
+
+- `solo` — force inline build, no children.
+- `lead` — allow subtasks.
+- `modular` — require architecture-first thinking.
+- `auto` — Lead chooses based on intent complexity (default).
 
 ## Configuration (`otto.yaml`)
 
-Provider defaults live in `otto.yaml`; CLI flags override them for one run.
+Provider defaults live in `otto.yaml`; CLI flags override them for one
+run.
 
 ```yaml
-provider: codex-app-server
+provider: claude
 model: null
 effort: null
 run_budget_seconds: 3600
@@ -158,72 +151,72 @@ max_turns_per_call: 200
 
 # Optional per-agent overrides inherit the global provider/model/effort.
 # agents:
-#   build:     {provider: codex-app-server, model: null, effort: null}
-#   certifier: {provider: codex-app-server, model: null, effort: null}
-#   spec:      {provider: codex-app-server, model: null, effort: null}
-#   fix:       {provider: codex-app-server, model: null, effort: null}
+#   build:     {provider: claude, model: null, effort: null}
+#   certifier: {provider: claude, model: null, effort: null}
+#   spec:      {provider: claude, model: null, effort: null}
+#   fix:       {provider: claude, model: null, effort: null}
 
 queue:
   concurrent: 3
   worktree_dir: .worktrees
   task_timeout_s: 4200
-
-build:
-  group_concurrent: 3
 ```
 
 Useful one-off overrides:
 
 ```bash
 otto run "add billing exports" \
-  --build-effort high \
-  --certifier-effort high \
   --budget 5400 \
-  --max-turns 200
+  --max-turns 200 \
+  --tree-budget-usd 50
 ```
 
 ## Queue And Worktrees
 
 `otto queue` runs several jobs without mixing files:
 
-1. Each queued task gets a branch and a worktree under `.worktrees/<task-id>/`.
-2. The foreground watcher dispatches up to `queue.concurrent` tasks.
-3. Each task writes logs, manifests, checkpoints, and proof artifacts.
-4. Mission Control and `otto queue ls/show` expose status and recovery actions.
-5. Cleanup removes finished or abandoned queue worktrees without deleting the
-   preserved session history.
+1. Each queued task gets a branch and a worktree under
+   `.worktrees/<task-id>/`.
+2. `otto queue start` is a foreground watcher that dispatches up to
+   `queue.concurrent` tasks.
+3. Each task writes logs, manifests, checkpoints, and proof artifacts
+   under its own session directory.
+4. `otto queue ls / show / rm / cancel / resume / cleanup` expose
+   status and recovery actions (also surfaced in Mission Control).
 
-The watcher is intentionally a foreground process. Run it in a terminal, tmux
-pane, or through Mission Control.
+Run the watcher in a terminal, tmux pane, or through Mission Control.
 
 ## Evidence And Review
 
-Every session writes its durable record under `otto_logs/sessions/<session-id>/`.
-Important files include:
+Every session writes its durable record under
+`otto_logs/sessions/<session-id>/`. Important files include:
 
-- `spec/spec.json` and spec review sidecars.
-- `spec-state.jsonl` for phase, pause/resume, abort, and group events.
-- `build/`, `merge/`, `audit/`, and `repair/` phase logs.
-- `proof-packet.html` and `proof-packet.json`.
+- `spec/spec.json` — compiled flat spec (validator-passed).
+- `spec-state.jsonl` — append-only event journal of slice/group lifecycle.
+- `build/narrative.log`, `build/messages.jsonl` — phase logs.
+- `proof-packet.html`, `proof-packet.json` — final proof for human review.
 - `summary.json`, `manifest.json`, and provider usage metadata.
-- Raw provider messages when debug logging is enabled.
+- `queue/<slug>/repair-packet.json` — repair-agent feedback per child.
 
-Use `otto proof open <session-id>` or Mission Control's run view for human
-review.
+Use `otto proof open <session-id>` or Mission Control's run view for
+human review.
 
 ## Recovery
 
-Otto is designed for long-running local work where agents, browsers, processes,
-budgets, and laptops can fail.
+Otto is designed for long-running local work where agents, browsers,
+processes, budgets, and laptops can fail.
 
 Recovery primitives include:
 
-- `otto run --resume` for paused i2p sessions.
-- Spec review approval/regeneration through Mission Control.
+- Implicit resume: a second `otto run` against the same project picks up
+  a paused or `merge_blocked` session. Use `--fresh` to refuse resume.
+- `--review-first-decomp` pauses after the root Lead emits children so a
+  human can approve/edit/cancel/replace them before they dispatch.
 - Queue resume and cleanup for interrupted worktree tasks.
 - Watcher heartbeat and stale-process detection.
 - Session history preserved separately from live queue records.
-- `otto debug narrative` to regenerate human-readable logs from raw messages.
+- `otto debug narrative` to regenerate human-readable logs from raw
+  messages.
 
 ## Development
 
@@ -249,32 +242,38 @@ uv run python scripts/test_tiers.py browser
 uv run python scripts/test_tiers.py prepush
 ```
 
-Use the smallest tier that matches the edit while iterating. `smoke` is the
-smallest confidence gate. `fast` skips slow, integration, browser, and heavy
-system tests. Run the `web` tier for Mission Control and frontend/backend web
-changes, and run browser tests for user-visible interaction changes.
+Use the smallest tier that matches the edit while iterating. `smoke` is
+the smallest confidence gate. `fast` skips slow, integration, browser,
+and heavy system tests. Run the `web` tier for Mission Control and
+frontend/backend web changes, and run browser tests for user-visible
+interaction changes.
 
-The committed web bundle in `otto/web/static/` must be rebuilt after changes in
-`otto/web/client/`; `scripts/check_bundle_committed.py` verifies the committed
-bundle against the current sources.
+The committed web bundle in `otto/web/static/` must be rebuilt after
+changes in `otto/web/client/`;
+`scripts/check_bundle_committed.py` verifies the committed bundle
+against the current sources.
 
 ## Repository Layout
 
 ```text
 otto/
-  cli.py                 top-level compatibility and brownfield commands
+  cli.py                 top-level CLI group + venv guard
   cli_run.py             canonical `otto run` intent-to-product CLI
+  cli_review.py          `otto list-pending` / `otto review` commands
   cli_queue.py           queue CLI and watcher controls
   cli_proof.py           proof/debug artifact commands
-  agent.py               provider invocation and message normalization
-  build.py               group build orchestration
-  merge_queue.py         i2p group merge lane
-  audit.py               integrated-product audit
-  audit_loop.py          repair/re-audit loop
-  runner.py              compile -> build -> merge -> audit -> repair -> render
-  spec_compile.py        intent/spec schema and compiler entrypoint
-  spec_state.py          append-only run event journal
-  render.py              proof packet renderer
+  cli_options.py         shared click option validators
+  agent/                 provider invocation + event parsing + bash safety
+  v5_runner.py           orchestrator entry point (run_v5_pipeline)
+  v5/
+    dispatch.py          parallel child dispatch loop + lease
+    merge.py             child-branch merge + integration propagation
+    preflight_oracle.py  preflight + clean-deploy oracle
+    repair.py            repair loops + amendment lifecycle
+  v5_common.py           shared low-level helpers (git_capture, iso_now, …)
+  spec_compile_flat.py   flat spec compiler (schema v4)
+  lead.py                Lead primitive (run_lead)
+  journey_*.py           behavior-journey contracts + executors
   queue/                 queue schema, runner, worktree dispatch
   mission_control/       shared model, actions, serializers, run view
   web/                   FastAPI app, React client, built static assets
@@ -285,8 +284,8 @@ docs/                    architecture notes, RUA reports, design records
 
 ## Current Scope
 
-Otto is currently a local, single-user system. It does not provide hosted
-multi-user auth, cloud VM isolation, ticket-tracker integration, or team RBAC.
-The design focus is reliability first: product specs, evidence, recovery,
-provider diversity, queue isolation, and an operator UI that makes autonomous
-work auditable.
+Otto is currently a local, single-user system. It does not provide
+hosted multi-user auth, cloud VM isolation, ticket-tracker integration,
+or team RBAC. The design focus is reliability first: product specs,
+evidence, recovery, provider diversity, queue isolation, and an operator
+UI that makes autonomous work auditable.

@@ -3,7 +3,7 @@
 This script intentionally uses Otto as a black box. It does not add runner
 rules, classifiers, or product-specific patches. Live mode requires
 ``OTTO_ALLOW_REAL_COST=1`` because it launches real provider-backed
-``otto v5 run`` calls.
+``otto run`` calls.
 """
 
 from __future__ import annotations
@@ -330,7 +330,7 @@ def runtime_intent(scenario: Scenario, ports: PortAllocation) -> str:
 
 def command_preview(scenario: Scenario) -> str:
     return (
-        f"{OTTO_BIN} v5 run <intent> --provider claude "
+        f"{OTTO_BIN} run <intent> --provider claude "
         f"--budget {scenario.budget_seconds} "
         f"--max-parallel {scenario.max_parallel} --tier {scenario.tier}"
     )
@@ -339,7 +339,7 @@ def command_preview(scenario: Scenario) -> str:
 def otto_command(scenario: Scenario, ports: PortAllocation) -> list[str]:
     return [
         str(OTTO_BIN),
-        "v5",
+        "run",
         "run",
         runtime_intent(scenario, ports),
         "--provider",

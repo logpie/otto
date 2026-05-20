@@ -3,7 +3,7 @@
 The legacy improve loop has been removed. The three subcommands
 (``otto improve bugs|feature|target``) remain as stubs so that
 operators who still type the old commands get a clear migration
-error pointing them at ``otto v5 run``.
+error pointing them at ``otto run``.
 
 Pure helpers ``_VERDICT_GLYPHS``, ``_journey_verdict``,
 ``_render_results_section`` are preserved because they have direct
@@ -71,7 +71,7 @@ def _render_results_section(journeys: list[dict[str, object]]) -> list[str]:
 
 _LEGACY_REMOVED_MSG = (
     "[error]`otto improve` has been removed along with the legacy "
-    "pipeline. Use `otto v5 run \"<intent>\"` instead.[/error]"
+    "pipeline. Use `otto run \"<intent>\"` instead.[/error]"
 )
 
 
@@ -87,7 +87,7 @@ def register_improve_commands(main: click.Group) -> None:
     @main.group(context_settings=CONTEXT_SETTINGS, invoke_without_command=True)
     @click.pass_context
     def improve(ctx: click.Context) -> None:
-        """[REMOVED] Use `otto v5 run` instead."""
+        """[REMOVED] Use `otto run` instead."""
         if ctx.invoked_subcommand is None:
             _exit_legacy_removed()
 
@@ -97,7 +97,7 @@ def register_improve_commands(main: click.Group) -> None:
     )
     @click.argument("args", nargs=-1, type=click.UNPROCESSED)
     def bugs(args: tuple[str, ...]) -> None:  # noqa: ARG001
-        """[REMOVED] Use `otto v5 run` instead."""
+        """[REMOVED] Use `otto run` instead."""
         _exit_legacy_removed()
 
     @improve.command(
@@ -106,7 +106,7 @@ def register_improve_commands(main: click.Group) -> None:
     )
     @click.argument("args", nargs=-1, type=click.UNPROCESSED)
     def feature(args: tuple[str, ...]) -> None:  # noqa: ARG001
-        """[REMOVED] Use `otto v5 run` instead."""
+        """[REMOVED] Use `otto run` instead."""
         _exit_legacy_removed()
 
     @improve.command(
@@ -115,7 +115,7 @@ def register_improve_commands(main: click.Group) -> None:
     )
     @click.argument("args", nargs=-1, type=click.UNPROCESSED)
     def target(args: tuple[str, ...]) -> None:  # noqa: ARG001
-        """[REMOVED] Use `otto v5 run` instead."""
+        """[REMOVED] Use `otto run` instead."""
         _exit_legacy_removed()
 
 

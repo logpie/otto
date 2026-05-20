@@ -199,13 +199,13 @@ existing watcher (`otto/queue/runtime.py`) does not yet schedule v5 tasks.
 This means `otto queue submit "<intent>"` doesn't currently reach v5.
 
 **v6 work:** extend the existing watcher's main loop to also poll
-`v5_pending.jsonl` and spawn v5 child tasks via `otto v5 run --queue-task=<id>`.
+`v5_pending.jsonl` and spawn v5 child tasks via `otto run --queue-task=<id>`.
 Estimated ~250 LOC. Tested by submitting tasks via `otto queue submit` and
 verifying they appear in `task_graph.json`.
 
 ### Multi-user concurrent submitters
 **State:** untested. v5_runner is in-process; two MC users running
-`otto v5 run` against the same project would each spin up their own
+`otto run` against the same project would each spin up their own
 runner. Cross-task merge has fcntl on git operations, but the queue's
 v5_pending.jsonl write-coordination is unverified at high concurrency.
 
@@ -564,7 +564,7 @@ rendering as expandable tree with verdict pills, cost, drill-down to
 proof packet.
 
 ### First-level review modal
-**State:** `--review-first-decomp` flag works; `otto v5 review` CLI works.
+**State:** `--review-first-decomp` flag works; `otto review` CLI works.
 Plan-v5 §7.3 called for an MC modal that pops when root has emitted
 children in supervised mode, allowing accept / edit / replace.
 
@@ -577,7 +577,7 @@ pipeline. Plan-v5 §7.1 called for tier dropdown + manual tasks input.
 Not implemented.
 
 **v6 work:** extend build form; add `tier` and `tasks` fields to
-`RunPayload`; route to `otto v5 run` instead of `otto run` when tier is
+`RunPayload`; route to `otto run` instead of `otto run` when tier is
 set.
 
 ### Spec visualization — PM PRD layer
@@ -648,7 +648,7 @@ goes through them.
 `--legacy` CLI flag; document migration path. Coupled to bench results.
 
 ### Today's pipeline removal
-**State:** `otto run` (v4 pipeline) and `otto v5 run` (v5 pipeline)
+**State:** `otto run` (v4 pipeline) and `otto run` (v5 pipeline)
 coexist. Plan-v5 §10 definition-of-done required `otto run` to route to
 v5 by default after bench validates v5.
 
@@ -820,12 +820,12 @@ fields." Target ~500 lines max.
 writes `summary.json` per task per philosophy invariant. Resume of a v5
 session was not exercised under crash conditions.
 
-**v6 work:** kill v5_runner mid-run; verify `otto v5 run --resume <session>`
+**v6 work:** kill v5_runner mid-run; verify `otto run --resume <session>`
 picks up the task graph and continues. Smoke test.
 
 ### Concurrency stress test
 **State:** unit tests verify task_graph.json writes are atomic under 4
-threads. Live LLM concurrency (2+ `otto v5 run` against same project) is
+threads. Live LLM concurrency (2+ `otto run` against same project) is
 not tested.
 
 **v6 work:** stress test 4 concurrent live runs; profile contention.
