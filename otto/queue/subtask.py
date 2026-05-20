@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.paths import cross_sessions_dir
+from otto.observability import iso_timestamp
 
 V5_PENDING_FILENAME = "v5_pending.jsonl"
 
@@ -40,7 +41,7 @@ def v5_pending_path(project_dir: Path) -> Path:
 
 
 def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return iso_timestamp()
 
 
 def _generate_task_id(intent: str) -> str:

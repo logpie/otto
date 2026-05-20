@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from otto.paths import cross_sessions_dir
+from otto.observability import iso_timestamp
 
 SCHEMA_VERSION = 1
 TASK_GRAPH_FILENAME = "task_graph.json"
@@ -75,7 +76,7 @@ def task_graph_path(project_dir: Path) -> Path:
 
 
 def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return iso_timestamp()
 
 
 def _parse_iso_seconds(value: Any) -> float | None:

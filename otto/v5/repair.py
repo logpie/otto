@@ -27,6 +27,7 @@ from otto.queue.subtask import (
     enqueue_subtask,
     v5_pending_path,
 )
+from otto.observability import iso_timestamp
 from otto.queue.task_graph import (
     clear_contract_amendment_blocked_state,
     clear_contract_amendment_blocked_tasks,
@@ -125,7 +126,7 @@ def _enqueue_existing_task_for_merge_retry(
         "task_role": task_role,
         "integration_branch": parent_integration_branch,
         "review_state": "approved",
-        "enqueued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "enqueued_at": iso_timestamp(),
     }
     append_pending_entry(v5_pending_path(project_dir), entry)
 
@@ -207,7 +208,7 @@ def _contract_amendment_exhausted_feedback(
         "attempt_count": attempt_count,
         "max_attempts": _v5r.MAX_CONTRACT_AMENDMENT_ATTEMPTS,
         "previous_feedback": union_feedback,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
 
 def _schedule_foundation_contract_amendment(
@@ -383,7 +384,7 @@ def _smoke_repair_unrouteable_feedback(
         "repair_path": "",
         "owner_task_id": parent_task_id,
         "smoke_payload": smoke_payload,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
 
 def _smoke_repair_feedback(
@@ -424,7 +425,7 @@ def _smoke_repair_feedback(
         "repair_paths": repair_paths,
         "owner_task_id": owner_id,
         "smoke_payload": smoke_payload,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
 
 def _schedule_smoke_repair_needed(
@@ -715,7 +716,7 @@ def _settle_contract_amendment_dependents(
         "amendment_task_id": amendment_id,
         "amendment_verdict": graph_verdict,
         "blocked_task_ids": blocked,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
     for leaf_id in blocked:
         leaf_result = child_results.get(leaf_id) or LeadResult(
@@ -805,7 +806,7 @@ def _terminalize_stale_contract_amendment_retry_if_exhausted(
         "retry_owner_pid": latest.get("contract_amendment_retry_owner_pid"),
         "retry_owner_host": latest.get("contract_amendment_retry_owner_host"),
         "retry_heartbeat_at": latest.get("contract_amendment_retry_heartbeat_at"),
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
     if not terminalize_stale_contract_amendment_retry_if_exhausted(
         project_dir,
@@ -1647,7 +1648,7 @@ def _child_repair_helper_crashed_feedback(
             "type": type(exc).__name__,
             "message": str(exc),
         },
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
     if previous_feedback is not None:
         feedback["previous_gate_feedback"] = previous_feedback
@@ -1675,7 +1676,7 @@ async def _repair_child_upward_merge_gate_once(
     feedback.setdefault("message", original_detail)
     feedback.setdefault("paths", paths)
     feedback.setdefault("parent_integration_branch", parent_integration_branch)
-    feedback.setdefault("_written_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    feedback.setdefault("_written_at", iso_timestamp())
     _v5r._emit(on_event, {
         "event": "upward_merge_gate_repair_start",
         "task_id": child_task_id,
@@ -1740,7 +1741,7 @@ def _stale_target_gate_feedback(
         "parent_integration_branch": parent_integration_branch,
         "prior_repair_detail": prior_repair_detail,
         "origin": origin,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
         "integration_context": {
             "merge_refs": {
                 "base_ref": base_ref,
@@ -2047,7 +2048,7 @@ async def _repair_stale_target_and_retry_merge(
                 "repair_detail": stale_detail,
                 "prior_repair_detail": prior_repair_detail,
                 "stale_feedback": stale_feedback,
-                "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "_written_at": iso_timestamp(),
             }
             reason = (
                 f"{followup_detail}; stale target repair attempt: {stale_detail}; "

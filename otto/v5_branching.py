@@ -21,6 +21,7 @@ import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from otto.observability import iso_timestamp
 
 logger = logging.getLogger("otto.v5_branching")
 
@@ -139,7 +140,7 @@ def _merge_target_lock(project_dir: Path, target_branch: str) -> Iterator[None]:
             + target_branch
             + "\n"
             + "_written_at="
-            + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            + iso_timestamp()
             + "\n"
         )
         lock_file.flush()
@@ -270,7 +271,7 @@ def _write_conflict_packet(
     packet_path = packet_dir / f"{timestamp}-{safe_source}.json"
     payload = {
         "schema_version": 1,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
         "source_branch": source_branch,
         "target_branch": target_branch,
         "unmerged_paths": list(files),

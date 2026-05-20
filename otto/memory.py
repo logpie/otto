@@ -25,6 +25,7 @@ from typing import Any
 from otto import paths
 from otto.history import tail_jsonl_entries
 from otto.redaction import redact_text
+from otto.observability import iso_timestamp
 
 logger = logging.getLogger("otto.memory")
 MAX_ENTRIES = 5
@@ -80,7 +81,7 @@ def _record_run_impl(
         })
 
     entry = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "ts": iso_timestamp(),
         "run_id": run_id,
         "command": command,
         "certifier_mode": certifier_mode,

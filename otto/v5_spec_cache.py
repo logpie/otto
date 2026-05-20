@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.observability import sha256_text
+from otto.observability import iso_timestamp
 
 
 @dataclass(frozen=True)
@@ -93,7 +94,7 @@ def store_spec_cache(
     shutil.copyfile(spec_path, cached_spec)
     metadata = {
         "schema_version": 1,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
         "key": key_payload,
         "key_hash": key_hash,
         "spec_sha256": sha256_text(spec_text),

@@ -46,6 +46,7 @@ from otto.queue.runtime import (
     watcher_alive,
 )
 from otto.runs.schema import TERMINAL_STATUSES
+from otto.observability import iso_timestamp
 
 
 QUEUE_CLEANUP_STATUSES = set(TERMINAL_STATUSES)
@@ -590,7 +591,7 @@ def register_queue_commands(main: click.Group) -> None:
             console.print(f"  Removed [info]{task_id}[/info] from queue.")
             return
         append_command(project_dir, {
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "ts": iso_timestamp(),
             "cmd": "remove",
             "id": task_id,
         })
@@ -636,7 +637,7 @@ def register_queue_commands(main: click.Group) -> None:
         status = _task_status(project_dir, task_id)
         if status == "queued":
             append_command(project_dir, {
-                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "ts": iso_timestamp(),
                 "cmd": "cancel",
                 "id": task_id,
             })
@@ -644,7 +645,7 @@ def register_queue_commands(main: click.Group) -> None:
             return
         if status == "running":
             append_command(project_dir, {
-                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "ts": iso_timestamp(),
                 "cmd": "cancel",
                 "id": task_id,
             })
@@ -746,7 +747,7 @@ def register_queue_commands(main: click.Group) -> None:
         reorder_tasks(project_dir, selected_ids)
         for task_id in selected_ids:
             append_command(project_dir, {
-                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "ts": iso_timestamp(),
                 "cmd": "resume",
                 "id": task_id,
             })
@@ -837,7 +838,7 @@ def register_queue_commands(main: click.Group) -> None:
         if _watcher_is_alive(project_dir):
             for t in targets:
                 append_command(project_dir, {
-                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "ts": iso_timestamp(),
                     "cmd": "cleanup",
                     "id": t.id,
                 })

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.logstream import normalize_phase_breakdown
+from otto.observability import iso_timestamp
 from otto.token_usage import (
     TOKEN_USAGE_KEYS,
     phase_breakdown_from_messages,
@@ -96,7 +97,7 @@ def _write_session_summary(
         "stories_tested": stories_tested,
         "status": status,
         "rounds": rounds,
-        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "completed_at": iso_timestamp(),
     }
     queue_task_id = os.environ.get("OTTO_QUEUE_TASK_ID")
     if queue_task_id:
@@ -294,7 +295,7 @@ def _append_session_history(
             timing={
                 "started_at": started_at,
                 "finished_at": finished_at,
-                "timestamp": finished_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "timestamp": finished_at or iso_timestamp(),
                 "duration_s": duration_s,
             },
             metrics={"cost_usd": float(total_cost_usd)},
@@ -384,7 +385,7 @@ def _append_cancelled_atomic_history(
             timing={
                 "started_at": started_at,
                 "finished_at": finished_at,
-                "timestamp": finished_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "timestamp": finished_at or iso_timestamp(),
                 "duration_s": duration_s,
             },
             metrics={"cost_usd": float(total_cost_usd)},

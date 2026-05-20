@@ -31,6 +31,7 @@ from otto.runs.registry import (
 )
 from otto.defaults import UI_POLL_INTERVAL_S
 from otto.runs.schema import RunRecord, is_terminal_status
+from otto.observability import iso_timestamp
 from otto.verification import (
     normalize_verification_policy,
     verification_policy_cli_value,
@@ -497,7 +498,7 @@ def _write_spec_review_decision(spec_path: Path, *, action: str, note: str = "")
         "schema_version": 1,
         "action": normalized,
         "note": str(note or "").strip(),
-        "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "requested_at": iso_timestamp(),
     }
     sidecar = Path(spec_path).with_name(_SPEC_REVIEW_DECISION_FILE)
     sidecar.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")

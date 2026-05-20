@@ -75,6 +75,7 @@ from otto.queue.schema import (
 )
 from otto.defaults import UI_POLL_INTERVAL_S
 from otto.queue.ids import detect_cycles
+from otto.observability import iso_timestamp
 from otto.runs.registry import (
     HEARTBEAT_INTERVAL_S,
     allocate_run_id,
@@ -313,7 +314,7 @@ def acquire_lock(project_dir: Path) -> Any:
 
 
 def now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return iso_timestamp()
 
 
 def _mark_failed(ts: dict[str, Any], reason: str) -> None:

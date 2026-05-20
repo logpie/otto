@@ -33,6 +33,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Literal
+from otto.observability import iso_timestamp
 
 logger = logging.getLogger("otto.v5_provider_fallback")
 
@@ -129,7 +130,7 @@ def append_attempt(
     Atomic: read-modify-write is serialized with a sidecar fcntl lock because
     parallel child tasks can append to the same root session summary.
     """
-    started_at = started_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    started_at = started_at or iso_timestamp()
     if not summary_path.exists():
         return  # caller should ensure summary exists; nothing to do
 

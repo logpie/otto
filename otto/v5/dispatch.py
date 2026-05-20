@@ -53,6 +53,7 @@ from otto.queue.task_graph import (
     update_task_metadata,
 )
 from otto.spec_compile_flat import FlatSpec
+from otto.observability import iso_timestamp
 
 logger = logging.getLogger("otto.v5_runner")
 
@@ -386,7 +387,7 @@ async def _process_children(
                         {"kind": f.kind, "reference": f.reference, "detail": f.detail}
                         for f in partition_findings
                     ],
-                    "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "_written_at": iso_timestamp(),
                 }
                 _v5r._emit(on_event, {
                     "event": "architect_contract_invalid",
@@ -962,7 +963,7 @@ async def _process_children(
                                     "kind": "inline_only_at_depth",
                                     "message": reason,
                                     "task_id": tid,
-                                    "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                    "_written_at": iso_timestamp(),
                                 },
                             })
                             continue
@@ -1806,7 +1807,7 @@ def _write_integration_packet(
         })
     packet = {
         "schema_version": 1,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
         "parent_task_id": parent_task_id,
         "integration_branch": integration_branch,
         "integration_worktree": str(integration_worktree),

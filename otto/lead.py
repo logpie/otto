@@ -38,6 +38,7 @@ from otto.journey_scope_policy import (
     infer_execution_scope,
     node_kind_for_scope,
 )
+from otto.observability import iso_timestamp
 from otto.queue.task_graph import (
     add_cost as graph_add_cost,
     record_task,
@@ -874,7 +875,7 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
 
 def _record_verdict_recovery_warning(session_dir: Path, warning: dict[str, Any]) -> None:
     payload = {
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
         "event": "verdict_recovery_warning",
         **warning,
     }
@@ -1391,7 +1392,7 @@ def _write_summary(session_dir: Path, result: LeadResult) -> None:
         "verify_called": result.verify_called,
         "verify_result": result.verify_result,
         "failure_reason": result.failure_reason,
-        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "completed_at": iso_timestamp(),
     }
     summary_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
@@ -1420,7 +1421,7 @@ def _write_skipped_report(session_dir: Path, result: LeadResult) -> Path | None:
     if not isinstance(skipped, list) or not skipped:
         return None
 
-    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    timestamp = iso_timestamp()
     path = session_dir / "skipped_report.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [

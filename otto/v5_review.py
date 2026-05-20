@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from otto.queue.subtask import v5_pending_path
+from otto.observability import iso_timestamp
 
 logger = logging.getLogger("otto.v5_review")
 
@@ -142,7 +143,7 @@ def approve(
             if parent_task_id is not None and e.get("parent_task_id") != parent_task_id:
                 continue
             e["review_state"] = "approved"
-            e["approved_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            e["approved_at"] = iso_timestamp()
             count += 1
         _write_entries(path, entries)
     return count
@@ -161,7 +162,7 @@ def cancel(
         for e in entries:
             if e.get("task_id") in target_ids and e.get("review_state") == "pending_review":
                 e["review_state"] = "cancelled"
-                e["cancelled_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                e["cancelled_at"] = iso_timestamp()
                 count += 1
         _write_entries(path, entries)
     return count
@@ -182,7 +183,7 @@ def edit(
         for e in entries:
             if e.get("task_id") == task_id and e.get("review_state") == "pending_review":
                 e["intent"] = new_intent
-                e["edited_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                e["edited_at"] = iso_timestamp()
                 _write_entries(path, entries)
                 return True
     return False

@@ -10,6 +10,7 @@ from otto.branching import compute_branch_name
 from otto.config import first_touch_bookkeeping, load_config
 from otto.queue.ids import generate_task_id, validate_after_refs
 from otto.queue.schema import QueueTask, append_task, load_queue
+from otto.observability import iso_timestamp
 
 
 @dataclass(slots=True)
@@ -93,7 +94,7 @@ def enqueue_task(
         command_argv=argv,
         after=after,
         resumable=resumable,
-        added_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        added_at=iso_timestamp(),
         resolved_intent=stored_intent,
         focus=focus,
         target=target,

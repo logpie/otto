@@ -42,6 +42,7 @@ from otto.worktree import add_worktree
 from otto.v5_preflight import (
     preflight_issues_from_clean_oracle,
 )
+from otto.observability import iso_timestamp
 from otto.v5_preflight_repair import (
     RepairBudget,
     RepairPacket,
@@ -206,7 +207,7 @@ def _mechanical_fail_fast_payload(
         "repair_phase": "mechanical_env_classifier",
         "summary": message,
         "mechanical_blocker": issue,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
     return out
 
@@ -689,7 +690,7 @@ def _build_repair_packet(
         latest_payload = latest_oracle_result
     attempt_history = _packet_attempt_history(packet_path)
     attempt = dict(attempt_history_entry)
-    attempt.setdefault("_written_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    attempt.setdefault("_written_at", iso_timestamp())
     attempt_history.append(attempt)
     current_branch = branch if branch is not None else _v5r._git_capture(worktree_path, ["branch", "--show-current"])
     head = _v5r._git_capture(worktree_path, ["rev-parse", "HEAD"])

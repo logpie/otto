@@ -22,6 +22,7 @@ from typing import Any
 
 from otto.v5_capability_inventory import parse_information_architecture_contract
 from otto.v5_common import coerce_spec as _coerce_spec, read_text as _read_text
+from otto.observability import iso_timestamp
 
 CHARTER_TARGET_LINES = 500
 logger = logging.getLogger("otto.v5_context_slicer")
@@ -618,4 +619,4 @@ def _entities_for_actions(spec: dict[str, Any], action_ids: set[str]) -> set[str
 
 
 def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return iso_timestamp()

@@ -23,6 +23,7 @@ from pathlib import Path
 
 from otto import paths
 from otto.observability import write_json_atomic
+from otto.observability import iso_timestamp
 
 QUEUE_TASK_ENV = "OTTO_QUEUE_TASK_ID"
 QUEUE_PROJECT_DIR_ENV = "OTTO_QUEUE_PROJECT_DIR"
@@ -170,7 +171,7 @@ def make_manifest(
         cost_usd=float(cost_usd),
         duration_s=float(duration_s),
         started_at=started_at,
-        finished_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        finished_at=iso_timestamp(),
         head_sha=head_sha,
         resolved_intent=resolved_intent,
         focus=focus,
@@ -181,7 +182,7 @@ def make_manifest(
 
 def now_iso() -> str:
     """Helper for callers that want a started_at timestamp at run start."""
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return iso_timestamp()
 
 
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:

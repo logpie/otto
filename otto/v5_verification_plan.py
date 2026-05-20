@@ -22,6 +22,7 @@ from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdic
 from otto.spec_compile_flat import SCHEMA_VERSION as FLAT_SPEC_SCHEMA_VERSION
 from otto.v5_capability_inventory import parse_information_architecture_contract
 from otto.v5_common import coerce_spec as _coerce_spec, read_text as _read_text
+from otto.observability import iso_timestamp
 
 CHECK_KINDS = (
     "structured_contract_present",
@@ -194,7 +195,7 @@ def validate_lead_verdict(
 
     plan = {
         "schema_version": 1,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
         "spec_path": str(spec_path) if spec_path.exists() else "",
         "charter_path": str(charter_path) if charter_path else "",
         "node_kind": node_kind,

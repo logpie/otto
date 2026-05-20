@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.redaction import redact_text
+from otto.observability import iso_timestamp
 from otto.runs.history import (
     append_history_snapshot,
     command_family,
@@ -22,7 +23,7 @@ def append_history_entry(project_dir: Path, entry: dict[str, Any]) -> dict[str, 
     payload = dict(entry)
     payload["run_id"] = run_id
     payload["command"] = normalize_command_label(payload.get("command"))
-    payload["timestamp"] = payload.get("timestamp") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    payload["timestamp"] = payload.get("timestamp") or iso_timestamp()
     if run_id and "build_id" not in payload:
         payload["build_id"] = run_id
     if "certifier_mode" in payload and "mode" not in payload:

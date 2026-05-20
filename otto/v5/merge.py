@@ -22,6 +22,7 @@ from typing import Any
 from otto.lead import LeadResult
 from otto.safe_slug import safe_slug
 from otto.v5_branching import MergeWorktreeDirtyError
+from otto.observability import iso_timestamp
 from otto.queue.task_graph import (
     children_of,
     get_task,
@@ -99,7 +100,7 @@ def _integration_union_empty_state(parent_integration_branch: str) -> dict[str, 
         "parent_integration_branch": parent_integration_branch,
         "contributions": [],
         "touches": [],
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
 
 def _integration_union_state_from_task(
@@ -155,7 +156,7 @@ def _merge_integration_union_state(
         )
         for item in touches
     }
-    recorded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    recorded_at = iso_timestamp()
     for path in touched_paths:
         touch_key = (child_task_id, path)
         if touch_key not in seen_touches:
@@ -432,7 +433,7 @@ def _integration_union_feedback(
         "source_branch": source_branch,
         "base_ref": base_ref,
         "post_merge_ref": post_merge_ref,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
         "integration_context": {
             "merge_refs": {
                 "base_ref": base_ref,
@@ -1215,7 +1216,7 @@ def _record_structured_merge_failed(
         recording_error = {
             "type": type(exc).__name__,
             "message": str(exc),
-            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "_written_at": iso_timestamp(),
         }
         try:
             structured_reason["recording_error"] = recording_error
@@ -1266,7 +1267,7 @@ def _integration_union_guard_error_feedback(
             "type": type(exc).__name__,
             "message": str(exc),
         },
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
     if previous_feedback is not None:
         feedback["previous_gate_feedback"] = previous_feedback
@@ -1293,7 +1294,7 @@ def _pre_merge_ref_unresolved_feedback(
         "parent_integration_branch": parent_integration_branch,
         "source_branch": source_branch,
         "prior_repair_detail": prior_repair_detail,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
     if previous_feedback is not None:
         feedback["previous_gate_feedback"] = previous_feedback
@@ -1319,7 +1320,7 @@ def _child_merge_conflict_smoke_failed_feedback(
         "parent_integration_branch": parent_integration_branch,
         "source_branch": source_branch,
         "pre_merge_ref": pre_merge_ref,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
     if oracle is not None:
         feedback["oracle"] = oracle
@@ -1384,7 +1385,7 @@ async def _merge_child_branch(
             "task_id": child_task_id,
             "source_branch": source_branch,
             "parent_integration_branch": parent_integration_branch,
-            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "_written_at": iso_timestamp(),
         }
         _record_structured_merge_failed(
             project_dir=project_dir,
@@ -1734,7 +1735,7 @@ async def _merge_child_branch(
                 "source_branch": source_branch,
                 "parent_integration_branch": parent_integration_branch,
                 "pre_merge_ref": pre_merge_ref,
-                "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "_written_at": iso_timestamp(),
             }
             _record_structured_merge_failed(
                 project_dir=project_dir,
@@ -1827,7 +1828,7 @@ async def _merge_child_branch(
             "source_branch": source_branch,
             "parent_integration_branch": parent_integration_branch,
             "pre_merge_ref": pre_merge_ref,
-            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "_written_at": iso_timestamp(),
         }
         _record_structured_merge_failed(
             project_dir=project_dir,
@@ -2199,7 +2200,7 @@ async def _merge_child_branch(
             "source_branch": source_branch,
             "parent_integration_branch": parent_integration_branch,
             "pre_merge_ref": pre_merge_ref,
-            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "_written_at": iso_timestamp(),
         }
         _record_structured_merge_failed(
             project_dir=project_dir,

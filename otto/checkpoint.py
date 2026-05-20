@@ -28,6 +28,7 @@ from otto import paths
 from otto.display import rich_escape
 from otto.theme import error_console
 from otto.config import checkpoint_fingerprint
+from otto.observability import iso_timestamp
 
 logger = logging.getLogger("otto.checkpoint")
 
@@ -581,7 +582,7 @@ def write_checkpoint(
             else list(prior.get("dirty_files", []) if prior else [])
         ),
         "started_at": _read_started_at(checkpoint_path),
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "updated_at": iso_timestamp(),
     }
     if split_mode_value is not None:
         data["split_mode"] = split_mode_value
@@ -761,7 +762,7 @@ def complete_checkpoint(
             data["current_round"] = current_round
         if rounds is not None:
             data["rounds"] = list(rounds)
-        data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        data["updated_at"] = iso_timestamp()
         _prune_checkpoint_defaults(data)
 
     cp_path: Path | None = None
@@ -813,7 +814,7 @@ def write_cancel_checkpoint_marker(
     prior = _read_prior(checkpoint_path) or {}
     data = _normalize_checkpoint_data(prior)
 
-    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    now_iso = iso_timestamp()
     if not data.get("run_id"):
         data["run_id"] = run_id
     if not data.get("command"):
@@ -834,7 +835,7 @@ def write_cancel_checkpoint_marker(
 
 def _read_started_at(checkpoint_path: Path) -> str:
     """Preserve original started_at from existing checkpoint."""
-    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    now_iso = iso_timestamp()
     if checkpoint_path.exists():
         try:
             data = json.loads(checkpoint_path.read_text())

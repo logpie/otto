@@ -58,6 +58,7 @@ import fcntl
 import json
 import logging
 import os
+from otto.observability import iso_timestamp
 import subprocess
 import time
 from collections import defaultdict
@@ -309,7 +310,7 @@ class RunState:
 
 
 def _iso_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return iso_timestamp()
 
 
 def journal_path(session_dir: Path) -> Path:

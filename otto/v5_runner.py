@@ -76,6 +76,7 @@ from otto.queue.subtask import (
     v5_pending_path,
     _verdict_satisfies_dependency,
 )
+from otto.observability import iso_timestamp
 from otto.queue.task_graph import (
     aggregate_verdict,
     children_of,
@@ -617,7 +618,7 @@ def _foundation_contract_write_feedback(
             "parent_integration_branch": parent_integration_branch,
             "operation": operation,
             "violations": violations,
-            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "_written_at": iso_timestamp(),
         }
     for contract in contracts:
         contract_path = _normalize_contract_path(str(contract.get("path") or ""))
@@ -652,7 +653,7 @@ def _foundation_contract_write_feedback(
         "parent_integration_branch": parent_integration_branch,
         "operation": operation,
         "violations": violations,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
 
 
@@ -700,7 +701,7 @@ def _allowed_paths_write_feedback(
         "scope_policy": scope_policy,
         "allowed_paths": normalized_allowed,
         "changed_paths": outside_scope,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
 
 
@@ -1901,7 +1902,7 @@ def _remove_feature_owned_foundation_contract_paths(
         "kind": "foundation_contract_feature_rescoped",
         "message": "removed foundation contract paths from feature owned_paths",
         "removals": removals,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
 
 
@@ -1952,7 +1953,7 @@ def _foundation_scheduler_feedback(
             "terminal_blocked_foundation_task_ids": terminal_blocked_foundations,
             "contracts_present": bool(contracts),
             "contract_findings": _foundation_contract_findings(contracts),
-            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "_written_at": iso_timestamp(),
         }
     ready_features = [
         str(entry.get("task_id") or "")
@@ -1991,7 +1992,7 @@ def _foundation_scheduler_feedback(
             "terminal_blocked_foundation_task_ids": terminal_blocked_foundations,
             "contracts_present": bool(contracts),
             "contract_findings": contract_findings,
-            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "_written_at": iso_timestamp(),
         }
     if unverified_foundations or not contracts or contract_findings:
         return {
@@ -2006,7 +2007,7 @@ def _foundation_scheduler_feedback(
             "terminal_blocked_foundation_task_ids": terminal_blocked_foundations,
             "contracts_present": bool(contracts),
             "contract_findings": contract_findings,
-            "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "_written_at": iso_timestamp(),
         }
     return None
 
@@ -2122,7 +2123,7 @@ def _foundation_isolation_feedback(
         "architect_task_id": architect_task_id,
         "parent_task_id": parent_task_id,
         "findings": findings,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
 
 
@@ -2393,7 +2394,7 @@ def _write_context_slice_failure_log(
     path = child_session_dir / "context_slice.json"
     payload = {
         "schema_version": 1,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
         "child_id": child_id,
         "included_entities": [],
         "excluded_entities": [],
@@ -2526,7 +2527,7 @@ def _write_toolchain_preflight_log(
     path = log_dir / f"toolchain-preflight-{architect_task_id}-attempt-{retry_count + 1}.json"
     payload = {
         "schema_version": 1,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
         "architect_task_id": architect_task_id,
         "retry_count": retry_count,
         **result,

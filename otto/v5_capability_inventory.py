@@ -37,6 +37,7 @@ import time
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from otto.v5_common import coerce_spec as _coerce_spec
+from otto.observability import iso_timestamp
 from typing import Any
 
 # Configurable to bound walk cost.
@@ -1654,7 +1655,7 @@ def check_route_registration_isolation(
         "leaf_task_ids": sorted(route_leaves),
         "shared_files": shared_files,
         "contract_findings": contract_payload,
-        "_written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "_written_at": iso_timestamp(),
     }
 
 
