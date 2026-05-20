@@ -498,16 +498,31 @@ def ensure_initial_commit(project_dir: Path) -> bool:
                 text=True,
             )
             if status.stdout.strip():
-                subprocess.run(
+                add_proc = subprocess.run(
                     ["git", "add", ".gitignore"],
                     cwd=str(project_dir),
                     capture_output=True,
+                    text=True,
                 )
-                subprocess.run(
-                    ["git", "commit", "-m", "otto: refresh managed gitignore block"],
-                    cwd=str(project_dir),
-                    capture_output=True,
-                )
+                if add_proc.returncode != 0:
+                    logger.warning(
+                        "git add .gitignore failed in %s (rc=%d, stderr=%s)",
+                        project_dir, add_proc.returncode,
+                        (add_proc.stderr or "").strip(),
+                    )
+                else:
+                    commit_proc = subprocess.run(
+                        ["git", "commit", "-m", "otto: refresh managed gitignore block"],
+                        cwd=str(project_dir),
+                        capture_output=True,
+                        text=True,
+                    )
+                    if commit_proc.returncode != 0:
+                        logger.warning(
+                            "git commit (gitignore refresh) failed in %s (rc=%d, stderr=%s)",
+                            project_dir, commit_proc.returncode,
+                            (commit_proc.stderr or "").strip(),
+                        )
             return False
 
         subprocess.run(

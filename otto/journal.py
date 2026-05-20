@@ -11,6 +11,7 @@ Three layers:
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import time
 from pathlib import Path
@@ -18,6 +19,8 @@ from typing import Any
 
 from otto import paths
 from otto.observability import write_json_file
+
+logger = logging.getLogger("otto.journal")
 
 
 def _rounds_dir(project_dir: Path, session_id: str | None) -> Path:
@@ -118,16 +121,35 @@ def record_build(
         sha_before = m.get("commit_before", "")
 
     if sha_before and sha_after and sha_before != sha_after:
-        diff = subprocess.run(
+        stat_proc = subprocess.run(
             ["git", "diff", "--stat", sha_before, sha_after],
             cwd=str(project_dir), capture_output=True, text=True,
-        ).stdout.strip()
+        )
+        if stat_proc.returncode != 0:
+            logger.warning(
+                "git diff --stat %s..%s failed in %s (rc=%d, stderr=%s); journal stat unavailable",
+                sha_before, sha_after, project_dir, stat_proc.returncode,
+                (stat_proc.stderr or "").strip(),
+            )
+            diff = "(diff unavailable: git diff --stat failed)"
+        else:
+            diff = stat_proc.stdout.strip()
 
-        full_diff = subprocess.run(
+        full_proc = subprocess.run(
             ["git", "diff", sha_before, sha_after],
             cwd=str(project_dir), capture_output=True, text=True,
-        ).stdout
-        (round_dir / "git-diff.patch").write_text(full_diff)
+        )
+        if full_proc.returncode != 0:
+            logger.warning(
+                "git diff %s..%s failed in %s (rc=%d, stderr=%s); journal patch unavailable",
+                sha_before, sha_after, project_dir, full_proc.returncode,
+                (full_proc.stderr or "").strip(),
+            )
+            (round_dir / "git-diff.patch").write_text(
+                "(diff unavailable: git diff failed)\n"
+            )
+        else:
+            (round_dir / "git-diff.patch").write_text(full_proc.stdout)
     else:
         diff = "(no changes)"
 

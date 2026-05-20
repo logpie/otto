@@ -313,7 +313,8 @@ class LogTailer:
         self._mtime = None
 
     def _read_new(self, *, clear: bool) -> TailResult:
-        assert self._path is not None
+        if self._path is None:
+            raise RuntimeError("_read_new called before tail target was set")
         try:
             stat = self._path.stat()
         except OSError:

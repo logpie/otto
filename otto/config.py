@@ -1189,7 +1189,10 @@ def first_touch_bookkeeping(project_dir: Path, config: dict[str, Any]) -> None:
             if "index.lock" not in stderr or attempt == 3:
                 break
             _time.sleep(0.15 * (attempt + 1))
-        assert last_result is not None
+        if last_result is None:
+            raise RuntimeError(
+                "git index.lock retry loop exited without running any command"
+            )
         raise _sp.CalledProcessError(
             last_result.returncode,
             ["git", *args],

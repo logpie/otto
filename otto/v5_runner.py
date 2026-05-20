@@ -1521,7 +1521,15 @@ async def run_v5_pipeline(
             )
             # Drop cancelled children from emitted list so we don't try to run them.
             still_pending = list_pending_review(project_dir, parent_task_id=ROOT_TASK_ID)
-            assert still_pending == []  # post-condition
+            if still_pending:
+                # Post-condition: spawn_pending_into_queue must drain the
+                # pending-review list. If it didn't, a child slipped past the
+                # spawn gate and would dispatch later under the wrong scope.
+                raise RuntimeError(
+                    f"spawn_pending_into_queue post-condition failed: "
+                    f"{len(still_pending)} children still pending review "
+                    f"(ids={still_pending[:5]}...)"
+                )
             _emit(on_event, {"event": "review_resume", "task_id": ROOT_TASK_ID})
 
         # ---- Phase D: Process emitted children, if any ----

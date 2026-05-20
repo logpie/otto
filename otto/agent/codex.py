@@ -1341,8 +1341,10 @@ async def _query_codex_app_server(
 
     stdout = process.stdout
     stdin = process.stdin
-    assert stdout is not None
-    assert stdin is not None
+    if stdout is None or stdin is None:
+        raise RuntimeError(
+            "codex subprocess returned without stdout/stdin pipes attached"
+        )
 
     request_id = 0
     raw_lines: list[str] = []
@@ -1798,8 +1800,10 @@ async def _query_codex(
     final_prompt = _codex_prompt(prompt, opts)
     stdout = process.stdout
     stdin = process.stdin
-    assert stdout is not None
-    assert stdin is not None
+    if stdout is None or stdin is None:
+        raise RuntimeError(
+            "codex subprocess returned without stdout/stdin pipes attached"
+        )
 
     stdin.write(final_prompt.encode("utf-8"))
     await stdin.drain()

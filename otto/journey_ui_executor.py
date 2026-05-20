@@ -6,10 +6,13 @@ import asyncio
 import functools
 import hashlib
 import json
+import logging
 import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+logger = logging.getLogger("otto.journey_ui_executor")
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -589,13 +592,15 @@ def _finalize_journey(
         try:
             page.screenshot(path=str(screenshot), full_page=True)
             artifacts.append(screenshot)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — playwright surface is wide
+            logger.warning(
+                "journey screenshot capture failed at %s: %s", screenshot, exc
+            )
         try:
             write_text_atomic(dom, str(page.content()))
             artifacts.append(dom)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 — playwright surface is wide
+            logger.warning("journey DOM capture failed at %s: %s", dom, exc)
     network_log = journey_dir / "network.jsonl"
     console_log = journey_dir / "console-errors.jsonl"
     write_text_atomic(
