@@ -46,6 +46,7 @@ from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 from otto import paths as _paths
+from otto.defaults import DEFAULT_TREE_BUDGET_USD
 from otto.journey_scope_policy import ExecutionScope
 from otto.lead import LeadKind, LeadResult, run_lead
 from otto.safe_slug import safe_slug
@@ -1287,7 +1288,7 @@ async def run_v5_pipeline(
     intent: str,
     config: dict[str, Any],
     max_parallel: int = 3,
-    tree_budget_usd: float = 25.0,
+    tree_budget_usd: float = DEFAULT_TREE_BUDGET_USD,
     on_event: Any = None,  # optional callback(event_dict) for streaming
 ) -> V5RunResult:
     """Run a full v5 hierarchical pipeline against ``intent``.

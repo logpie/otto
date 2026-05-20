@@ -23,6 +23,7 @@ from otto.journey_executor_common import (
 from otto.journey_contracts import VerificationContractError, validate_ui_pass_model
 from otto.observability import iso_timestamp, write_json_atomic, write_text_atomic
 from otto.safe_slug import safe_slug
+from otto.defaults import UI_POLL_INTERVAL_S
 
 UI_EXECUTOR_SOURCE = "ui_executor"
 ENFORCED_UI_OBSERVABLE_LOCATOR_KEYS = frozenset({
@@ -782,7 +783,7 @@ def _assert_dom_observable(
             try:
                 page.wait_for_timeout(50)
             except Exception:
-                time.sleep(0.05)
+                time.sleep(UI_POLL_INTERVAL_S)
             last_state = _dom_observable_state(page, observable, text=text)
         if not last_state.scope_found:
             return f"scope not found: {last_state.scope_label}"
@@ -886,7 +887,7 @@ def _wait_for_network_event(
         try:
             page.wait_for_timeout(50)
         except Exception:
-            time.sleep(0.05)
+            time.sleep(UI_POLL_INTERVAL_S)
     return any(_network_event_matches(event, expected) for event in network_events)
 
 

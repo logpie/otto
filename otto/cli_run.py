@@ -24,6 +24,7 @@ from otto.config import (
     require_git,
     resolve_project_dir,
 )
+from otto.defaults import DEFAULT_TREE_BUDGET_USD
 from otto.display import CONTEXT_SETTINGS, console
 from otto.theme import error_console
 
@@ -69,7 +70,7 @@ def register_run_command(main: click.Group) -> None:
         help="Max concurrent child tasks.",
     )
     @click.option(
-        "--tree-budget-usd", type=float, default=25.0, show_default=True,
+        "--tree-budget-usd", type=float, default=DEFAULT_TREE_BUDGET_USD, show_default=True,
         help="Tree-level cost cap in USD (refuses new dispatches when hit).",
     )
     @click.option(

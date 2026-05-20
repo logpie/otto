@@ -90,6 +90,21 @@ BROWNFIELD_PREAMBLE_MAX_LINES_PER_FILE = 200
 # this; if it does, the project's seed script is broken.
 SEED_PER_FIXTURE_TIMEOUT_S = 60
 
+# Tree-level cost cap (USD) for a v5 run. Enforced in v5_runner._process_children
+# as the "refuse new dispatches" gate. Exposed via `otto run --tree-budget-usd`
+# at the CLI; this default lives here so the CLI and the runner agree without
+# the constant being declared twice.
+DEFAULT_TREE_BUDGET_USD = 25.0
+
+# Port-cleanup subprocess timeout. Used for lsof/kill probes against ephemeral
+# ports during preflight. 2s is long enough for a healthy host, short enough
+# to fail fast on a stuck system.
+PORT_CLEANUP_TIMEOUT_S = 2
+
+# UI / browser polling heartbeat. Used by the Mission Control event watchers
+# and the journey UI executor to throttle their event-source polling.
+UI_POLL_INTERVAL_S = 0.05
+
 
 @dataclass(frozen=True)
 class _Snapshot:

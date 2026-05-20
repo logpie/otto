@@ -62,6 +62,7 @@ from otto.queue.runner import child_is_alive, kill_child_safely, runner_config_f
 from otto.queue.schema import load_queue, load_state as load_queue_state
 from otto.token_usage import token_usage_from_mapping as _token_usage_from_mapping
 from otto.verification import VerificationCheck, VerificationPlan
+from otto.defaults import UI_POLL_INTERVAL_S
 
 LOGGER = logging.getLogger(__name__)
 REVIEW_IN_PROGRESS_STATUSES = {"queued", "starting", "initializing", "running", "terminating"}
@@ -4318,7 +4319,7 @@ def terminate_watcher_blocking(
     while time.monotonic() < deadline:
         if not _pid_alive(pid) and not any(_child_pid_alive(child) for child in children):
             break
-        time.sleep(0.05)
+        time.sleep(UI_POLL_INTERVAL_S)
 
     live_children = [child for child in children if _child_pid_alive(child)]
     if _pid_alive(pid) or live_children:
@@ -4339,7 +4340,7 @@ def terminate_watcher_blocking(
         while time.monotonic() < kill_deadline:
             if not _pid_alive(pid) and not any(_child_pid_alive(child) for child in children):
                 break
-            time.sleep(0.05)
+            time.sleep(UI_POLL_INTERVAL_S)
 
     try:
         record_watcher_stop(project_dir, target_pid=pid, reason=reason)
@@ -4408,7 +4409,7 @@ def _wait_for_queue_children(children: list[dict[str, Any]], grace: float) -> No
     while time.monotonic() < deadline:
         if not any(_child_pid_alive(child) for child in children):
             return
-        time.sleep(0.05)
+        time.sleep(UI_POLL_INTERVAL_S)
 
 
 def _pid_alive(pid: int) -> bool:

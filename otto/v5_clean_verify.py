@@ -49,6 +49,7 @@ from otto.journey_scope_policy import ExecutionScope, applicability_for
 from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdicts
 from otto.spec_compile_flat import StructuredSpecValidationError, load_flat_spec
 from otto.v5_common import iso_now as _iso_now
+from otto.defaults import PORT_CLEANUP_TIMEOUT_S
 
 Scope = Literal["scaffold", "subtree", "full"]
 
@@ -2093,7 +2094,7 @@ def _pids_for_port(port: int) -> list[int]:
         out = subprocess.check_output(
             ["lsof", "-ti", f":{port}"],
             text=True,
-            timeout=2,
+            timeout=PORT_CLEANUP_TIMEOUT_S,
             stderr=subprocess.DEVNULL,
         )
     except (
@@ -2551,12 +2552,12 @@ def _subtree_verify_start_sh(
         for port in declared_ports:
             try:
                 out = subprocess.check_output(
-                    ["lsof", "-ti", f":{port}"], text=True, timeout=2
+                    ["lsof", "-ti", f":{port}"], text=True, timeout=PORT_CLEANUP_TIMEOUT_S
                 )
                 for pid in out.strip().split("\n"):
                     if pid.strip().isdigit():
                         subprocess.run(
-                            ["kill", "-9", pid.strip()], timeout=2, check=False
+                            ["kill", "-9", pid.strip()], timeout=PORT_CLEANUP_TIMEOUT_S, check=False
                         )
             except (
                 subprocess.CalledProcessError,

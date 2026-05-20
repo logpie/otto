@@ -73,6 +73,7 @@ from otto.queue.schema import (
     remove_task,
     write_state,
 )
+from otto.defaults import UI_POLL_INTERVAL_S
 from otto.queue.ids import detect_cycles
 from otto.runs.registry import (
     HEARTBEAT_INTERVAL_S,
@@ -1908,7 +1909,7 @@ class Runner:
                 return
             if wpid == pid:
                 return
-            time.sleep(0.05)
+            time.sleep(UI_POLL_INTERVAL_S)
         logger.warning(
             "timed out waiting to reap just-spawned child after post-spawn write failure: %s",
             task_id,

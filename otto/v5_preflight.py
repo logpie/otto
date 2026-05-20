@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from otto.defaults import PORT_CLEANUP_TIMEOUT_S
 from typing import Any, Literal
 
 
@@ -528,11 +529,11 @@ def smoke_start_services(
         for port in declared_ports:
             try:
                 out = subprocess.check_output(
-                    ["lsof", "-ti", f":{port}"], text=True, timeout=2
+                    ["lsof", "-ti", f":{port}"], text=True, timeout=PORT_CLEANUP_TIMEOUT_S
                 )
                 for pid in out.strip().split("\n"):
                     if pid.strip().isdigit():
-                        subprocess.run(["kill", "-9", pid.strip()], timeout=2, check=False)
+                        subprocess.run(["kill", "-9", pid.strip()], timeout=PORT_CLEANUP_TIMEOUT_S, check=False)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
                 pass
 

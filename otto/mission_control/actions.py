@@ -29,6 +29,7 @@ from otto.runs.registry import (
     writer_identity_gone_or_stale,
     writer_identity_matches_live_process,
 )
+from otto.defaults import UI_POLL_INTERVAL_S
 from otto.runs.schema import RunRecord, is_terminal_status
 from otto.verification import (
     normalize_verification_policy,
@@ -411,7 +412,7 @@ def _execute_cancel(record: RunRecord, project_dir: Path) -> ActionResult:
     while time.monotonic() < deadline:
         if command_id in load_command_ack_ids(ack_path):
             return ActionResult(ok=True, refresh=True, clear_banner=True)
-        time.sleep(0.05)
+        time.sleep(UI_POLL_INTERVAL_S)
     sent_sigterm, fallback_message = _send_sigterm_fallback(record)
     if sent_sigterm:
         return ActionResult(
@@ -787,7 +788,7 @@ def _launch_process(
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             break
-        time.sleep(0.05)
+        time.sleep(UI_POLL_INTERVAL_S)
     if proc.poll() is None:
         _watch_process_completion(proc, description=description, post_result=post_result)
         return ActionResult(ok=True, message=f"{description} launched", refresh=True)
