@@ -742,15 +742,18 @@ def _build_repair_packet(
             default_oracle_invocations=default_oracle_invocations,
             # Scale the wall budget with the number of failing UI journeys
             # so a cross-feature repair (each journey = fix + ~5min cold
-            # oracle re-run) actually fits. Base 1200s/journey, capped at
-            # 6000s (5 journeys' worth) to stay bounded. Only journey
-            # failures scale it (n=0 -> base, other phases unchanged); an
-            # explicit {prefix}_wall_clock_s config override still wins.
-            # Not gate-weakening: journeys must still genuinely pass, and
+            # oracle re-run) actually fits. Per-journey marginal cost is
+            # ~20 min; absolute cap of 6000s (5 journeys' worth) bounds
+            # the worst case. Floor is DEFAULT_REPAIR_AGENT_WALL_CLOCK_S
+            # so the journey path never gets *less* than the base any
+            # other repair phase would get. An explicit
+            # {prefix}_wall_clock_s config override still wins. Not
+            # gate-weakening: journeys must still genuinely pass, and
             # idle/cost/diff-churn budgets + agent escalation still
             # terminate a non-progressing repair.
-            default_wall_clock_s=min(
-                6000.0, 1200.0 * max(1, _failing_ui_journey_count(latest_payload))
+            default_wall_clock_s=max(
+                DEFAULT_REPAIR_AGENT_WALL_CLOCK_S,
+                min(6000.0, 1200.0 * max(1, _failing_ui_journey_count(latest_payload))),
             ),
         ),
         packet_dir=packet_dir,

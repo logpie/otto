@@ -46,7 +46,7 @@ from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 from otto import paths as _paths
-from otto.defaults import DEFAULT_TREE_BUDGET_USD
+from otto.defaults import DEFAULT_RUN_BUDGET_S, DEFAULT_TREE_BUDGET_USD
 from otto.journey_scope_policy import ExecutionScope
 from otto.lead import LeadKind, LeadResult, run_lead
 from otto.safe_slug import safe_slug
@@ -167,9 +167,9 @@ class _V5RunDeadlineExceeded(TimeoutError):
 
 def _run_budget_seconds(config: dict[str, Any]) -> int:
     try:
-        return max(1, int(config.get("run_budget_seconds") or 3600))
+        return max(1, int(config.get("run_budget_seconds") or DEFAULT_RUN_BUDGET_S))
     except (TypeError, ValueError):
-        return 3600
+        return DEFAULT_RUN_BUDGET_S
 
 
 def _run_budget_remaining_s(
@@ -2248,7 +2248,7 @@ def _build_decomp_runtime_context(
         and str(tid) != "root"
     ]
     elapsed = int(time.monotonic() - run_started_at) if run_started_at else 0
-    budget = int(config.get("run_budget_seconds") or 3600)
+    budget = int(config.get("run_budget_seconds") or DEFAULT_RUN_BUDGET_S)
     provider = (
         config.get("provider")
         or (config.get("defaults", {}) or {}).get("provider")

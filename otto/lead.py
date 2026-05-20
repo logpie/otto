@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from otto.defaults import DEFAULT_RUN_BUDGET_S
 from otto.journey_scope_policy import (
     ExecutionScope,
     infer_execution_scope,
@@ -252,7 +253,7 @@ async def run_lead(
             log_dir=log_dir,
             phase_name="LEAD",
             phase_label=("plan-or-inline" if kind == "plan_or_inline" else "integration"),
-            timeout=int(config.get("run_budget_seconds") or 3600),
+            timeout=int(config.get("run_budget_seconds") or DEFAULT_RUN_BUDGET_S),
             project_dir=project_dir,
         )
 
@@ -295,7 +296,7 @@ async def run_lead(
                 session_dir=session_dir,
                 options=options,
                 project_dir=project_dir,
-                timeout_s=int(config.get("run_budget_seconds") or 3600),
+                timeout_s=int(config.get("run_budget_seconds") or DEFAULT_RUN_BUDGET_S),
             )
             result.cost_usd += retry_cost
             result.verify_called, result.verify_result = _read_agent_verdict(session_dir)

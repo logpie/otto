@@ -24,7 +24,7 @@ from otto.config import (
     require_git,
     resolve_project_dir,
 )
-from otto.defaults import DEFAULT_TREE_BUDGET_USD
+from otto.defaults import DEFAULT_RUN_BUDGET_S, DEFAULT_TREE_BUDGET_USD
 from otto.display import CONTEXT_SETTINGS, console
 from otto.theme import error_console
 
@@ -58,7 +58,7 @@ def register_run_command(main: click.Group) -> None:
     @main.command("run", context_settings=CONTEXT_SETTINGS)
     @click.argument("intent", required=True)
     @click.option(
-        "--budget", type=int, default=600, show_default=True,
+        "--budget", type=int, default=DEFAULT_RUN_BUDGET_S, show_default=True,
         help="Wall-clock budget in seconds.",
     )
     @click.option("--provider", default="claude", show_default=True,

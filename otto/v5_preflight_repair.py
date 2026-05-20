@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from otto.defaults import DEFAULT_REPAIR_AGENT_WALL_CLOCK_S
+from otto.defaults import DEFAULT_REPAIR_AGENT_WALL_CLOCK_S, DEFAULT_RUN_BUDGET_S
 from otto.path_ownership import path_matches_any_ownership_pattern
 from otto.safe_slug import short_hash
 from otto.setup_gitignore import is_common_build_artifact_path, is_otto_owned_path
@@ -1367,7 +1367,7 @@ async def run_oracle_repair_agent(
                 1.0,
                 min(
                     max(1.0, packet.budget.wall_clock_s - elapsed_wall_s()),
-                    float(config.get("run_budget_seconds") or 3600),
+                    float(config.get("run_budget_seconds") or DEFAULT_RUN_BUDGET_S),
                 ),
             )
         )

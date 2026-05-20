@@ -115,6 +115,16 @@ UI_POLL_INTERVAL_S = 0.05
 # `<stage>_repair_wall_clock_s` (see v5/preflight_oracle._repair_budget_from_config).
 DEFAULT_REPAIR_AGENT_WALL_CLOCK_S = 3600.0
 
+# Whole-run wall-clock budget. Sets the `run_budget_seconds` ceiling that
+# `otto run` enforces — when exceeded, the dispatch loop drains in-flight
+# work and the verdict goes to `partial`. CLI `--budget` overrides; yaml
+# `run_budget_seconds` overrides. The fallback used to be a 3600 literal
+# duplicated across 6 sites (v5_runner / lead / v5_preflight_repair); now
+# centralized here. CLI default tracked this fallback when the literal
+# was 600 vs. the doc-stated 3600 — fixed by routing CLI through the
+# same constant.
+DEFAULT_RUN_BUDGET_S = 3600
+
 
 @dataclass(frozen=True)
 class _Snapshot:

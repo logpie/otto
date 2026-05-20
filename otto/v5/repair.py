@@ -1324,6 +1324,10 @@ async def _run_plan_amendment_repair_packet(
         config=config,
         budget_prefix="plan_amendment_repair",
         default_agent_turns=1,
+        # Plan amendment has no clean_verify oracle re-run loop — the
+        # "oracle" here is a single feedback payload with one issue
+        # (the plan amendment itself), so 1 invocation is correct.
+        # All other repair phases use 3 (their oracle re-runs after fixes).
         default_oracle_invocations=1,
         latest_oracle_result={
             "passed": False,
