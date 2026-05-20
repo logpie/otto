@@ -32,6 +32,7 @@ from otto.queue.task_graph import (
     clear_contract_amendment_blocked_state,
     clear_contract_amendment_blocked_tasks,
     get_task,
+    task_graph_path,
     persist_contract_amendment_retry_success,
     read_graph,
     record_task,
@@ -1342,8 +1343,8 @@ async def _run_plan_amendment_repair_packet(
         integration_context={
             "architect_task_id": architect_tid,
             "feedback": feedback,
-            "task_graph_path": str(_paths.cross_sessions_dir(project_dir) / "task_graph.json"),
-            "pending_path": str(_paths.cross_sessions_dir(project_dir) / "v5_pending.jsonl"),
+            "task_graph_path": str(task_graph_path(project_dir)),
+            "pending_path": str(v5_pending_path(project_dir)),
         },
         success_criteria={
             "plan_amendment_only": True,
@@ -1356,8 +1357,8 @@ async def _run_plan_amendment_repair_packet(
         },
         allowed_paths=[
             "CHARTER.md",
-            "otto_logs/cross-sessions/task_graph.json",
-            "otto_logs/cross-sessions/v5_pending.jsonl",
+            str(task_graph_path(project_dir).relative_to(project_dir)),
+            str(v5_pending_path(project_dir).relative_to(project_dir)),
         ],
         scope_policy="allowed_paths",
         repair_unit_extra={"prompt_template": "plan-amendment.md"},
