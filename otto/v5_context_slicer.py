@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.v5_capability_inventory import parse_information_architecture_contract
+from otto.v5_common import coerce_spec as _coerce_spec, read_text as _read_text
 
 CHARTER_TARGET_LINES = 500
 logger = logging.getLogger("otto.v5_context_slicer")
@@ -538,13 +539,6 @@ def _scope_has_any_hint(scope: ChildScope) -> bool:
     return bool(scope.task_intent.strip() or scope.owned_paths or scope.action_ids)
 
 
-def _coerce_spec(spec: Any) -> dict[str, Any]:
-    if isinstance(spec, dict):
-        return copy.deepcopy(spec)
-    if is_dataclass(spec) and not isinstance(spec, type):
-        payload = asdict(spec)
-        return payload if isinstance(payload, dict) else {}
-    return {}
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -556,11 +550,6 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
 
 
 def _as_list(value: Any) -> list[Any]:

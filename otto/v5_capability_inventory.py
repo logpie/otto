@@ -32,11 +32,11 @@ section.
 from __future__ import annotations
 
 import json
-import fnmatch
 import re
 import time
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
+from otto.v5_common import coerce_spec as _coerce_spec
 from typing import Any
 
 # Configurable to bound walk cost.
@@ -986,25 +986,6 @@ def _literal_prefix_before_glob(pattern: str) -> str:
     return pattern[: min(markers)].rstrip("/")
 
 
-def _path_matches_leaf_extension(path: str, leaf_globs: list[str]) -> bool:
-    if not leaf_globs:
-        return True
-    path = path.strip().lstrip("./")
-    for raw_glob in leaf_globs:
-        glob = raw_glob.strip().lstrip("./")
-        if not glob:
-            continue
-        if fnmatch.fnmatch(path, glob):
-            return True
-        prefix = _literal_prefix_before_glob(glob)
-        if prefix and (path == prefix or path.startswith(prefix.rstrip("/") + "/")):
-            return True
-        path_prefix = _literal_prefix_before_glob(path)
-        if path_prefix and fnmatch.fnmatch(path_prefix, glob):
-            return True
-    return False
-
-
 def parse_feature_owned_paths_from_charter(
     source: str | Path,
 ) -> tuple[dict[str, list[str]], list[CoherenceFinding]]:
@@ -1235,11 +1216,6 @@ def _charter_line_counts(charter_text: str) -> dict[str, int]:
     }
 
 
-def _charter_prose_line_count(charter_text: str) -> int:
-    """Count CHARTER lines excluding the IA JSON contract body."""
-    return _charter_line_counts(charter_text)["prose"]
-
-
 def _latest_spec_payload(project_dir: Path) -> dict[str, Any] | None:
     """Best-effort lookup for the root v5 spec when callers do not pass one."""
     sessions = project_dir / "otto_logs" / "sessions"
@@ -1260,14 +1236,6 @@ def _latest_spec_payload(project_dir: Path) -> dict[str, Any] | None:
     return None
 
 
-def _coerce_spec(spec: Any) -> dict[str, Any]:
-    """Return a JSON-shaped flat spec payload for IA coherence checks."""
-    if isinstance(spec, dict):
-        return dict(spec)
-    if is_dataclass(spec) and not isinstance(spec, type):
-        payload = asdict(spec)
-        return payload if isinstance(payload, dict) else {}
-    return {}
 
 
 def _spec_project_kind(spec: dict[str, Any]) -> str | None:

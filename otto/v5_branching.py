@@ -652,14 +652,6 @@ def _gitignored_paths(repo: Path, paths: list[str]) -> set[str]:
     return {p.strip() for p in (cp.stdout or "").splitlines() if p.strip()}
 
 
-# Backwards-compatible single-path predicate (used by tests that exercise
-# the noise-recognition oracle in isolation).
-def _is_noise_path(path: str, *, repo: Path | None = None) -> bool:
-    """True iff ``path`` is gitignored in ``repo`` (or in the current dir)."""
-    repo = repo or Path(".")
-    return path in _gitignored_paths(repo, [path])
-
-
 def merge_branch_into(
     *,
     project_dir: Path,

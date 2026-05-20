@@ -104,6 +104,7 @@ from otto.spec_compile_flat import (
     spec_compile_attempt_budget,
 )
 from otto.v5_branching import MergeWorktreeDirtyError
+from otto.v5_common import git_capture as _git_capture
 
 logger = logging.getLogger("otto.v5_runner")
 
@@ -746,26 +747,6 @@ def _git_diff_stat(project_dir: Path) -> str:
     return proc.stdout.strip()
 
 
-def _git_capture(
-    worktree: Path,
-    args: list[str],
-    *,
-    timeout: int = 10,
-) -> str:
-    try:
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=str(worktree),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if proc.returncode != 0:
-        return ""
-    return (proc.stdout or "").strip()
 
 
 def _git_diff_name_only(worktree: Path) -> list[str]:

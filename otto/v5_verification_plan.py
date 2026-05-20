@@ -21,6 +21,7 @@ from otto.journey_scope_policy import ExecutionScope, infer_execution_scope
 from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdicts
 from otto.spec_compile_flat import SCHEMA_VERSION as FLAT_SPEC_SCHEMA_VERSION
 from otto.v5_capability_inventory import parse_information_architecture_contract
+from otto.v5_common import coerce_spec as _coerce_spec, read_text as _read_text
 
 CHECK_KINDS = (
     "structured_contract_present",
@@ -257,14 +258,6 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def _coerce_spec(spec: Any) -> dict[str, Any]:
-    """Return a JSON-shaped flat spec payload for deterministic checks."""
-    if isinstance(spec, dict):
-        return dict(spec)
-    if is_dataclass(spec) and not isinstance(spec, type):
-        payload = asdict(spec)
-        return payload if isinstance(payload, dict) else {}
-    return {}
 
 
 def _find_charter(worktree_dir: Path, project_dir: Path) -> Path | None:
@@ -381,11 +374,6 @@ def _iter_files(root: Path, *, include_tests: bool = False) -> list[Path]:
     return out
 
 
-def _read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ""
 
 
 def _grep_any(root: Path, needles: list[str], *, include_tests: bool = False) -> bool:

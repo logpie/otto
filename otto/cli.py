@@ -1,9 +1,7 @@
 """Otto CLI — entrypoint for all otto commands."""
 
-from contextlib import contextmanager
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -20,16 +18,18 @@ import click
 
 from otto.config import (
     ConfigError,
-    PROVIDER_DEFAULT_MODEL_OVERRIDE,
     _normalize_intent,
     agent_effort,
     agent_provider,
     detect_project_kind,
     effective_agent_model,
-    load_config,
-    normalize_provider,
     require_git,
     resolve_project_dir,
+)
+from otto.cli_options import (
+    max_turns_option,
+    positive_budget_option,
+    rounds_option,
 )
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
@@ -417,288 +417,6 @@ def _load_yaml_raw(config_path: Path) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _load_config_or_exit(config_path: Path) -> dict[str, Any]:
-    try:
-        return load_config(config_path)
-    except (ConfigError, ValueError) as exc:
-        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
-        sys.exit(2)
-
-
-def _record_cli_override(
-    config: dict[str, Any],
-    key: str,
-    value: Any,
-    *,
-    agent_type: str | None = None,
-) -> None:
-    overrides = config.setdefault("_cli_overrides", {})
-    if not isinstance(overrides, dict):
-        return
-    if agent_type:
-        agents = overrides.setdefault("agents", {})
-        if isinstance(agents, dict):
-            agent_overrides = agents.setdefault(agent_type, {})
-            if isinstance(agent_overrides, dict):
-                agent_overrides[key] = value
-        return
-    if isinstance(overrides, dict):
-        overrides[key] = value
-
-
-def _provider_changed(current: str | None, override: str | None) -> bool:
-    if not override:
-        return False
-    try:
-        next_provider = normalize_provider(override, default=None)
-        current_provider = normalize_provider(current, default=None) if current else None
-    except ValueError:
-        return False
-    return bool(next_provider and current_provider and next_provider != current_provider)
-
-
-def _record_phase_agent_cli_overrides(
-    *,
-    config: dict[str, Any],
-    sources: dict[str, str],
-    values: dict[str, dict[str, str | None]],
-) -> None:
-    for agent_type, overrides in values.items():
-        agent_config = config.setdefault("agents", {}).setdefault(agent_type, {})
-        if not isinstance(agent_config, dict):
-            continue
-        previous_provider = agent_provider(config, agent_type)
-        if (
-            overrides.get("provider")
-            and not overrides.get("model")
-            and _provider_changed(previous_provider, overrides.get("provider"))
-        ):
-            _record_cli_override(
-                config,
-                "model",
-                PROVIDER_DEFAULT_MODEL_OVERRIDE,
-                agent_type=agent_type,
-            )
-        for key, value in overrides.items():
-            if not value:
-                continue
-            agent_config[key] = value
-            sources[f"agents.{agent_type}.{key}"] = f"--{agent_type}-{key}"
-            _record_cli_override(config, key, value, agent_type=agent_type)
-
-
-def _apply_build_cli_overrides(
-    *,
-    config: dict[str, Any],
-    config_path: Path,
-    no_qa: bool,
-    fast: bool,
-    standard_: bool,
-    thorough: bool,
-    split: bool,
-    agentic: bool,
-    rounds: int | None,
-    budget: int | None,
-    max_turns: int | None,
-    model: str | None,
-    provider: str | None,
-    effort: str | None,
-    build_provider: str | None,
-    build_model: str | None,
-    build_effort: str | None,
-    certifier_provider: str | None,
-    certifier_model: str | None,
-    certifier_effort: str | None,
-    fix_provider: str | None,
-    fix_model: str | None,
-    fix_effort: str | None,
-    strict: bool,
-    verbose: bool,
-    debug_unredacted: bool,
-    allow_dirty: bool,
-    resume_state: Any,
-    spec_file: Path | None,
-    intent_source: str,
-    intent_fallback_reason: str,
-) -> tuple[bool, bool, str, dict[str, str]]:
-    """Apply build CLI/checkpoint overrides after any config reload."""
-    config["_intent_source"] = intent_source
-    config["_intent_fallback_reason"] = intent_fallback_reason
-    if spec_file:
-        config["_intent_source"] = "cli-argument"
-
-    resolved_skip_qa, skip_qa_source = _resolve_bool_setting(
-        config=config,
-        config_path=config_path,
-        key="skip_product_qa",
-        cli_enabled=no_qa,
-        cli_label="--no-qa",
-    )
-    config["skip_product_qa"] = resolved_skip_qa
-    if split and agentic:
-        raise ConfigError("--split and --agentic are mutually exclusive.")
-    resolved_split_bool = False
-    sources: dict[str, str] = {}
-    if split:
-        resolved_split_bool = True
-        sources["split_mode"] = "--split"
-    elif agentic:
-        resolved_split_bool = False
-        sources["split_mode"] = "--agentic"
-    else:
-        resolved_split, _split_source = _resolve_bool_setting(
-            config=config,
-            config_path=config_path,
-            key="split_mode",
-            cli_enabled=False,
-            cli_label="--split",
-        )
-        resolved_split_bool = bool(resolved_split)
-    if resume_state.resumed and resume_state.split_mode is not None:
-        if split and resume_state.split_mode is False:
-            raise ConfigError("Cannot change an agentic checkpoint to split mode on resume.")
-        if agentic and resume_state.split_mode is True:
-            raise ConfigError("Cannot change a split checkpoint to agentic mode on resume.")
-        resolved_split_bool = resume_state.split_mode
-        sources["split_mode"] = "checkpoint"
-    config["split_mode"] = resolved_split_bool
-
-    mode_flag = "fast" if fast else ("standard" if standard_ else ("thorough" if thorough else None))
-    if mode_flag:
-        config["certifier_mode"] = mode_flag
-        sources["certifier_mode"] = f"--{mode_flag}"
-    if rounds is not None:
-        config["max_certify_rounds"] = rounds
-        sources["max_certify_rounds"] = "--rounds"
-    elif resume_state.resumed and resume_state.max_rounds:
-        config["max_certify_rounds"] = resume_state.max_rounds
-        sources["max_certify_rounds"] = "checkpoint"
-    if budget is not None:
-        config["run_budget_seconds"] = budget
-        sources["run_budget_seconds"] = "--budget"
-    if max_turns is not None:
-        config["max_turns_per_call"] = max_turns
-        sources["max_turns_per_call"] = "--max-turns"
-    previous_provider = agent_provider(config)
-    if model:
-        config["model"] = model
-        sources["model"] = "--model"
-        _record_cli_override(config, "model", model)
-    if provider:
-        config["provider"] = provider
-        sources["provider"] = "--provider"
-        _record_cli_override(config, "provider", provider)
-        if not model and _provider_changed(previous_provider, provider):
-            _record_cli_override(config, "model", PROVIDER_DEFAULT_MODEL_OVERRIDE)
-    if effort:
-        config["effort"] = effort
-        sources["effort"] = "--effort"
-        _record_cli_override(config, "effort", effort)
-    _record_phase_agent_cli_overrides(
-        config=config,
-        sources=sources,
-        values={
-            "build": {"provider": build_provider, "model": build_model, "effort": build_effort},
-            "certifier": {
-                "provider": certifier_provider,
-                "model": certifier_model,
-                "effort": certifier_effort,
-            },
-            "fix": {"provider": fix_provider, "model": fix_model, "effort": fix_effort},
-        },
-    )
-    if strict:
-        config["strict_mode"] = True
-        sources["strict_mode"] = "--strict"
-    if allow_dirty:
-        config["allow_dirty_repo"] = True
-        sources["allow_dirty_repo"] = "--allow-dirty"
-    if debug_unredacted:
-        config["debug_unredacted"] = True
-        sources["debug_unredacted"] = "--debug-unredacted"
-    config["_verbose"] = bool(verbose)
-
-    from otto.config import get_max_rounds, get_max_turns_per_call
-
-    config["max_certify_rounds"] = get_max_rounds(config)
-    config["max_turns_per_call"] = get_max_turns_per_call(config)
-    return resolved_skip_qa, resolved_split_bool, skip_qa_source, sources
-
-
-@contextmanager
-def _signal_interrupt_guard() -> Any:
-    """Treat SIGTERM/SIGHUP like Ctrl-C so pause/cleanup paths stay consistent."""
-    installed: list[tuple[int, Any]] = []
-
-    def _raise_keyboard_interrupt(_signum, _frame) -> None:
-        raise KeyboardInterrupt
-
-    for signum in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
-        if signum is None:
-            continue
-        installed.append((signum, signal.getsignal(signum)))
-        signal.signal(signum, _raise_keyboard_interrupt)
-    try:
-        yield
-    finally:
-        for signum, previous in reversed(installed):
-            signal.signal(signum, previous)
-
-
-def _positive_budget_option(
-    _ctx: click.Context,
-    _param: click.Parameter,
-    value: int | None,
-) -> int | None:
-    if value is not None and value <= 0:
-        raise click.BadParameter("must be > 0")
-    return value
-
-
-def _rounds_option(
-    _ctx: click.Context,
-    _param: click.Parameter,
-    value: int | None,
-) -> int | None:
-    if value is None:
-        return None
-    if value <= 0:
-        raise click.BadParameter("must be >= 1")
-    if value > 50:
-        raise click.BadParameter("must be <= 50")
-    return value
-
-
-def _max_turns_option(
-    _ctx: click.Context,
-    _param: click.Parameter,
-    value: int | None,
-) -> int | None:
-    if value is None:
-        return None
-    if value < 1:
-        raise click.BadParameter("must be >= 1")
-    if value > 200:
-        raise click.BadParameter("must be <= 200")
-    return value
-
-
-def _resolve_bool_setting(
-    *,
-    config: dict[str, Any],
-    config_path: Path,
-    key: str,
-    cli_enabled: bool,
-    cli_label: str,
-) -> tuple[bool, str]:
-    yaml_raw = _load_yaml_raw(config_path)
-    if cli_enabled:
-        return True, cli_label
-    if key in yaml_raw:
-        return bool(config.get(key)), "yaml"
-    return bool(config.get(key)), "default"
-
-
 def _agent_setting_source(
     *,
     yaml_raw: dict[str, Any],
@@ -939,141 +657,6 @@ def _new_run_id(project_dir: "Path | None" = None) -> str:
     return allocate_run_id(project_dir)
 
 
-def _open_command_hint(project_dir: Path) -> str:
-    index_html = project_dir / "index.html"
-    if index_html.exists():
-        opener = "open" if sys.platform == "darwin" else "xdg-open"
-        return f"Open it:  {opener} index.html"
-
-    package_json = project_dir / "package.json"
-    if package_json.exists():
-        try:
-            pkg = json.loads(package_json.read_text())
-        except (OSError, json.JSONDecodeError):
-            pkg = {}
-        scripts = pkg.get("scripts", {}) if isinstance(pkg, dict) else {}
-        if isinstance(scripts, dict) and isinstance(scripts.get("start"), str) and scripts.get("start", "").strip():
-            if (project_dir / "pnpm-lock.yaml").exists():
-                cmd = "pnpm start"
-            elif (project_dir / "yarn.lock").exists():
-                cmd = "yarn start"
-            else:
-                cmd = "npm start"
-            return f"Open it:  {cmd}"
-
-    return f"Project:  {project_dir.resolve()}"
-
-
-def _spent_line(result: Any, build_duration: float) -> str:
-    breakdown = getattr(result, "breakdown", {}) or {}
-    build_entry = breakdown.get("build", {})
-    certify_entry = breakdown.get("certify", {})
-    build_seconds = float(build_entry.get("duration_s", build_duration))
-    verify_seconds = float(certify_entry.get("duration_s", 0.0))
-    line = f"Spent: {_format_elapsed_compact(build_seconds)} building"
-    if certify_entry:
-        line += f", {_format_elapsed_compact(verify_seconds)} verifying"
-
-    phase_costs: list[str] = []
-    estimated = False
-    for entry in (build_entry, certify_entry):
-        cost = entry.get("cost_usd")
-        if isinstance(cost, int | float):
-            prefix = "~" if entry.get("estimated") is True else ""
-            estimated = estimated or entry.get("estimated") is True
-            phase_costs.append(f"{prefix}${float(cost):.2f}")
-
-    if phase_costs:
-        detail = " / ".join(phase_costs)
-        if estimated:
-            detail += " estimated"
-        line += f"  ({detail}, total ${result.total_cost:.2f})"
-    else:
-        line += f"  (total ${result.total_cost:.2f})"
-    return line
-
-
-def _verification_heading(result: Any, strict_mode: bool) -> str:
-    if result.passed:
-        if strict_mode:
-            rounds = getattr(result, "rounds", 1)
-            return f"Verification passed (strict mode, {rounds} rounds)"
-        return "Verification passed"
-    return f"Verification failed after {result.rounds} round(s)"
-
-
-def _print_build_result(
-    project_dir: Path,
-    intent: str,
-    result,
-    build_duration: float,
-    *,
-    strict_mode: bool = False,
-) -> None:
-    """Render build verification output and summary."""
-    from otto import paths as _paths
-
-    pow_html = _paths.certify_dir(project_dir, result.build_id) / "proof-of-work.html"
-    runtime_json = _paths.session_dir(project_dir, result.build_id) / "runtime.json"
-    crash_json = _paths.session_dir(project_dir, result.build_id) / "crash.json"
-
-    if result.passed:
-        console.print()
-        console.print(f"  [bold]{_open_command_hint(project_dir)}[/bold]")
-        console.print(f"  Built: {rich_escape(intent)}")
-
-    if result.journeys:
-        console.print()
-        status_style = "success" if result.passed else "red"
-        console.print(f"  [{status_style}]{_verification_heading(result, strict_mode)}[/{status_style}]")
-        for j in result.journeys:
-            status_icon = "[success]\u2713[/success]" if j.get("passed") else "[red]\u2717[/red]"
-            console.print(f"    {status_icon} {rich_escape(j.get('name', ''))}")
-        if pow_html.exists():
-            console.print("  Full evidence (screenshots, video, tool traces): otto_logs/latest/certify/proof-of-work.html")
-
-    console.print()
-    console.print(f"  [bold]Build Summary[/bold]  \u00b7  Run ID: {result.build_id}")
-    console.print(f"  Intent: {rich_escape(intent[:200])}")
-    if result.journeys:
-        console.print(f"  Stories: {result.tasks_passed} passed, {result.tasks_failed} failed")
-    else:
-        console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
-    console.print(f"  {_spent_line(result, build_duration)}")
-    if runtime_json.exists():
-        try:
-            runtime = json.loads(runtime_json.read_text())
-            console.print(
-                "  Runtime: "
-                f"otto {runtime.get('otto_version', '?')}, "
-                f"python {runtime.get('python_version', '?')}, "
-                f"{str(runtime.get('platform', '?')).split()[0]} — see runtime.json"
-            )
-        except Exception:
-            console.print("  Runtime: see otto_logs/latest/runtime.json")
-    if crash_json.exists():
-        console.print(f"  crash details: {crash_json}")
-    if pow_html.exists():
-        console.print("  View report:  otto_logs/latest/certify/proof-of-work.html")
-    console.print("  Tail live log:  otto_logs/latest/build/narrative.log")
-    console.print("  See past runs:  otto history")
-    console.print()
-
-
-def _exit_for_lock_busy(exc) -> None:
-    holder = exc.holder or {}
-    pid = holder.get("pid", "?")
-    command = holder.get("command", "?")
-    started_at = holder.get("started_at", "?")
-    session_id = holder.get("session_id", "") or "unknown"
-    error_console.print(
-        "[error]Another otto command is already running in this project.[/error]\n"
-        f"  Holder: pid={pid} command={command} started_at={started_at} session={session_id}\n"
-        "  Re-run with `--break-lock` only if you are sure the lock is stuck."
-    )
-    sys.exit(1)
-
-
 def _exit_legacy_build_removed() -> None:
     """Phase C.3: legacy v3 build pipeline (build_agentic_v3 + run_certify_fix_loop)
     is gone. Point users at the new --i2p path (now the default in
@@ -1110,9 +693,9 @@ def _exit_legacy_certify_removed() -> None:
 @click.option("--thorough", is_flag=True, help="Thorough certification — adversarial edge cases + code review")
 @click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
 @click.option("--agentic", is_flag=True, help="Agentic mode: one provider session owns build, certify, and fix")
-@click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Max certification rounds, 1-50 (default from otto.yaml or 8)")
-@click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
-@click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
+@click.option("--rounds", "-n", default=None, type=int, callback=rounds_option, help="Max certification rounds, 1-50 (default from otto.yaml or 8)")
+@click.option("--budget", default=None, type=int, callback=positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
+@click.option("--max-turns", default=None, type=int, callback=max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
 @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
 @click.option("--provider", default=None, help="Override provider for every agent: codex-app-server | codex | claude")
 @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
@@ -1316,24 +899,13 @@ def build(intent, no_qa, fast, standard_, thorough, split, agentic, rounds, budg
     _exit_legacy_build_removed()
 
 
-def _build_locked(*_args, **_kwargs) -> None:
-    """Phase C.3 stub — the legacy v3 build pipeline is gone.
-
-    The build CLI now routes everything through `_exit_legacy_build_removed()`
-    before this function is reached. We keep the symbol so test patches
-    (`tests/test_cli_run.py`, `tests/test_hardening.py`) keep importing
-    cleanly; calling it directly hard-errors the same way the CLI does.
-    """
-    _exit_legacy_build_removed()
-
-
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent", required=False)
 @click.option("--thorough", is_flag=True, help="Thorough mode — adversarial edge cases + code review")
 @click.option("--fast", is_flag=True, help="Fast mode — happy path smoke test only")
 @click.option("--standard", "standard_", is_flag=True, help="Standard mode — Must-Have + generic CRUD/edge/access checklist")
-@click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
-@click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
+@click.option("--budget", default=None, type=int, callback=positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
+@click.option("--max-turns", default=None, type=int, callback=max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
 @click.option("--strict", is_flag=True, help="Require two consecutive PASS runs before reporting success")
 @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
 @click.option("--provider", default=None, help="Override provider for every agent: codex-app-server | codex | claude")

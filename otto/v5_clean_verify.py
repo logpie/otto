@@ -48,6 +48,7 @@ from typing import Any, Literal, cast
 from otto.journey_scope_policy import ExecutionScope, applicability_for
 from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdicts
 from otto.spec_compile_flat import StructuredSpecValidationError, load_flat_spec
+from otto.v5_common import iso_now as _iso_now
 
 Scope = Literal["scaffold", "subtree", "full"]
 
@@ -522,8 +523,6 @@ def _scaffold_verify(
     return True, None, None, steps
 
 
-def _iso_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _command_identity(command: list[str]) -> str:

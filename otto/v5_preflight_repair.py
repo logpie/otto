@@ -25,6 +25,7 @@ from otto.v5_clean_verify import (
     CleanOracleStepResult,
     verify_from_clean_oracle,
 )
+from otto.v5_common import git_capture as _git_capture, iso_now as _iso_now
 
 
 @dataclass(frozen=True)
@@ -244,8 +245,6 @@ _TIME_TURN_EXHAUSTION = frozenset(
 _FINAL_ORACLE_BEFORE_BLOCK = _TIME_TURN_EXHAUSTION | {"agent_call_failed"}
 
 
-def _iso_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 @contextlib.contextmanager
@@ -340,21 +339,6 @@ def _git_status_porcelain(worktree: Path) -> str:
     return proc.stdout or ""
 
 
-def _git_capture(worktree: Path, args: list[str], *, timeout: int = 10) -> str:
-    try:
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=worktree,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if proc.returncode != 0:
-        return ""
-    return (proc.stdout or "").strip()
 
 
 def _git_changed_paths_between(worktree: Path, base_ref: str, head_ref: str) -> list[str]:
@@ -469,10 +453,6 @@ def _has_conflict_markers(worktree: Path, paths: list[str]) -> bool:
         if "<<<<<<< " in text and "=======" in text and ">>>>>>> " in text:
             return True
     return False
-
-
-def _has_unmerged_paths(worktree: Path) -> bool:
-    return bool(_unmerged_path_names(worktree))
 
 
 def _unmerged_path_names(worktree: Path) -> list[str]:

@@ -15,6 +15,11 @@ from pathlib import Path
 
 import click
 
+from otto.cli_options import (
+    max_turns_option,
+    positive_budget_option,
+    rounds_option,
+)
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.config import detect_project_kind, require_git, resolve_project_dir
 from otto.theme import error_console
@@ -78,44 +83,6 @@ def _render_results_section(journeys: list[dict[str, object]]) -> list[str]:
         lines.append(f"- {icon} [{label}] {name}")
     lines.append("")
     return lines
-
-
-def _positive_budget_option(
-    _ctx: click.Context,
-    _param: click.Parameter,
-    value: int | None,
-) -> int | None:
-    if value is not None and value <= 0:
-        raise click.BadParameter("must be > 0")
-    return value
-
-
-def _rounds_option(
-    _ctx: click.Context,
-    _param: click.Parameter,
-    value: int | None,
-) -> int | None:
-    if value is None:
-        return None
-    if value <= 0:
-        raise click.BadParameter("must be >= 1")
-    if value > 50:
-        raise click.BadParameter("must be <= 50")
-    return value
-
-
-def _max_turns_option(
-    _ctx: click.Context,
-    _param: click.Parameter,
-    value: int | None,
-) -> int | None:
-    if value is None:
-        return None
-    if value < 1:
-        raise click.BadParameter("must be >= 1")
-    if value > 200:
-        raise click.BadParameter("must be <= 200")
-    return value
 
 
 def _exit_legacy_removed() -> None:
@@ -205,7 +172,7 @@ def register_improve_commands(main: click.Group) -> None:
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
-    @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
+    @click.option("--rounds", "-n", default=None, type=int, callback=rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
     @click.option("--split", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--agentic", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--resume", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
@@ -216,8 +183,8 @@ def register_improve_commands(main: click.Group) -> None:
     )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
                   help="(legacy-only; ignored in --i2p mode)")
-    @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
-    @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
+    @click.option("--budget", default=None, type=int, callback=positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
+    @click.option("--max-turns", default=None, type=int, callback=max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: codex-app-server | codex | claude")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
@@ -327,7 +294,7 @@ def register_improve_commands(main: click.Group) -> None:
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
-    @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
+    @click.option("--rounds", "-n", default=None, type=int, callback=rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
     @click.option("--split", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--agentic", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--resume", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
@@ -338,8 +305,8 @@ def register_improve_commands(main: click.Group) -> None:
     )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
                   help="(legacy-only; ignored in --i2p mode)")
-    @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
-    @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
+    @click.option("--budget", default=None, type=int, callback=positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
+    @click.option("--max-turns", default=None, type=int, callback=max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: codex-app-server | codex | claude")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
@@ -442,7 +409,7 @@ def register_improve_commands(main: click.Group) -> None:
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("goal", required=False)
-    @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
+    @click.option("--rounds", "-n", default=None, type=int, callback=rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
     @click.option("--split", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--agentic", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
     @click.option("--resume", is_flag=True, help="(legacy-only; ignored in --i2p mode)")
@@ -453,8 +420,8 @@ def register_improve_commands(main: click.Group) -> None:
     )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
                   help="(legacy-only; ignored in --i2p mode)")
-    @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
-    @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
+    @click.option("--budget", default=None, type=int, callback=positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
+    @click.option("--max-turns", default=None, type=int, callback=max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: codex-app-server | codex | claude")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
