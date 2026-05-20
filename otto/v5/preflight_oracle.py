@@ -23,7 +23,13 @@ from pathlib import Path
 from typing import Any, cast
 
 
-from otto.defaults import DEFAULT_REPAIR_AGENT_WALL_CLOCK_S
+from otto.defaults import (
+    DEFAULT_ORACLE_STAGE_TIMEOUT_S,
+    DEFAULT_PORT_WAIT_S,
+    DEFAULT_REPAIR_AGENT_TURNS,
+    DEFAULT_REPAIR_AGENT_WALL_CLOCK_S,
+    DEFAULT_REPAIR_ORACLE_INVOCATIONS,
+)
 from otto.journey_scope_policy import ExecutionScope
 from otto.lead import LeadResult
 from otto.safe_slug import safe_slug
@@ -717,7 +723,10 @@ def _build_repair_packet(
             "verify_scope": verify_scope,
             "command": oracle_command.command,
             "env": oracle_command.env,
-            "timeout_s": int(config.get(f"{budget_prefix}_oracle_timeout_s") or 300),
+            "timeout_s": int(
+                config.get(f"{budget_prefix}_oracle_timeout_s")
+                or DEFAULT_ORACLE_STAGE_TIMEOUT_S
+            ),
             "expected_artifact_paths": list(expected_artifact_paths or []),
             "success_criteria": {
                 "clean_deploy": True,
@@ -843,8 +852,8 @@ async def _run_preflight_payload_repair_session(
         verify_scope=verify_scope,
         config=config,
         budget_prefix=f"{repair_phase}_repair",
-        default_agent_turns=1,
-        default_oracle_invocations=3,
+        default_agent_turns=DEFAULT_REPAIR_AGENT_TURNS,
+        default_oracle_invocations=DEFAULT_REPAIR_ORACLE_INVOCATIONS,
         latest_oracle_result=lambda oracle_command: _clean_oracle_payload_from_preflight_payload(
             payload=initial_payload,
             worktree=worktree_path,
@@ -1100,7 +1109,7 @@ def _run_integration_smoke_preflight(
             worktree_path,
             scope="subtree",
             timeout_s=90,
-            port_wait_s=12,
+            port_wait_s=DEFAULT_PORT_WAIT_S,
             logger_fn=lambda m: logger.info("preflight: %s", m),
             journey_scope=journey_scope,
             spec_path=spec_path,

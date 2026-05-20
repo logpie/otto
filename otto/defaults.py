@@ -125,6 +125,39 @@ DEFAULT_REPAIR_AGENT_WALL_CLOCK_S = 3600.0
 # same constant.
 DEFAULT_RUN_BUDGET_S = 3600
 
+# Repair-agent shape — number of agent turns per repair invocation and
+# number of oracle re-runs per repair invocation. Both used as the
+# `default_agent_turns` / `default_oracle_invocations` argument to
+# v5/preflight_oracle._repair_budget_from_config across the 5 repair
+# phases (foundation gate, integration smoke, child upward-merge,
+# subtree propagation, integration repair). Plan-amendment repair is a
+# documented outlier at oracle_invocations=1 because it has no oracle
+# re-run loop — see comment at v5/repair.py:1327.
+DEFAULT_REPAIR_AGENT_TURNS = 1
+DEFAULT_REPAIR_ORACLE_INVOCATIONS = 3
+
+# Oracle stage timeout — wall-clock cap (seconds) on a single oracle
+# stage invocation (e.g. one clean-verify pass). Repair-loop retries
+# get fresh stages, so this is per-stage, not per-repair.
+DEFAULT_ORACLE_STAGE_TIMEOUT_S = 300
+
+# Clean-verify deploy / build-step ceiling (seconds). One application
+# install + dev-server-up cycle in the clean-verify oracle. Distinct
+# from the longer repair-agent ceiling because clean-verify is just
+# "boot it and hit `/`", not a fix loop.
+DEFAULT_CLEAN_VERIFY_TIMEOUT_S = 120
+
+# After clean-verify install, give the dev server this many additional
+# seconds to bind its declared ports before the gate gives up.
+DEFAULT_PORT_WAIT_S = 12
+
+# Autopilot rate-limit window (seconds). Used by mission_control's
+# autopilot to count actions/pilot-calls per rolling hour. If the
+# window changes, both the `since` cutoff AND the `window_seconds`
+# field on the budget-status payload must move together; this constant
+# keeps them in sync.
+AUTOPILOT_RATE_LIMIT_WINDOW_S = 3600
+
 
 @dataclass(frozen=True)
 class _Snapshot:

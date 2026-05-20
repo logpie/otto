@@ -53,6 +53,7 @@ from otto.queue.task_graph import (
     update_task_metadata,
 )
 from otto.spec_compile_flat import FlatSpec
+from otto.defaults import DEFAULT_ORACLE_STAGE_TIMEOUT_S
 from otto.observability import iso_timestamp
 
 logger = logging.getLogger("otto.v5_runner")
@@ -488,7 +489,7 @@ async def _process_children(
                 toolchain_started = time.monotonic()
                 toolchain_result = preflight_shared_toolchains(
                     arch_worktree,
-                    timeout_s=300,
+                    timeout_s=DEFAULT_ORACLE_STAGE_TIMEOUT_S,
                     logger_fn=lambda m: logger.info("preflight: %s", m),
                 )
                 toolchain_duration_s = round(time.monotonic() - toolchain_started, 3)

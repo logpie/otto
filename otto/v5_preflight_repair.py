@@ -16,7 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from otto.defaults import DEFAULT_REPAIR_AGENT_WALL_CLOCK_S, DEFAULT_RUN_BUDGET_S
+from otto.defaults import (
+    DEFAULT_ORACLE_STAGE_TIMEOUT_S,
+    DEFAULT_REPAIR_AGENT_WALL_CLOCK_S,
+    DEFAULT_RUN_BUDGET_S,
+)
 from otto.path_ownership import path_matches_any_ownership_pattern
 from otto.safe_slug import short_hash
 from otto.setup_gitignore import is_common_build_artifact_path, is_otto_owned_path
@@ -1077,7 +1081,9 @@ async def _default_oracle_runner(packet: RepairPacket) -> CleanOracleResult:
         )
     env = dict(os.environ)
     env.update({str(k): str(v) for k, v in (packet.acceptance_oracle.get("env") or {}).items()})
-    timeout = int(packet.acceptance_oracle.get("timeout_s") or 300)
+    timeout = int(
+        packet.acceptance_oracle.get("timeout_s") or DEFAULT_ORACLE_STAGE_TIMEOUT_S
+    )
     try:
         proc = await asyncio.to_thread(
             subprocess.run,

@@ -22,6 +22,10 @@ from otto.safe_slug import safe_slug
 from otto.v5_branching import MergeWorktreeDirtyError
 from otto.v5_clean_verify import CleanOracleResult
 from otto.v5_preflight_repair import RepairPacket
+from otto.defaults import (
+    DEFAULT_REPAIR_AGENT_TURNS,
+    DEFAULT_REPAIR_ORACLE_INVOCATIONS,
+)
 from otto.queue.subtask import (
     append_pending_entry,
     enqueue_subtask,
@@ -893,8 +897,8 @@ async def _repair_subtree_propagation_once(
         verify_scope="subtree",
         config=config,
         budget_prefix="subtree_propagation_repair",
-        default_agent_turns=1,
-        default_oracle_invocations=3,
+        default_agent_turns=DEFAULT_REPAIR_AGENT_TURNS,
+        default_oracle_invocations=DEFAULT_REPAIR_ORACLE_INVOCATIONS,
         latest_oracle_result=lambda oracle_command: _v5r._merge_refusal_oracle_payload(
             worktree=target_worktree,
             scope="subtree",
@@ -1088,8 +1092,8 @@ async def _run_child_verify_repair_packet(
         verify_scope="subtree",
         config=config,
         budget_prefix="child_verify_repair",
-        default_agent_turns=1,
-        default_oracle_invocations=3,
+        default_agent_turns=DEFAULT_REPAIR_AGENT_TURNS,
+        default_oracle_invocations=DEFAULT_REPAIR_ORACLE_INVOCATIONS,
         latest_oracle_result=lambda oracle_command: _v5r._make_initial_oracle_payload(
             worktree=child_worktree,
             scope="subtree",
@@ -1324,7 +1328,7 @@ async def _run_plan_amendment_repair_packet(
         verify_scope="subtree",
         config=config,
         budget_prefix="plan_amendment_repair",
-        default_agent_turns=1,
+        default_agent_turns=DEFAULT_REPAIR_AGENT_TURNS,
         # Plan amendment has no clean_verify oracle re-run loop — the
         # "oracle" here is a single feedback payload with one issue
         # (the plan amendment itself), so 1 invocation is correct.
@@ -1540,8 +1544,8 @@ async def _run_scaffold_repair_packet(
         verify_scope="scaffold",
         config=config,
         budget_prefix="scaffold_repair",
-        default_agent_turns=1,
-        default_oracle_invocations=3,
+        default_agent_turns=DEFAULT_REPAIR_AGENT_TURNS,
+        default_oracle_invocations=DEFAULT_REPAIR_ORACLE_INVOCATIONS,
         latest_oracle_result=latest_result.to_jsonable(),
         product_contract={
             **_v5r._worktree_product_contract(worktree=project_dir),
@@ -2125,8 +2129,8 @@ async def _repair_child_merge_conflict_once(
         verify_scope="subtree",
         config=config,
         budget_prefix="merge_repair",
-        default_agent_turns=1,
-        default_oracle_invocations=3,
+        default_agent_turns=DEFAULT_REPAIR_AGENT_TURNS,
+        default_oracle_invocations=DEFAULT_REPAIR_ORACLE_INVOCATIONS,
         latest_oracle_result=lambda oracle_command: _v5r._make_initial_oracle_payload(
             worktree=child_worktree,
             scope="subtree",

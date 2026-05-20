@@ -49,7 +49,12 @@ from otto.journey_scope_policy import ExecutionScope, applicability_for
 from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdicts
 from otto.spec_compile_flat import StructuredSpecValidationError, load_flat_spec
 from otto.v5_common import iso_now as _iso_now
-from otto.defaults import PORT_CLEANUP_TIMEOUT_S
+from otto.defaults import (
+    DEFAULT_CLEAN_VERIFY_TIMEOUT_S,
+    DEFAULT_ORACLE_STAGE_TIMEOUT_S,
+    DEFAULT_PORT_WAIT_S,
+    PORT_CLEANUP_TIMEOUT_S,
+)
 
 Scope = Literal["scaffold", "subtree", "full"]
 
@@ -1031,8 +1036,8 @@ def verify_from_clean_oracle(
     project_dir: Path,
     *,
     scope: Scope = "subtree",
-    timeout_s: int = 120,
-    port_wait_s: int = 12,
+    timeout_s: int = DEFAULT_CLEAN_VERIFY_TIMEOUT_S,
+    port_wait_s: int = DEFAULT_PORT_WAIT_S,
     preserve_temp: bool = False,
     logger_fn: Any = None,
     journey_scope: ExecutionScope = "subtree_integration",
@@ -1491,7 +1496,7 @@ def verify_from_clean_oracle(
 def preflight_shared_toolchains(
     worktree_dir: Path,
     *,
-    timeout_s: int = 300,
+    timeout_s: int = DEFAULT_ORACLE_STAGE_TIMEOUT_S,
     logger_fn: Any = None,
 ) -> ToolchainPreflightResult:
     """Install shared toolchains once in the architect worktree.
@@ -2571,8 +2576,8 @@ def verify_from_clean(
     project_dir: Path,
     *,
     scope: Scope = "subtree",
-    timeout_s: int = 120,
-    port_wait_s: int = 12,
+    timeout_s: int = DEFAULT_CLEAN_VERIFY_TIMEOUT_S,
+    port_wait_s: int = DEFAULT_PORT_WAIT_S,
     preserve_temp: bool = False,
     logger_fn: Any = None,
 ) -> CleanVerifyResult:

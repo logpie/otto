@@ -24,6 +24,7 @@ from typing import Any, Protocol, cast
 
 from otto import paths
 from otto.config import ConfigError, load_config
+from otto.defaults import AUTOPILOT_RATE_LIMIT_WINDOW_S
 from otto.mission_control.events import append_event
 from otto.verification import normalize_verification_policy
 
@@ -805,7 +806,7 @@ class AutopilotController:
         )
 
     def _budget_status(self, policy: AutopilotPolicy) -> dict[str, Any]:
-        since = time.time() - 3600
+        since = time.time() - AUTOPILOT_RATE_LIMIT_WINDOW_S
         action_count = 0
         pilot_count = 0
         for row in _read_audit_rows(autopilot_events_path(self.project_dir)):
@@ -818,7 +819,7 @@ class AutopilotController:
             if kind.startswith("pilot.requested"):
                 pilot_count += 1
         return {
-            "window_seconds": 3600,
+            "window_seconds": AUTOPILOT_RATE_LIMIT_WINDOW_S,
             "max_actions_per_hour": policy.max_actions_per_hour,
             "actions_used": action_count,
             "remaining_actions": max(0, policy.max_actions_per_hour - action_count),

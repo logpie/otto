@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from otto.defaults import PORT_CLEANUP_TIMEOUT_S
+from otto.defaults import DEFAULT_PORT_WAIT_S, PORT_CLEANUP_TIMEOUT_S
 from typing import Any, Literal
 
 
@@ -351,7 +351,7 @@ def check_scaffold_compiles(
 def smoke_clean_deploy(
     project_dir: Path,
     timeout_s: int = 90,
-    port_wait_s: int = 12,
+    port_wait_s: int = DEFAULT_PORT_WAIT_S,
     logger_fn: Any = None,
 ) -> list[PreflightIssue]:
     """Verify the project deploys cleanly from a fresh state.
