@@ -33,7 +33,7 @@ def resolve_journey_verdicts(
             applicability = applicability_for(execution_scope, cast(VerificationLevel, level))
             if applicability == "fail":
                 out.append(_fail_closed(
-                    jid,
+                    journey,
                     source="journey_verdict_sink",
                     detail=f"journey applicability policy failed for {execution_scope}/{level}",
                 ))
@@ -47,7 +47,7 @@ def resolve_journey_verdicts(
                 continue
         else:
             out.append(_fail_closed(
-                jid,
+                journey,
                 source="journey_verdict_sink",
                 detail="journey missing verification_level",
             ))
@@ -58,13 +58,13 @@ def resolve_journey_verdicts(
             continue
         if level in registered:
             out.append(_fail_closed(
-                jid,
+                journey,
                 source="journey_verdict_sink",
                 detail=f"registered executor for {level} produced no usable result",
             ))
             continue
         out.append(_fail_closed(
-            jid,
+            journey,
             source="journey_verdict_sink",
             detail=f"no registered executor for verification_level {level!r}",
         ))
@@ -122,8 +122,16 @@ def _normalize_executor_verdict(jid: str, result: dict[str, Any]) -> dict[str, A
     }
 
 
-def _fail_closed(jid: str, *, source: str, detail: str) -> dict[str, Any]:
-    return {
+def _fail_closed(journey: dict[str, Any], *, source: str, detail: str) -> dict[str, Any]:
+    """Build a fail-closed verdict that preserves journey metadata downstream.
+
+    Downstream consumers (proof-packet rendering, feature audits) link
+    journey verdicts back to features via `feature_id` and co. Earlier
+    versions of this helper dropped those keys; the audit at
+    archive/audits/audit-journey.md flagged the loss as a medium bug.
+    """
+    jid = str(journey.get("id") or "").strip() or "<unnamed>"
+    result: dict[str, Any] = {
         "id": jid,
         "passed": False,
         "detail": detail,
@@ -131,6 +139,10 @@ def _fail_closed(jid: str, *, source: str, detail: str) -> dict[str, Any]:
         "proof": False,
         "status": "unverified",
     }
+    for key in ("feature_id", "covers_primary_actions", "group_id", "verification_level"):
+        if key in journey:
+            result[key] = journey[key]
+    return result
 
 
 def _not_applicable(jid: str, *, status: str, detail: str) -> dict[str, Any]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import subprocess
@@ -632,36 +633,8 @@ def _write_http_result(
     )
 
 
-def _pass_result(
-    journey: dict[str, Any],
-    *,
-    detail: str,
-    artifact_paths: list[Path],
-) -> dict[str, Any]:
-    return executor_pass_result(
-        journey,
-        source=API_EXECUTOR_SOURCE,
-        detail=detail,
-        artifact_paths=artifact_paths,
-    )
-
-
-def _non_pass_result(
-    journey: dict[str, Any],
-    *,
-    status: str,
-    detail: str,
-    proof_usable: bool,
-    artifact_paths: list[Path],
-) -> dict[str, Any]:
-    return executor_non_pass_result(
-        journey,
-        source=API_EXECUTOR_SOURCE,
-        status=status,
-        detail=detail,
-        proof_usable=proof_usable,
-        artifact_paths=artifact_paths,
-    )
+_pass_result = functools.partial(executor_pass_result, source=API_EXECUTOR_SOURCE)
+_non_pass_result = functools.partial(executor_non_pass_result, source=API_EXECUTOR_SOURCE)
 
 
 def _command_list(value: Any) -> list[str] | None:

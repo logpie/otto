@@ -8,7 +8,12 @@ runner symbols are dereferenced lazily via ``_v5r.X`` to honour
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from otto import paths as _paths
@@ -130,11 +135,21 @@ def _contract_amendment_attempt_key(contract_path: str) -> str:
 def _contract_amendment_attempt_count(task: dict[str, Any], contract_path: str) -> int:
     attempts = task.get("contract_amendment_attempts")
     if not isinstance(attempts, dict):
+        if attempts is not None:
+            logger.warning(
+                "contract_amendment_attempts metadata malformed (got %s); resetting counter to 0",
+                type(attempts).__name__,
+            )
         return 0
     key = _contract_amendment_attempt_key(contract_path)
     try:
         return int(attempts.get(key, 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "contract_amendment_attempts[%s] malformed (%s); resetting counter to 0",
+            key,
+            exc,
+        )
         return 0
 
 def _increment_contract_amendment_attempt(
@@ -1792,7 +1807,19 @@ async def _repair_child_stale_target_gate_once(
         )
     return repaired, repair_detail, feedback
 
+@dataclass(frozen=True)
 class _StaleTargetRetryResult:
+    """Result of `_repair_stale_target_and_retry_merge`.
+
+    Despite the function name (kept for git-blame continuity), this is NOT
+    a cheap re-fetch + retry. The function runs a full Lead repair agent
+    (~200-300s) against the child task to resolve upward-merge-gate
+    blockers, then attempts the merge once. The "stale_target" framing
+    survives from an earlier model where the only failure mode was a
+    stale parent ref; today it covers any upward-merge-gate failure
+    including real semantic conflicts. Audit ref: audit3-repair-loops.md.
+    """
+
     ok: bool
     detail: str
     pre_merge_ref: str
@@ -1814,7 +1841,7 @@ async def _repair_stale_target_and_retry_merge(
     source_branch: str,
     previous_feedback: dict[str, Any] | None = None,
     run_smoke_preflight: bool = False,
-    check_union_after_merge: bool = False,
+    check_union_after_merge: bool = False,  # noqa: ARG001 — surface kept for compat; see docstring
     emit_union_feedback: bool = False,
     on_event: Any = None,
 ) -> _StaleTargetRetryResult:

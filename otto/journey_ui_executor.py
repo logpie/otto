@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import re
@@ -618,40 +619,8 @@ def _finalize_journey(
     return result
 
 
-def _result_payload(
-    journey: dict[str, Any],
-    *,
-    status: str,
-    detail: str,
-    proof_usable: bool,
-    artifact_paths: list[Path],
-) -> dict[str, Any]:
-    return executor_result_payload(
-        journey,
-        source=UI_EXECUTOR_SOURCE,
-        status=status,
-        detail=detail,
-        proof_usable=proof_usable,
-        artifact_paths=artifact_paths,
-    )
-
-
-def _non_pass_result(
-    journey: dict[str, Any],
-    *,
-    status: str,
-    detail: str,
-    proof_usable: bool,
-    artifact_paths: list[Path],
-) -> dict[str, Any]:
-    return executor_non_pass_result(
-        journey,
-        source=UI_EXECUTOR_SOURCE,
-        status=status,
-        detail=detail,
-        proof_usable=proof_usable,
-        artifact_paths=artifact_paths,
-    )
+_result_payload = functools.partial(executor_result_payload, source=UI_EXECUTOR_SOURCE)
+_non_pass_result = functools.partial(executor_non_pass_result, source=UI_EXECUTOR_SOURCE)
 
 
 def _infra_results(journeys: list[dict[str, Any]], detail: str) -> list[dict[str, Any]]:
