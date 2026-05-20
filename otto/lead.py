@@ -39,7 +39,7 @@ from otto.journey_scope_policy import (
     infer_execution_scope,
     node_kind_for_scope,
 )
-from otto.observability import iso_timestamp
+from otto.observability import iso_timestamp, read_json_dict
 from otto.queue.task_graph import (
     add_cost as graph_add_cost,
     record_task,
@@ -776,14 +776,14 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
     # Primary: agent-authored verdict.json
     candidate = session_dir / "verdict.json"
     if candidate.exists():
-        try:
-            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        payload = read_json_dict(
+            candidate, default=None, logger=logger, log_context="verdict.json primary"
+        )
+        if payload is not None:
             canonical = _canonicalize_verdict_payload(payload)
             if canonical is not None:
                 _rewrite_canonical_verdict(candidate, canonical)
                 return True, canonical
-        except (OSError, json.JSONDecodeError):
-            pass
 
     # Fallback: agent may have misplaced verdict.json inside the worktree
     # (typically worktree/<subsystem>/verdict.json) instead of session_dir.
@@ -791,8 +791,10 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
     # then write a warning so we can see how often agents are doing this.
     misplaced = _find_misplaced_verdict(session_dir)
     if misplaced is not None:
-        try:
-            payload = json.loads(misplaced.read_text(encoding="utf-8"))
+        payload = read_json_dict(
+            misplaced, default=None, logger=logger, log_context="verdict.json misplaced"
+        )
+        if payload is not None:
             canonical = _canonicalize_verdict_payload(payload)
             if canonical is not None:
                 logger.warning(
@@ -807,16 +809,8 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
                         "canonical_path": str(candidate),
                     },
                 )
-                try:
-                    candidate.write_text(
-                        json.dumps(canonical, indent=2, sort_keys=True) + "\n",
-                        encoding="utf-8",
-                    )
-                except OSError:
-                    pass
+                _write_canonical_verdict_or_log(candidate, canonical)
                 return True, canonical
-        except (OSError, json.JSONDecodeError):
-            pass
 
     # Rescue: the agent may have called Write with a valid verdict payload but
     # targeted a stale session path that came from poisoned intent text. Parse
@@ -834,25 +828,19 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
             )
             warning["canonical_path"] = str(candidate)
             _record_verdict_recovery_warning(session_dir, warning)
-            try:
-                candidate.write_text(
-                    json.dumps(canonical, indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
+            _write_canonical_verdict_or_log(candidate, canonical)
             return True, canonical
 
     # Legacy fallback: pre-simplification verify-result.json
     legacy = session_dir / "verify" / "verify-result.json"
     if legacy.exists():
-        try:
-            payload = json.loads(legacy.read_text(encoding="utf-8"))
+        payload = read_json_dict(
+            legacy, default=None, logger=logger, log_context="verify-result.json legacy"
+        )
+        if payload is not None:
             canonical = _canonicalize_verdict_payload(payload)
             if canonical is not None:
                 return True, canonical
-        except (OSError, json.JSONDecodeError):
-            pass
 
     # Rescue: agent inlined the verdict JSON in its final text message but
     # forgot to write the file. Walk lead/messages.jsonl looking for a JSON
@@ -862,13 +850,7 @@ def _read_agent_verdict(session_dir: Path) -> tuple[bool, dict[str, Any] | None]
         canonical = _canonicalize_verdict_payload(rescued)
         if canonical is None:
             return False, None
-        try:
-            (session_dir / "verdict.json").write_text(
-                json.dumps(canonical, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
+        _write_canonical_verdict_or_log(session_dir / "verdict.json", canonical)
         return True, canonical
 
     return False, None
@@ -1041,16 +1023,30 @@ async def _request_canonical_verdict_rewrite(
 
 
 def _rewrite_canonical_verdict(path: Path, payload: dict[str, Any]) -> None:
-    try:
-        existing = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        existing = None
+    existing = read_json_dict(path, default=None, logger=logger, log_context="verdict.json rewrite")
     if existing == payload:
         return
+    _write_canonical_verdict_or_log(path, payload)
+
+
+def _write_canonical_verdict_or_log(path: Path, payload: dict[str, Any]) -> bool:
+    """Persist a canonical verdict.json. Logs OSError as ERROR so a silent
+    disk-write failure surfaces in the narrative log rather than being
+    reported as success. Returns True on success, False on failure (the
+    in-memory canonical is still authoritative for the current run)."""
     try:
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    except OSError:
-        pass
+        path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return True
+    except OSError as exc:
+        logger.error(
+            "verdict.json write failed at %s (%s); in-memory canonical kept",
+            path,
+            exc,
+        )
+        return False
 
 
 def _canonicalize_verdict_payload(payload: Any) -> dict[str, Any] | None:
