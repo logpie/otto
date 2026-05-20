@@ -1162,6 +1162,11 @@ def _value_indicates_failure(value: Any) -> bool:
             "fail", "failed", "failure", "error", "errored", "timeout"
         }
     if isinstance(value, (int, float)):
+        # Generic "non-zero indicates failure" — applies to exit_code,
+        # returncode, error_count, etc. NOTE: this is wrong for COUNT keys
+        # like `passed`, which is why the dict branch handles `passed`
+        # specially (bool/string only, not int recursion). Do not call this
+        # branch directly on a `passed: N` count.
         return value != 0
     if isinstance(value, list):
         return any(_value_indicates_failure(item) for item in value)
@@ -1172,7 +1177,19 @@ def _value_indicates_failure(value: Any) -> bool:
                 return True
             if isinstance(raw, (int, float)) and raw > 0:
                 return True
-        if "passed" in value and _value_indicates_failure(value.get("passed")):
+        # `passed` is a COUNT/BOOL — non-zero N is SUCCESS, not failure.
+        # Recurse only when the value is bool or string (where 'pass'/'fail'
+        # words actually carry failure semantics). Pre-2026-05-20 this
+        # branch recursed unconditionally, causing `passed: 24` to be
+        # interpreted as failure (24 != 0). That bug demoted Opus-shape
+        # verdicts on the iTracker run, cascading to ~$120 in wasted
+        # repair work. See [[feedback_journey_oracle_truth]] and the
+        # foundation_contract / composite_landing_gate / upward_merge_gate
+        # discard chain it triggered.
+        passed_raw = value.get("passed")
+        if isinstance(passed_raw, bool) and not passed_raw:
+            return True
+        if isinstance(passed_raw, str) and _value_indicates_failure(passed_raw):
             return True
         if "status" in value and _value_indicates_failure(value.get("status")):
             return True

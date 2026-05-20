@@ -21,6 +21,10 @@ from otto.journey_scope_policy import ExecutionScope, infer_execution_scope
 from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdicts
 from otto.spec_compile_flat import SCHEMA_VERSION as FLAT_SPEC_SCHEMA_VERSION
 from otto.v5_capability_inventory import parse_information_architecture_contract
+# NOTE: `_pass_payload_has_evidence` is deferred-imported inside
+# `_check_local_scope_evidence` to avoid a module-level cycle with otto.lead
+# (lead.py defers `from otto.v5_verification_plan import validate_lead_verdict`
+# inside `run_lead`; symmetric deferral keeps pyright + runtime both happy).
 
 CHECK_KINDS = (
     "structured_contract_present",
@@ -867,13 +871,22 @@ def _advise_deprecation_warnings(
 
 
 def _check_local_scope_evidence(agent_verdict: dict[str, Any]) -> list[dict[str, Any]]:
-    evidence = agent_verdict.get("evidence")
-    test_command = str(agent_verdict.get("test_command") or "").strip()
-    has_file_evidence = any(
-        str(item or "").strip()
-        for item in (evidence if isinstance(evidence, list) else [])
-    )
-    passed = bool(test_command or has_file_evidence)
+    """Did the agent provide ANY recognized evidence of passing work?
+
+    Delegates to `_pass_payload_has_evidence` so the verification plan and
+    the canonicalization layer (`otto.lead._canonicalize_verdict_payload`)
+    agree on what counts as evidence. Prior to 2026-05-20, this check was
+    strict (only `evidence` list or `test_command` string), while the
+    canonicalizer was lenient (also accepted `tests`, `intent_coverage.built`,
+    `runner_checks`, etc.). The mismatch demoted Opus-shape verdicts
+    (which populate `tests` / `integration_check` / `backend_files` but omit
+    the canonical `evidence` list) to `unverified` even though the agent
+    had run and passed real tests. The demotion cascaded through child
+    verify-repair → composite landing gate → upward_merge_gate_blocked,
+    wasting ~$120 on the iTracker Opus run.
+    """
+    from otto.lead import _pass_payload_has_evidence  # deferred — see module header note
+    passed = _pass_payload_has_evidence(agent_verdict)
     return [_check(
         "local_scope_check",
         "test_or_journey_evidence",
@@ -881,7 +894,12 @@ def _check_local_scope_evidence(agent_verdict: dict[str, Any]) -> list[dict[str,
         (
             "leaf verdict includes local test or evidence data"
             if passed
-            else "leaf verdict lacks local test_command and evidence entries"
+            else (
+                "leaf verdict lacks ANY recognized evidence "
+                "(none of: non-empty journeys, evidence list, test_command, "
+                "tests/checks with passing results, intent_coverage.built, "
+                "deliverables, artifacts, runner_checks)"
+            )
         ),
     )]
 
