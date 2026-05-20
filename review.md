@@ -1718,3 +1718,44 @@ Codex re-reviewed the committed diff (4186dc399) and signed APPROVED.
 hypotheses compound 3x on a state-carrying interaction, escalate to
 Codex even under session-long "Codex off" policy — CLAUDE.md mandate
 intent applies to this exact risk class.
+
+
+---
+
+## Implementation Gate — 2026-05-20 — cc-i2p-2 (today's 8 commits) vs main
+
+Scope: gate on the 8 commits from this session (e8293e97c..87fd08511);
+prior cc-i2p-2 work had its own review trails.
+
+### Round 1 — Codex (read-only)
+- [CRITICAL] foundation_contract_write_gate has pre-commit refusal paths
+  outside `_merge_child_branch` — 5 sites (v5_runner.py:3267, 3338,
+  4198, 5652, 8810). Fixed by Codex (workspace-write) — all 5 LAND-then-
+  annotate. Ratchet test extended.
+- [IMPORTANT] retry-children leaves missing-pending tasks undispatchable.
+  Fixed by Codex — `rewrite_pending_for_retry()` synthesizes from graph
+  + session context when missing.
+- [IMPORTANT] cascade not true recursive closure. Fixed by Codex —
+  flatten `extra_plan.all_tasks` into parent's cascaded.
+- [IMPORTANT] stale blocker metadata leaks past `reset-verdict`. Fixed
+  by Codex — new `clear_blocker_metadata()` helper used by reset-verdict
+  + recovery paths.
+- [IMPORTANT] retry lock doesn't coordinate with scheduler. Fixed by
+  Codex — `retry_in_progress` graph flag; take_ready() skips when set.
+- [NOTE] status --verbose reads wrong metadata shape. Fixed by Codex.
+
+### Round 2 — Codex (re-review)
+- [IMPORTANT] retry_in_progress ownership + lock ordering bug —
+  flock acquired AFTER marking, finally cleared even on lock-fail.
+  Fixed by Codex — owner-token markers {pid, host, started_at};
+  finally clears only matching owner; take_ready uses live/stale logic
+  with 1h staleness window.
+- [IMPORTANT] cascade closure not cycle-safe — A→B→C→B → RecursionError.
+  Fixed by Codex — iterative BFS with global seen/visiting; cycles
+  reported as validation failure.
+
+### Round 3 — Codex (re-review)
+- APPROVED. "No new issues found in the Round 3 fixes."
+
+Validation: 114/114 tests pass (up from 111 — Codex added cycle, stale-
+retry-recovery, lock-contention tests).

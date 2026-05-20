@@ -538,7 +538,7 @@ def _register_status_command(v5_group: click.Group) -> None:
                 intent = (child.get("intent") or "")[:70].rstrip()
                 console.print(f"  {cid}  {_color_verdict(v):24s}  {intent}...")
                 if verbose:
-                    md = child.get("metadata") or {}
+                    nested_md = child.get("metadata") or {}
                     for key in (
                         "merge_blocked_origin",
                         "merge_blocked_reason",
@@ -547,10 +547,13 @@ def _register_status_command(v5_group: click.Group) -> None:
                         "landed_with_annotation",
                         "failure_reason",
                     ):
-                        if key in md and md[key]:
-                            v = md[key]
+                        value = child.get(key)
+                        if value is None and isinstance(nested_md, dict):
+                            value = nested_md.get(key)
+                        if value:
                             preview = (
-                                str(v)[:120] + ("..." if len(str(v)) > 120 else "")
+                                str(value)[:120]
+                                + ("..." if len(str(value)) > 120 else "")
                             )
                             console.print(f"      {key}: {preview}")
 
@@ -664,6 +667,7 @@ def _register_reset_verdict_command(v5_group: click.Group) -> None:
             sys.exit(2)
 
         from otto.queue.task_graph import (
+            clear_blocker_metadata,
             get_task,
             read_graph,
             set_verdict,
@@ -688,14 +692,12 @@ def _register_reset_verdict_command(v5_group: click.Group) -> None:
             if dry_run:
                 continue
             from typing import Any as _Any, cast as _cast
+            clear_blocker_metadata(project_dir, tid)
             set_verdict(project_dir, tid, _cast(_Any, new_verdict), cost_usd=0.0)
             update_task_metadata(
                 project_dir,
                 tid,
                 failure_reason="",
-                merge_blocked_origin="",
-                merge_blocked_reason="",
-                merge_blocked_structured_reason=None,
                 annotation_origin="",
                 annotation_detail="",
                 annotation_cause="",
@@ -823,6 +825,7 @@ def _register_retry_children_command(v5_group: click.Group) -> None:
             f"archived {len(result.archived)} session(s), "
             f"pending: "
             f"{result.pending_summary.get('rewritten', [])} rewritten, "
+            f"{result.pending_summary.get('synthesized', [])} synthesized, "
             f"{result.pending_summary.get('missing', [])} missing, "
             f"{result.pending_summary.get('superseded_count', 0)} superseded."
         )

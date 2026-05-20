@@ -22,9 +22,8 @@ Locked invariants:
 from __future__ import annotations
 
 import copy
-import json
 import os
-import shutil
+import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -170,6 +169,67 @@ def _dependents_with_satisfactory_verdict(
     return dependents
 
 
+def _satisfactory_dependents_by_source(project_dir: Path) -> dict[str, list[str]]:
+    """Map task_id -> satisfactory-terminal tasks depending on that task."""
+    from otto.queue.task_graph import entry_is_satisfactory_terminal, read_graph
+
+    graph = read_graph(project_dir)
+    tasks = graph.get("tasks") or {}
+    if isinstance(tasks, list):
+        tasks = {t["id"]: t for t in tasks if isinstance(t, dict) and t.get("id")}
+    if not isinstance(tasks, dict):
+        return {}
+
+    dependents_by_source: dict[str, list[str]] = {}
+    for tid, task in tasks.items():
+        if not isinstance(task, dict) or not entry_is_satisfactory_terminal(task):
+            continue
+        for dep in task.get("depends_on") or []:
+            dep_id = str(dep or "")
+            if dep_id:
+                dependents_by_source.setdefault(dep_id, []).append(str(tid))
+    return dependents_by_source
+
+
+def _find_retry_dependency_cycle(
+    dependents_by_source: dict[str, list[str]],
+    roots: list[str],
+) -> list[str] | None:
+    """Iteratively detect a reachable cycle in dependency-closure expansion."""
+    seen: set[str] = set()
+    visiting: set[str] = set()
+
+    for root in roots:
+        if root in seen:
+            continue
+        stack: list[tuple[str, int]] = [(root, 0)]
+        path: list[str] = [root]
+        visiting.add(root)
+
+        while stack:
+            node, index = stack[-1]
+            neighbors = dependents_by_source.get(node, [])
+            if index >= len(neighbors):
+                visiting.discard(node)
+                seen.add(node)
+                stack.pop()
+                path.pop()
+                continue
+
+            neighbor = neighbors[index]
+            stack[-1] = (node, index + 1)
+            if neighbor in visiting:
+                cycle_start = path.index(neighbor)
+                return [*path[cycle_start:], neighbor]
+            if neighbor in seen:
+                continue
+            visiting.add(neighbor)
+            path.append(neighbor)
+            stack.append((neighbor, 0))
+
+    return None
+
+
 def _find_session_for_task(project_dir: Path, task_id: str) -> Path | None:
     """Locate the session dir whose `worktree` symlink points at
     `.worktrees/<task_id>`. Returns None if not found."""
@@ -197,6 +257,118 @@ def _find_session_for_task(project_dir: Path, task_id: str) -> Path | None:
     return matches[-1][1]
 
 
+def _validate_retry_task(
+    *,
+    project_dir: Path,
+    task_id: str,
+    allow_continue_dirty: bool,
+    force_pass: bool,
+) -> tuple[list[ValidationFailure], Path | None, Path | None]:
+    from otto.queue.task_graph import get_task
+
+    task = get_task(project_dir, task_id)
+    if task is None:
+        return [ValidationFailure(task_id, "task not found in graph")], None, None
+
+    if task.get("child_task_ids"):
+        return [
+            ValidationFailure(
+                task_id,
+                f"task has {len(task.get('child_task_ids') or [])} children; "
+                f"retry only supports leaves. Use --fresh to rebuild a "
+                f"non-leaf subtree.",
+            )
+        ], None, None
+    if task.get("decomposition") == "emit":
+        return [
+            ValidationFailure(
+                task_id,
+                "task decomposed (decomposition=emit); not a leaf. "
+                "Retry only supports leaves.",
+            )
+        ], None, None
+
+    if str(task.get("task_role") or "") == "foundation":
+        return [
+            ValidationFailure(
+                task_id,
+                "task_role=foundation; foundation rebuild requires --fresh "
+                "(it cascades to all dependent children).",
+            )
+        ], None, None
+
+    if str(task.get("verdict") or "") == "pass" and not force_pass:
+        return [
+            ValidationFailure(
+                task_id,
+                f"verdict={task.get('verdict')}; use --force to retry a "
+                f"pass-verdict task (consider --cascade-dependents to "
+                f"invalidate downstream pass tasks too).",
+            )
+        ], None, None
+
+    branch = _branch_for_task(task_id)
+    if not _branch_exists(project_dir, branch):
+        return [
+            ValidationFailure(
+                task_id,
+                f"branch {branch} not found — task may have been pruned "
+                f"or its decomposition was inline (no separate branch).",
+            )
+        ], None, None
+
+    worktree = project_dir / ".worktrees" / task_id
+    if not worktree.exists():
+        return [
+            ValidationFailure(
+                task_id,
+                f"worktree {worktree} not found — recreate it manually "
+                f"or use --fresh.",
+            )
+        ], None, None
+    current_branch = _git_worktree_branch(worktree)
+    if current_branch != branch:
+        return [
+            ValidationFailure(
+                task_id,
+                f"worktree {worktree} is on branch {current_branch!r}, "
+                f"expected {branch!r}.",
+            )
+        ], None, None
+    if not allow_continue_dirty and _git_worktree_is_dirty(worktree):
+        return [
+            ValidationFailure(
+                task_id,
+                f"worktree {worktree} has uncommitted changes; commit "
+                f"first or use --continue to commit-then-retry.",
+            )
+        ], None, None
+    live_pids = _live_pids_in_path(worktree)
+    if live_pids:
+        return [
+            ValidationFailure(
+                task_id,
+                f"live processes in worktree {worktree}: {live_pids}. "
+                f"Refusing retry — stop them first.",
+            )
+        ], None, None
+
+    session = _find_session_for_task(project_dir, task_id)
+    if session is not None:
+        live_session_pids = _live_pids_in_path(session)
+        if live_session_pids:
+            return [
+                ValidationFailure(
+                    task_id,
+                    f"live processes in session {session}: "
+                    f"{live_session_pids}. Refusing retry — stop them "
+                    f"first.",
+                )
+            ], None, None
+
+    return [], worktree, session
+
+
 def validate_and_plan(
     *,
     project_dir: Path,
@@ -211,114 +383,25 @@ def validate_and_plan(
     `ok=False` with failures listed. Caller (CLI) prints failures and
     exits non-zero on the False case.
     """
-    from otto.queue.task_graph import get_task
-
     plan = RetryPlan()
 
     # 1. Per-task validation gate.
     for tid in task_ids:
-        task = get_task(project_dir, tid)
-        if task is None:
-            plan.failures.append(ValidationFailure(tid, "task not found in graph"))
+        failures, worktree, session = _validate_retry_task(
+            project_dir=project_dir,
+            task_id=tid,
+            allow_continue_dirty=allow_continue_dirty,
+            force_pass=force_pass,
+        )
+        if failures:
+            plan.failures.extend(failures)
             continue
-
-        # Leaf check: no children, decomposition != "emit"
-        if task.get("child_task_ids"):
-            plan.failures.append(ValidationFailure(
-                tid,
-                f"task has {len(task.get('child_task_ids') or [])} children; "
-                f"retry only supports leaves. Use --fresh to rebuild a "
-                f"non-leaf subtree.",
-            ))
+        if worktree is None:
+            plan.failures.append(ValidationFailure(tid, "worktree validation failed"))
             continue
-        if task.get("decomposition") == "emit":
-            plan.failures.append(ValidationFailure(
-                tid,
-                "task decomposed (decomposition=emit); not a leaf. "
-                "Retry only supports leaves.",
-            ))
-            continue
-
-        # Foundation refusal
-        if str(task.get("task_role") or "") == "foundation":
-            plan.failures.append(ValidationFailure(
-                tid,
-                "task_role=foundation; foundation rebuild requires --fresh "
-                "(it cascades to all dependent children).",
-            ))
-            continue
-
-        # pass-with-downstream refusal unless --force
-        if str(task.get("verdict") or "") == "pass" and not force_pass:
-            plan.failures.append(ValidationFailure(
-                tid,
-                f"verdict={task.get('verdict')}; use --force to retry a "
-                f"pass-verdict task (consider --cascade-dependents to "
-                f"invalidate downstream pass tasks too).",
-            ))
-            continue
-
-        # Branch must exist
-        branch = _branch_for_task(tid)
-        if not _branch_exists(project_dir, branch):
-            plan.failures.append(ValidationFailure(
-                tid,
-                f"branch {branch} not found — task may have been pruned "
-                f"or its decomposition was inline (no separate branch).",
-            ))
-            continue
-
-        # Worktree must exist + correct branch + not dirty + no live PIDs
-        worktree = project_dir / ".worktrees" / tid
-        if not worktree.exists():
-            plan.failures.append(ValidationFailure(
-                tid,
-                f"worktree {worktree} not found — recreate it manually "
-                f"or use --fresh.",
-            ))
-            continue
-        current_branch = _git_worktree_branch(worktree)
-        if current_branch != branch:
-            plan.failures.append(ValidationFailure(
-                tid,
-                f"worktree {worktree} is on branch {current_branch!r}, "
-                f"expected {branch!r}.",
-            ))
-            continue
-        if not allow_continue_dirty and _git_worktree_is_dirty(worktree):
-            plan.failures.append(ValidationFailure(
-                tid,
-                f"worktree {worktree} has uncommitted changes; commit "
-                f"first or use --continue to commit-then-retry.",
-            ))
-            continue
-        live_pids = _live_pids_in_path(worktree)
-        if live_pids:
-            plan.failures.append(ValidationFailure(
-                tid,
-                f"live processes in worktree {worktree}: {live_pids}. "
-                f"Refusing retry — stop them first.",
-            ))
-            continue
-
-        # Session locate (best-effort; archived later)
-        session = _find_session_for_task(project_dir, tid)
-        if session is None:
-            # Not fatal — log it; the retry will write a fresh session.
-            pass
-        else:
-            plan.sessions_to_archive[tid] = session
-            live_session_pids = _live_pids_in_path(session)
-            if live_session_pids:
-                plan.failures.append(ValidationFailure(
-                    tid,
-                    f"live processes in session {session}: "
-                    f"{live_session_pids}. Refusing retry — stop them "
-                    f"first.",
-                ))
-                continue
-
         plan.worktrees[tid] = worktree
+        if session is not None:
+            plan.sessions_to_archive[tid] = session
         plan.targets.append(tid)
 
     # 2. Dependency closure (only if base validation passed).
@@ -327,29 +410,48 @@ def validate_and_plan(
         dependents = _dependents_with_satisfactory_verdict(project_dir, target_set)
         if dependents:
             if cascade_dependents:
-                # Recursive closure: add dependents to plan, re-validate them
-                # too. Avoid infinite loops via the targeting set.
-                for dep in dependents:
+                dependents_by_source = _satisfactory_dependents_by_source(project_dir)
+                cycle = _find_retry_dependency_cycle(
+                    dependents_by_source, plan.targets
+                )
+                if cycle:
+                    plan.failures.append(ValidationFailure(
+                        "(dependency-cycle)",
+                        "cycle detected in retry dependency closure: "
+                        + " -> ".join(cycle),
+                    ))
+                    return plan
+
+                queue: list[str] = list(dependents)
+                queued: set[str] = set(queue)
+                while queue:
+                    dep = queue.pop(0)
+                    queued.discard(dep)
                     if dep in target_set:
                         continue
-                    # Validate the dependent (silently — failures abort the
-                    # whole plan).
-                    extra_plan = validate_and_plan(
+                    failures, worktree, session = _validate_retry_task(
                         project_dir=project_dir,
-                        task_ids=[dep],
-                        cascade_dependents=cascade_dependents,
+                        task_id=dep,
                         allow_continue_dirty=allow_continue_dirty,
-                        force_pass=True,  # cascaded → bypass pass check
+                        force_pass=True,  # cascaded -> bypass pass check
                     )
-                    if not extra_plan.ok:
-                        plan.failures.extend(extra_plan.failures)
-                    else:
-                        plan.cascaded.append(dep)
-                        plan.worktrees.update(extra_plan.worktrees)
-                        plan.sessions_to_archive.update(
-                            extra_plan.sessions_to_archive
-                        )
-                        target_set.add(dep)
+                    target_set.add(dep)
+                    if failures:
+                        plan.failures.extend(failures)
+                        continue
+                    if worktree is None:
+                        plan.failures.append(ValidationFailure(
+                            dep, "worktree validation failed"
+                        ))
+                        continue
+                    plan.cascaded.append(dep)
+                    plan.worktrees[dep] = worktree
+                    if session is not None:
+                        plan.sessions_to_archive[dep] = session
+                    for next_dep in dependents_by_source.get(dep, []):
+                        if next_dep not in target_set and next_dep not in queued:
+                            queue.append(next_dep)
+                            queued.add(next_dep)
             else:
                 plan.failures.append(ValidationFailure(
                     "(dependency-closure)",
@@ -409,9 +511,8 @@ def execute_plan(
     """
     from otto.queue.subtask import rewrite_pending_for_retry
     from otto.queue.task_graph import (
-        _locked_graph,
         clear_task_for_retry,
-        get_task,
+        mark_retry_in_progress,
         read_graph,
     )
 
@@ -425,6 +526,14 @@ def execute_plan(
 
     lock_path = _lock_path(project_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    retry_task_ids = list(dict.fromkeys(plan.all_tasks))
+    retry_owner = {
+        "pid": os.getpid(),
+        "host": socket.gethostname(),
+        "started_at": _now_iso(),
+    }
+    lock_acquired = False
+    retry_marked = False
 
     import fcntl
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
@@ -437,11 +546,20 @@ def execute_plan(
                 "may be in progress"
             )
             return result
+        lock_acquired = True
+
+        mark_retry_in_progress(
+            project_dir,
+            retry_task_ids,
+            True,
+            owner=retry_owner,
+        )
+        retry_marked = True
 
         # 2. Revalidate under the lock (TOCTOU defense — R5#3).
         revalidation = validate_and_plan(
             project_dir=project_dir,
-            task_ids=plan.targets,  # targets only; cascade was already resolved
+            task_ids=retry_task_ids,
             cascade_dependents=False,  # don't re-cascade
             allow_continue_dirty=False,
             force_pass=True,  # under-lock revalidation skips the force-pass UX gate
@@ -469,14 +587,14 @@ def execute_plan(
         graph_before = read_graph(project_dir)
         tasks_before = graph_before.get("tasks") or {}
         snapshot: dict[str, dict[str, Any]] = {}
-        for tid in plan.all_tasks:
+        for tid in retry_task_ids:
             t = tasks_before.get(tid)
             if isinstance(t, dict):
                 snapshot[tid] = copy.deepcopy(t)
 
         # 5. Reset graph entries (clear_task_for_retry atomically per task).
         try:
-            for tid in plan.all_tasks:
+            for tid in retry_task_ids:
                 clear_task_for_retry(
                     project_dir, tid, retry_reason="cli_retry_children"
                 )
@@ -491,9 +609,18 @@ def execute_plan(
         # 6. Rewrite pending file.
         try:
             pending_summary = rewrite_pending_for_retry(
-                project_dir, plan.all_tasks, retry_reason="cli_retry_children"
+                project_dir, retry_task_ids, retry_reason="cli_retry_children"
             )
             result.pending_summary = pending_summary
+            if pending_summary.get("missing"):
+                result.error = (
+                    "pending rewrite could not synthesize task(s): "
+                    + ", ".join(str(t) for t in pending_summary.get("missing", []))
+                )
+                _rollback_graph(project_dir, snapshot)
+                _rollback_archives(result.archived)
+                result.rolled_back = True
+                return result
         except Exception as exc:
             result.error = f"pending rewrite failed: {exc}"
             _rollback_graph(project_dir, snapshot)
@@ -502,9 +629,22 @@ def execute_plan(
             return result
 
     finally:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
+        if retry_marked:
+            try:
+                mark_retry_in_progress(
+                    project_dir,
+                    retry_task_ids,
+                    False,
+                    owner=retry_owner,
+                )
+            except Exception:
+                pass
+        if lock_acquired:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+        else:
             os.close(lock_fd)
 
     return result

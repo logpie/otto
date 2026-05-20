@@ -78,6 +78,7 @@ from otto.queue.subtask import (
 from otto.queue.task_graph import (
     aggregate_verdict,
     children_of,
+    clear_blocker_metadata,
     clear_contract_amendment_blocked_state,
     clear_contract_amendment_blocked_tasks,
     get_retry_count,
@@ -1027,6 +1028,29 @@ def _foundation_contract_write_block_detail(feedback: dict[str, Any]) -> str:
         return json.dumps(feedback, sort_keys=True)
     except TypeError:
         return str(feedback)
+
+
+def _record_foundation_contract_write_annotation(
+    *,
+    project_dir: Path,
+    task_id: str,
+    result: LeadResult,
+    feedback: dict[str, Any],
+    phase: str = "post_commit_annotation",
+    on_event: Any = None,
+) -> str:
+    detail = _foundation_contract_write_block_detail(feedback)
+    _record_structured_merge_failed(
+        project_dir=project_dir,
+        task_id=task_id,
+        result=result,
+        reason=detail,
+        origin="foundation_contract_write_gate",
+        phase=phase,
+        structured_reason=feedback,
+        on_event=on_event,
+    )
+    return detail
 
 
 def _allowed_paths_write_feedback(
@@ -3113,17 +3137,6 @@ async def _run_preflight_payload_repair_session(
             changed_paths=changed_paths,
             operation=f"{repair_phase}_repair_commit",
         )
-        if feedback is not None:
-            detail = _foundation_contract_write_block_detail(feedback)
-            _emit(on_event, {
-                "event": f"{event_prefix}_repair_commit_failed",
-                "task_id": task_id,
-                "repair_phase": repair_phase,
-                "worktree": str(worktree_path),
-                "detail": detail,
-                "structured_reason": feedback,
-            })
-            return False, detail
         commit_ok, commit_detail = commit_integration_worktree(
             worktree_path=worktree_path,
             task_id=f"{task_id}-{repair_phase}",
@@ -3139,6 +3152,14 @@ async def _run_preflight_payload_repair_session(
             "worktree": str(worktree_path),
             "detail": commit_detail,
         })
+        if commit_ok and feedback is not None:
+            _record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=task_id,
+                result=LeadResult(task_id=task_id, verdict="partial"),
+                feedback=feedback,
+                on_event=on_event,
+            )
         return commit_ok, commit_detail
 
     repair = await run_oracle_repair_agent(
@@ -3271,24 +3292,6 @@ def _commit_integration_agent_changes(
         changed_paths=_git_diff_name_only(worktree_path),
         operation="integration_agent_commit",
     )
-    if feedback is not None:
-        detail = _foundation_contract_write_block_detail(feedback)
-        _emit(on_event, {
-            "event": "integration_commit_failed",
-            "task_id": task_id,
-            "worktree": str(worktree_path),
-            "detail": detail,
-            "structured_reason": feedback,
-        })
-        _record_task_merge_blocked_reason(
-            project_dir=project_dir,
-            task_id=task_id,
-            result=result,
-            reason=detail,
-            origin="foundation_contract_write_gate",
-            structured_reason=feedback,
-        )
-        return
     ok, detail = commit_integration_worktree(
         worktree_path=worktree_path,
         task_id=task_id,
@@ -3303,6 +3306,15 @@ def _commit_integration_agent_changes(
         logger.warning("integration commit failed for %s: %s", task_id, detail)
         set_verdict(project_dir, task_id, "merge_blocked", cost_usd=result.cost_usd)
         result.verdict = "merge_blocked"
+        return
+    if feedback is not None:
+        _record_foundation_contract_write_annotation(
+            project_dir=project_dir,
+            task_id=task_id,
+            result=result,
+            feedback=feedback,
+            on_event=on_event,
+        )
 
 
 def _commit_root_inline_changes(
@@ -3342,24 +3354,6 @@ def _commit_root_inline_changes(
         changed_paths=_git_diff_name_only(project_dir),
         operation="root_inline_commit",
     )
-    if feedback is not None:
-        detail = _foundation_contract_write_block_detail(feedback)
-        _emit(on_event, {
-            "event": "inline_commit_failed",
-            "task_id": ROOT_TASK_ID,
-            "worktree": str(project_dir),
-            "detail": detail,
-            "structured_reason": feedback,
-        })
-        _record_task_merge_blocked_reason(
-            project_dir=project_dir,
-            task_id=ROOT_TASK_ID,
-            result=result,
-            reason=detail,
-            origin="foundation_contract_write_gate",
-            structured_reason=feedback,
-        )
-        return
     ok, detail = commit_worktree(worktree_path=project_dir, message="v5 inline build")
     _emit(on_event, {
         "event": "inline_commit" if ok else "inline_commit_failed",
@@ -3371,6 +3365,15 @@ def _commit_root_inline_changes(
         logger.warning("root inline commit failed: %s", detail)
         set_verdict(project_dir, ROOT_TASK_ID, "merge_blocked", cost_usd=result.cost_usd)
         result.verdict = "merge_blocked"
+        return
+    if feedback is not None:
+        _record_foundation_contract_write_annotation(
+            project_dir=project_dir,
+            task_id=ROOT_TASK_ID,
+            result=result,
+            feedback=feedback,
+            on_event=on_event,
+        )
 
 
 def _propagate_subtree_integration(
@@ -3572,12 +3575,19 @@ async def _repair_subtree_propagation_once(
             changed_paths=_git_diff_name_only(target_worktree),
             operation="subtree_propagation_repair_commit",
         )
-        if feedback is not None:
-            return False, _foundation_contract_write_block_detail(feedback)
-        return commit_worktree(
+        ok, commit_detail = commit_worktree(
             worktree_path=target_worktree,
             message=f"v5 subtree propagation repair: {task_id}",
         )
+        if ok and feedback is not None:
+            _record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=task_id,
+                result=result,
+                feedback=feedback,
+                on_event=on_event,
+            )
+        return ok, commit_detail
 
     repair = await run_oracle_repair_agent(
         packet,
@@ -4202,12 +4212,19 @@ async def _run_child_verify_repair_packet(
             changed_paths=_git_diff_name_only(child_worktree),
             operation="child_verify_repair_commit",
         )
-        if feedback is not None:
-            return False, _foundation_contract_write_block_detail(feedback)
-        return commit_worktree(
+        ok, commit_detail = commit_worktree(
             worktree_path=child_worktree,
             message=f"v5 child verify repair: {child_task_id}",
         )
+        if ok and feedback is not None:
+            _record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                feedback=feedback,
+                on_event=on_event,
+            )
+        return ok, commit_detail
 
     return await run_oracle_repair_agent(
         packet,
@@ -5594,6 +5611,7 @@ async def _run_scaffold_repair_packet(
     architect_tid: str,
     architect_task: dict[str, Any],
     latest_result: CleanOracleResult,
+    result: LeadResult,
     config: dict[str, Any],
     on_event: Any = None,
 ) -> Any:
@@ -5656,12 +5674,19 @@ async def _run_scaffold_repair_packet(
             changed_paths=_git_diff_name_only(project_dir),
             operation="scaffold_repair_commit",
         )
-        if feedback is not None:
-            return False, _foundation_contract_write_block_detail(feedback)
-        return commit_integration_worktree(
+        ok, commit_detail = commit_integration_worktree(
             worktree_path=project_dir,
             task_id=f"{architect_tid}-scaffold-repair",
         )
+        if ok and feedback is not None:
+            _record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=architect_tid,
+                result=result,
+                feedback=feedback,
+                on_event=on_event,
+            )
+        return ok, commit_detail
 
     repair = await run_oracle_repair_agent(
         packet,
@@ -5834,14 +5859,20 @@ async def _process_children(
                 continue
 
             if blocking_messages:
+                architect_result = child_results.get(architect_tid) or LeadResult(
+                    task_id=architect_tid,
+                    verdict=str(architect_task.get("verdict") or "partial"),
+                )
                 repair = await _run_scaffold_repair_packet(
                     project_dir=project_dir,
                     architect_tid=architect_tid,
                     architect_task=architect_task,
                     latest_result=scaffold_result,
+                    result=architect_result,
                     config=config,
                     on_event=on_event,
                 )
+                child_results[architect_tid] = architect_result
                 if repair.verdict != "pass":
                     reason = (
                         "Scaffold oracle repair did not pass: "
@@ -7627,16 +7658,13 @@ async def _repair_stale_target_and_retry_merge(
             stale_feedback=stale_feedback,
         )
         return record_terminal(reason=reason, structured_reason=feedback)
-    feedback = _foundation_contract_write_feedback(
+    stale_target_contract_violation = _foundation_contract_write_feedback(
         project_dir=project_dir,
         acting_task_id=child_task_id,
         parent_integration_branch=parent_integration_branch,
         changed_paths=_git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
         operation="stale_target_retry_merge_delta",
     )
-    if feedback is not None:
-        reason = _foundation_contract_write_block_detail(feedback)
-        return record_terminal(reason=reason, structured_reason=feedback)
     try:
         ok, merge_detail = merge_child_into_integration(
             project_dir=project_dir,
@@ -7710,6 +7738,16 @@ async def _repair_stale_target_and_retry_merge(
                 "Child merge conflict repair smoke oracle crashed: "
                 f"{type(exc).__name__}: {exc}"
             )
+
+    if ok and stale_target_contract_violation is not None:
+        _record_foundation_contract_write_annotation(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            feedback=stale_target_contract_violation,
+            phase="stale_target_retry_annotation",
+            on_event=on_event,
+        )
 
     if not ok:
         reason = (
@@ -7883,6 +7921,7 @@ async def _merge_child_branch(
                 child_worktree=child_worktree,
                 child_session_dir=child_session_dir,
                 parent_integration_branch=parent_integration_branch,
+                result=result,
                 config=config,
                 original_detail=detail,
                 on_event=on_event,
@@ -8699,6 +8738,7 @@ async def _repair_child_merge_conflict_once(
     child_worktree: Path,
     child_session_dir: Path,
     parent_integration_branch: str,
+    result: LeadResult,
     config: dict[str, Any],
     original_detail: str,
     on_event: Any = None,
@@ -8814,12 +8854,19 @@ async def _repair_child_merge_conflict_once(
             changed_paths=_git_diff_name_only(child_worktree),
             operation="merge_conflict_repair_commit",
         )
-        if feedback is not None:
-            return False, _foundation_contract_write_block_detail(feedback)
-        return commit_worktree(
+        ok, commit_detail = commit_worktree(
             worktree_path=child_worktree,
             message=f"v5 merge conflict repair: {child_task_id}",
         )
+        if ok and feedback is not None:
+            _record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                feedback=feedback,
+                on_event=on_event,
+            )
+        return ok, commit_detail
 
     repair = await run_oracle_repair_agent(
         packet,
@@ -9986,6 +10033,7 @@ def _reconcile_recovered_children(
             # update the verdict — preserve the honest merge_blocked.
             continue
         # Ancestor confirmed: integration agent merged it.
+        clear_blocker_metadata(project_dir, cid)
         set_verdict(project_dir, cid, "pass", cost_usd=float(child.get("cost_usd", 0.0)))
         reconciled += 1
         logger.info(

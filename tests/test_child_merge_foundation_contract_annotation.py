@@ -23,6 +23,10 @@ def _merge_child_branch_src() -> str:
     return inspect.getsource(v5_runner._merge_child_branch)
 
 
+def _runner_src() -> str:
+    return inspect.getsource(v5_runner)
+
+
 def test_all_five_gates_exist_and_invoke_helper() -> None:
     """The function has 5 foundation_contract_write_feedback callers (one
     per integration phase). If a new one is added, this test fails loudly
@@ -34,6 +38,35 @@ def test_all_five_gates_exist_and_invoke_helper() -> None:
         "integration-union-repair). If a new gate was added or one removed, "
         "update this test and verify no-refusal coverage."
     )
+
+
+def test_all_foundation_write_gate_callers_are_annotation_only() -> None:
+    """Every foundation contract write gate in v5_runner must be
+    LAND-then-annotate. This ratchets the whole module, not only
+    `_merge_child_branch`."""
+    src = _runner_src()
+    assert src.count("_foundation_contract_write_feedback(") == 14, (
+        "v5_runner should have the helper definition plus 13 call sites. "
+        "If this count changes, update this test and verify every caller "
+        "commits or merges before recording foundation_contract_write_gate."
+    )
+    forbidden = [
+        "return False, _foundation_contract_write_block_detail(feedback)",
+        "detail = _foundation_contract_write_block_detail(feedback)\n"
+        "        _emit(on_event, {\n"
+        '            "event": "integration_commit_failed"',
+        "detail = _foundation_contract_write_block_detail(feedback)\n"
+        "        _emit(on_event, {\n"
+        '            "event": "inline_commit_failed"',
+        'origin="foundation_contract_write_gate",\n'
+        "            structured_reason=feedback,\n"
+        "        )\n"
+        "        return",
+    ]
+    for pattern in forbidden:
+        assert pattern not in src
+    assert '"post_commit_annotation"' in src
+    assert "_record_foundation_contract_write_annotation(" in src
 
 
 def test_no_gate_uses_legacy_block_detail_refusal_pattern() -> None:

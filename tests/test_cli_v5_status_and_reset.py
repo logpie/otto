@@ -6,10 +6,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
-
-import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -74,24 +71,22 @@ def _seed_project(tmp_path: Path) -> Path:
                 "parent_task_id": "root",
                 "intent": "Issues & Labels",
                 "verdict": "merge_blocked",
-                "metadata": {
-                    "merge_blocked_origin": "verification",
-                    "merge_blocked_reason": "child verify oracle did not pass",
-                },
+                "merge_blocked_origin": "verification",
+                "merge_blocked_reason": "child verify oracle did not pass",
             },
             "v5-block2": {
                 "id": "v5-block2",
                 "parent_task_id": "root",
                 "intent": "Cycles & Notifications",
                 "verdict": "merge_blocked",
-                "metadata": {"merge_blocked_origin": "verification"},
+                "merge_blocked_origin": "verification",
             },
             "v5-block3": {
                 "id": "v5-block3",
                 "parent_task_id": "root",
                 "intent": "Search & Webhooks",
                 "verdict": "merge_blocked",
-                "metadata": {"merge_blocked_origin": "verification"},
+                "merge_blocked_origin": "verification",
             },
         },
     }
@@ -133,6 +128,21 @@ def test_status_verbose_shows_metadata(tmp_path: Path) -> None:
     # Verbose mode surfaces structured failure reasons per child.
     assert "merge_blocked_origin: verification" in r.stdout
     assert "child verify oracle did not pass" in r.stdout
+
+
+def test_status_verbose_prefers_top_level_metadata(tmp_path: Path) -> None:
+    proj = _seed_project(tmp_path)
+    graph_path = proj / "otto_logs" / "cross-sessions" / "task_graph.json"
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    graph["tasks"]["v5-block1"]["metadata"] = {
+        "merge_blocked_origin": "legacy-nested"
+    }
+    graph_path.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+
+    r = _otto("status", "--verbose", cwd=proj)
+    assert r.returncode == 0
+    assert "merge_blocked_origin: verification" in r.stdout
+    assert "legacy-nested" not in r.stdout
 
 
 def test_status_no_graph_message(tmp_path: Path) -> None:
@@ -179,6 +189,8 @@ def test_reset_verdict_actually_writes(tmp_path: Path) -> None:
     graph_path = proj / "otto_logs" / "cross-sessions" / "task_graph.json"
     graph_after = json.loads(graph_path.read_text(encoding="utf-8"))
     assert graph_after["tasks"]["v5-block1"]["verdict"] == "unverified"
+    assert graph_after["tasks"]["v5-block1"].get("merge_blocked_reason") is None
+    assert graph_after["tasks"]["v5-block1"].get("merge_blocked_origin") is None
     # Other tasks untouched.
     assert graph_after["tasks"]["v5-block2"]["verdict"] == "merge_blocked"
     assert graph_after["tasks"]["v5-pass1"]["verdict"] == "pass"

@@ -9,22 +9,20 @@ iTracker validation that follows Phase 0+1 shipping.
 from __future__ import annotations
 
 import json
+import fcntl
 import os
+import socket
 import subprocess
+import time
 from pathlib import Path
 
-import pytest
-
-from otto.queue.subtask import rewrite_pending_for_retry, read_pending
+from otto.queue.subtask import rewrite_pending_for_retry, read_pending, take_ready
 from otto.queue.task_graph import (
     clear_task_for_retry,
-    entry_is_satisfactory_terminal,
     get_task,
-    read_graph,
+    mark_retry_in_progress,
 )
 from otto.v5_retry import (
-    RetryPlan,
-    ValidationFailure,
     execute_plan,
     validate_and_plan,
 )
@@ -81,6 +79,29 @@ def _make_session_for_task(project_dir: Path, task_id: str, worktree: Path) -> P
     sdir.mkdir()
     (sdir / "worktree").symlink_to(str(worktree))
     return sdir
+
+
+def _make_summary_session(project_dir: Path, task_id: str) -> Path:
+    sessions = project_dir / "otto_logs" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    sdir = sessions / f"2026-05-20-010000-{task_id[-6:]}"
+    sdir.mkdir()
+    spec_dir = sdir / "spec"
+    spec_dir.mkdir()
+    (spec_dir / "spec.json").write_text("{}", encoding="utf-8")
+    (sdir / "summary.json").write_text(
+        json.dumps({"task_id": task_id}), encoding="utf-8"
+    )
+    return sdir
+
+
+def _retry_owner(pid: int | None = None, started_at: str | None = None) -> dict:
+    return {
+        "pid": os.getpid() if pid is None else pid,
+        "host": socket.gethostname(),
+        "started_at": started_at
+        or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
 
 
 # --- entry_is_satisfactory_terminal stays correct ---------------------
@@ -184,14 +205,56 @@ def test_read_pending_excludes_superseded(tmp_path: Path):
 
 
 def test_rewrite_pending_for_retry_handles_missing_entry(tmp_path: Path):
-    """If a task_id has no pending entry, the rewrite reports it in
-    `missing` and does NOT synthesize (caller responsibility)."""
+    """If a task_id has no pending entry, synthesize a runnable entry
+    from the task graph so retry-children does not reset an
+    undispatchable task."""
+    _init_git_repo(tmp_path)
+    _seed_graph(tmp_path, {
+        "v5-missing": {
+            "id": "v5-missing",
+            "parent_task_id": "root",
+            "intent": "Retry me",
+            "verdict": None,
+            "integration_branch": "i2p/root/integration",
+            "depends_on": ["v5-dep"],
+            "owned_paths": ["app.py"],
+            "action_ids": ["act-1"],
+            "task_role": "feature",
+            "retry_count": 2,
+        }
+    })
+    parent_session = _make_summary_session(tmp_path, "root")
+    pending_path = tmp_path / "otto_logs" / "cross-sessions" / "v5_pending.jsonl"
+    pending_path.parent.mkdir(parents=True, exist_ok=True)
+    pending_path.write_text("", encoding="utf-8")
+    summary = rewrite_pending_for_retry(tmp_path, ["v5-missing"])
+    assert summary["rewritten"] == []
+    assert summary["synthesized"] == ["v5-missing"]
+    assert summary["missing"] == []
+    [entry] = read_pending(tmp_path)
+    assert entry["task_id"] == "v5-missing"
+    assert entry["parent_task_id"] == "root"
+    assert entry["parent_session_dir"] == str(parent_session)
+    assert entry["intent"] == "Retry me"
+    assert entry["depends_on"] == ["v5-dep"]
+    assert entry["owned_paths"] == ["app.py"]
+    assert entry["integration_branch"] == "i2p/root/integration"
+    assert entry["review_state"] == "approved"
+    assert entry["retry_reason"] == "cli_retry_children"
+    assert entry["retry_count"] == 2
+    assert entry["synthesized_for_retry"] is True
+
+
+def test_rewrite_pending_for_retry_reports_unsynthesizable_missing_entry(
+    tmp_path: Path,
+):
     _init_git_repo(tmp_path)
     pending_path = tmp_path / "otto_logs" / "cross-sessions" / "v5_pending.jsonl"
     pending_path.parent.mkdir(parents=True, exist_ok=True)
     pending_path.write_text("", encoding="utf-8")
     summary = rewrite_pending_for_retry(tmp_path, ["v5-nonexistent"])
     assert summary["rewritten"] == []
+    assert summary["synthesized"] == []
     assert summary["missing"] == ["v5-nonexistent"]
 
 
@@ -346,6 +409,145 @@ def test_validate_refuses_without_cascade_when_dependents_stale(tmp_path: Path):
     )
 
 
+def test_validate_cascade_dependents_is_recursive(tmp_path: Path):
+    """A→B→C with --cascade-dependents must include both B and C."""
+    _init_git_repo(tmp_path)
+    _seed_graph(tmp_path, {
+        "v5-A": {
+            "id": "v5-A",
+            "verdict": "merge_blocked",
+        },
+        "v5-B": {
+            "id": "v5-B",
+            "verdict": "pass",
+            "depends_on": ["v5-A"],
+        },
+        "v5-C": {
+            "id": "v5-C",
+            "verdict": "pass",
+            "depends_on": ["v5-B"],
+        },
+    })
+    for tid in ("v5-A", "v5-B", "v5-C"):
+        branch = f"i2p/build/{tid}"
+        _make_branch(tmp_path, branch)
+        wt = _make_worktree(tmp_path, tid, branch)
+        _make_session_for_task(tmp_path, tid, wt)
+
+    plan = validate_and_plan(
+        project_dir=tmp_path,
+        task_ids=["v5-A"],
+        cascade_dependents=True,
+        allow_continue_dirty=False,
+        force_pass=False,
+    )
+    assert plan.ok, [f.reason for f in plan.failures]
+    assert plan.targets == ["v5-A"]
+    assert plan.cascaded == ["v5-B", "v5-C"]
+    assert plan.all_tasks == ["v5-A", "v5-B", "v5-C"]
+
+
+def test_validate_cascade_dependents_detects_cycles(tmp_path: Path):
+    """A->B->C->B must report a validation failure, not recurse forever."""
+    _init_git_repo(tmp_path)
+    _seed_graph(tmp_path, {
+        "v5-A": {
+            "id": "v5-A",
+            "verdict": "merge_blocked",
+        },
+        "v5-B": {
+            "id": "v5-B",
+            "verdict": "pass",
+            "depends_on": ["v5-A", "v5-C"],
+        },
+        "v5-C": {
+            "id": "v5-C",
+            "verdict": "pass",
+            "depends_on": ["v5-B"],
+        },
+    })
+    for tid in ("v5-A", "v5-B", "v5-C"):
+        branch = f"i2p/build/{tid}"
+        _make_branch(tmp_path, branch)
+        wt = _make_worktree(tmp_path, tid, branch)
+        _make_session_for_task(tmp_path, tid, wt)
+
+    plan = validate_and_plan(
+        project_dir=tmp_path,
+        task_ids=["v5-A"],
+        cascade_dependents=True,
+        allow_continue_dirty=False,
+        force_pass=False,
+    )
+    assert not plan.ok
+    assert any(
+        f.task_id == "(dependency-cycle)"
+        and "v5-B -> v5-C -> v5-B" in f.reason
+        for f in plan.failures
+    )
+
+
+def test_take_ready_skips_retry_in_progress_tasks(tmp_path: Path):
+    _init_git_repo(tmp_path)
+    _seed_graph(tmp_path, {
+        "v5-x": {
+            "id": "v5-x",
+            "verdict": None,
+            "retry_in_progress": {"owner": _retry_owner()},
+        },
+    })
+    pending_path = tmp_path / "otto_logs" / "cross-sessions" / "v5_pending.jsonl"
+    pending_path.parent.mkdir(parents=True, exist_ok=True)
+    pending_path.write_text(
+        json.dumps({
+            "task_id": "v5-x",
+            "intent": "Retry me",
+            "review_state": "approved",
+            "depends_on": [],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    assert take_ready(
+        tmp_path,
+        completed_task_ids=set(),
+        in_flight_task_ids=set(),
+    ) == []
+
+
+def test_stale_retry_in_progress_recovers(tmp_path: Path):
+    _init_git_repo(tmp_path)
+    _seed_graph(tmp_path, {
+        "v5-x": {
+            "id": "v5-x",
+            "verdict": None,
+            "retry_in_progress": {
+                "owner": _retry_owner(
+                    pid=99999999,
+                    started_at="1970-01-01T00:00:00Z",
+                )
+            },
+        },
+    })
+    pending_path = tmp_path / "otto_logs" / "cross-sessions" / "v5_pending.jsonl"
+    pending_path.parent.mkdir(parents=True, exist_ok=True)
+    pending_path.write_text(
+        json.dumps({
+            "task_id": "v5-x",
+            "intent": "Retry me",
+            "review_state": "approved",
+            "depends_on": [],
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    ready = take_ready(
+        tmp_path,
+        completed_task_ids=set(),
+        in_flight_task_ids=set(),
+    )
+    assert [entry["task_id"] for entry in ready] == ["v5-x"]
+
+
 # --- execute_plan: full transaction --------------------------------
 
 
@@ -405,3 +607,134 @@ def test_execute_plan_archives_session_and_resets_graph(tmp_path: Path):
     assert out[0]["task_id"] == "v5-x"
     assert out[0]["verdict"] is None
     assert out[0]["review_state"] == "approved"
+
+
+def test_execute_plan_synthesizes_missing_pending_entry(tmp_path: Path):
+    """A graph reset without an existing pending JSONL entry must still
+    leave a dispatchable task."""
+    _init_git_repo(tmp_path)
+    _seed_graph(tmp_path, {
+        "root": {
+            "id": "root",
+            "verdict": "pending_children",
+        },
+        "v5-x": {
+            "id": "v5-x",
+            "parent_task_id": "root",
+            "intent": "Retry missing pending",
+            "verdict": "merge_blocked",
+            "integration_branch": "i2p/root/integration",
+            "merge_blocked_reason": "fake",
+        },
+    })
+    _make_summary_session(tmp_path, "root")
+    branch = "i2p/build/v5-x"
+    _make_branch(tmp_path, branch)
+    wt = _make_worktree(tmp_path, "v5-x", branch)
+    _make_session_for_task(tmp_path, "v5-x", wt)
+
+    plan = validate_and_plan(
+        project_dir=tmp_path,
+        task_ids=["v5-x"],
+        cascade_dependents=False,
+        allow_continue_dirty=False,
+        force_pass=False,
+    )
+    assert plan.ok, [f.reason for f in plan.failures]
+    result = execute_plan(project_dir=tmp_path, plan=plan)
+    assert result.error is None, result.error
+    assert result.pending_summary["rewritten"] == []
+    assert result.pending_summary["synthesized"] == ["v5-x"]
+    assert result.pending_summary["missing"] == []
+
+    [entry] = read_pending(tmp_path)
+    assert entry["task_id"] == "v5-x"
+    assert entry["intent"] == "Retry missing pending"
+    assert entry["review_state"] == "approved"
+    assert entry["synthesized_for_retry"] is True
+    ready = take_ready(
+        tmp_path,
+        completed_task_ids=set(),
+        in_flight_task_ids=set(),
+    )
+    assert [item["task_id"] for item in ready] == ["v5-x"]
+
+
+def test_execute_plan_revalidates_cascaded_tasks_under_lock(tmp_path: Path):
+    _init_git_repo(tmp_path)
+    _seed_graph(tmp_path, {
+        "v5-A": {
+            "id": "v5-A",
+            "verdict": "merge_blocked",
+        },
+        "v5-B": {
+            "id": "v5-B",
+            "verdict": "pass",
+            "depends_on": ["v5-A"],
+        },
+    })
+    for tid in ("v5-A", "v5-B"):
+        branch = f"i2p/build/{tid}"
+        _make_branch(tmp_path, branch)
+        wt = _make_worktree(tmp_path, tid, branch)
+        _make_session_for_task(tmp_path, tid, wt)
+
+    plan = validate_and_plan(
+        project_dir=tmp_path,
+        task_ids=["v5-A"],
+        cascade_dependents=True,
+        allow_continue_dirty=False,
+        force_pass=False,
+    )
+    assert plan.ok, [f.reason for f in plan.failures]
+    assert plan.all_tasks == ["v5-A", "v5-B"]
+
+    (plan.worktrees["v5-B"] / "dirty.txt").write_text("dirty", encoding="utf-8")
+    result = execute_plan(project_dir=tmp_path, plan=plan)
+    assert result.error is not None
+    assert "v5-B" in result.error
+    assert get_task(tmp_path, "v5-A")["verdict"] == "merge_blocked"
+    assert get_task(tmp_path, "v5-B")["verdict"] == "pass"
+    assert get_task(tmp_path, "v5-A").get("retry_in_progress") is False
+    assert get_task(tmp_path, "v5-B").get("retry_in_progress") is False
+
+
+def test_lock_contention_preserves_existing_retry_owner(tmp_path: Path):
+    _init_git_repo(tmp_path)
+    _seed_graph(tmp_path, {
+        "v5-x": {
+            "id": "v5-x",
+            "verdict": "merge_blocked",
+        },
+    })
+    branch = "i2p/build/v5-x"
+    _make_branch(tmp_path, branch)
+    wt = _make_worktree(tmp_path, "v5-x", branch)
+    _make_session_for_task(tmp_path, "v5-x", wt)
+
+    plan = validate_and_plan(
+        project_dir=tmp_path,
+        task_ids=["v5-x"],
+        cascade_dependents=False,
+        allow_continue_dirty=False,
+        force_pass=False,
+    )
+    assert plan.ok, [f.reason for f in plan.failures]
+
+    first_owner = _retry_owner()
+    mark_retry_in_progress(tmp_path, ["v5-x"], True, owner=first_owner)
+    lock_path = tmp_path / "otto_logs" / ".locks" / "retry-children.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = execute_plan(project_dir=tmp_path, plan=plan)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    assert result.error is not None
+    assert "could not acquire retry-children lock" in result.error
+    assert get_task(tmp_path, "v5-x").get("retry_in_progress") == {
+        "owner": first_owner
+    }
