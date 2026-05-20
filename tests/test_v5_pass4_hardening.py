@@ -7,19 +7,7 @@ from typing import Any
 
 import pytest
 
-from otto.audit import (
-    AuditAgentInput,
-    AuditAgentOutput,
-    AuditBudget,
-    AuditVerdict,
-    WalkthroughResult,
-    default_walkthrough_from_spec,
-    run_audit,
-)
-from otto.build import BuildResult
-from otto.checks import run_check
 from otto.lead import LeadResult
-from otto.merge_queue import MergeQueueResult
 from otto.queue.subtask import enqueue_subtask, take_ready
 from otto.queue.task_graph import (
     get_task,
@@ -27,17 +15,7 @@ from otto.queue.task_graph import (
     record_task,
     set_verdict,
 )
-from otto.spec_compile import Group, RepoTestCheck, Spec, StructureDecisions
-from otto.v5_runner import _build_decomp_runtime_context, _run_child
-
-
-def _web_spec() -> Spec:
-    return Spec(
-        intent="webapp",
-        project_kind="webapp",
-        structure=StructureDecisions(payload={}),
-        groups=[Group(id="ui", name="UI", dependencies=[], owned_paths=[], feature_ids=[])],
-    )
+from otto.v5_runner import _run_child
 
 
 def test_non_pass_upstream_is_non_runnable_but_not_dependency_satisfied(
@@ -127,63 +105,6 @@ def test_runtime_context_keeps_failed_dependency_out_of_ready_wave(tmp_path: Pat
     assert context["queue_state"]["waiting_on_deps"] == 1
 
 
-def test_synthesized_webapp_walkthrough_no_shape_is_not_success(tmp_path: Path) -> None:
-    callable_ = default_walkthrough_from_spec(_web_spec())
-
-    result = callable_(tmp_path, tmp_path / "walk", 60)
-
-    assert result.succeeded is False
-    assert result.artifacts
-    assert "no runnable webapp shape" in result.detail
-
-
-def test_run_audit_caps_pass_when_configured_walkthrough_fails(tmp_path: Path) -> None:
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-
-    def failed_walkthrough(_project_dir: Path, log_dir: Path, _timeout_s: int) -> WalkthroughResult:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "walkthrough.log"
-        log_path.write_text("no artifact\n", encoding="utf-8")
-        return WalkthroughResult(
-            succeeded=False,
-            detail="configured walkthrough produced no product artifact",
-            artifacts=[log_path],
-        )
-
-    async def passing_agent(input_: AuditAgentInput) -> AuditAgentOutput:
-        assert input_.walkthrough_succeeded is False
-        assert "no product artifact" in input_.walkthrough_detail
-        return AuditAgentOutput(verdict=AuditVerdict.PASSED, narrative="agent passed")
-
-    result = asyncio.run(
-        run_audit(
-            _web_spec(),
-            project_dir=tmp_path,
-            session_dir=session_dir,
-            build_result=BuildResult(spec_session_dir=session_dir),
-            merge_result=MergeQueueResult(),
-            audit_agent=passing_agent,
-            walkthrough=failed_walkthrough,
-            budget=AuditBudget(audit_retries=0),
-        )
-    )
-
-    assert result.verdict == AuditVerdict.PARTIAL
-    assert any("walkthrough oracle failed" in reason for reason in result.verdict_cap_reasons)
-
-
-def test_malformed_check_is_non_blocking_but_not_proof(tmp_path: Path) -> None:
-    evidence = run_check(RepoTestCheck(command=(), timeout_s=10), project_dir=tmp_path)
-
-    assert evidence.passed is True
-    assert evidence.raw["malformed"] is True
-    assert evidence.raw["malformed_check"] is True
-    assert evidence.raw["evidence_quality"] == "malformed"
-    assert evidence.raw["proof_usable"] is False
-
-
-@pytest.mark.asyncio
 async def test_child_worktree_setup_failure_blocks_before_lead_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

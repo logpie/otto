@@ -9,15 +9,8 @@ from typing import Any
 import pytest
 
 from otto import v5_runner
-from otto.audit_loop import (
-    FailingFeature,
-    RepairAttempt,
-    features_to_repair,
-    repair_failing_features,
-)
-from otto.build import BuildAgentInput, BuildAgentOutput, GroupStatus, run_build
+from otto import v5_runner
 from otto.lead import LeadResult
-from otto.spec_compile import Feature, Group, RepoTestCheck, Spec
 from otto.v5_clean_verify import CleanOracleIssue, CleanOracleResult, CleanOracleStepResult, Scope
 from otto.v5_context_slicer import ChildScope, write_context_slice_for_child
 from otto.v5_preflight import check_scaffold_compiles
@@ -57,25 +50,6 @@ def _passing_payload() -> dict[str, Any]:
     return {"check": "smoke_clean_deploy", "passed": True, "issues": []}
 
 
-def _spec_by_group(feature_to_group: dict[str, str]) -> Spec:
-    groups = [
-        Group(id=group_id, name=group_id.title())
-        for group_id in dict.fromkeys(feature_to_group.values())
-    ]
-    return Spec(
-        intent="x",
-        groups=groups,
-        features=[
-            Feature(id=feature_id, name=feature_id, group_id=group_id)
-            for feature_id, group_id in feature_to_group.items()
-        ],
-    )
-
-
-def _verdict(feature_id: str, verdict: str = "partial") -> dict[str, Any]:
-    return {"feature_id": feature_id, "verdict": verdict, "detail": "broken"}
-
-
 def _ia_spec() -> dict[str, Any]:
     return {
         "schema_version": 3,
@@ -100,10 +74,6 @@ def _charter() -> str:
         + json.dumps({"action_surfaces": [{"id": "issue.create"}]})
         + "\n```\n"
     )
-
-
-def _passing_check() -> RepoTestCheck:
-    return RepoTestCheck(command=("python", "-c", "print('ok')"), timeout_s=10)
 
 
 def _clean_oracle_result(
@@ -354,63 +324,6 @@ async def test_child_merge_conflict_dispatches_agent_then_gates_on_smoke(
     assert _git(repo, "show", f"{parent_branch}:shared.txt").stdout == "parent\nchild\n"
 
 
-def test_audit_selection_gives_each_failing_group_first_attempt_before_cap() -> None:
-    spec = _spec_by_group({"f1": "g1", "f2": "g2", "f3": "g3"})
-
-    selected = features_to_repair(
-        spec,
-        [_verdict("f1"), _verdict("f2"), _verdict("f3")],
-        max_attempts_per_run=1,
-    )
-
-    assert [feature.feature_id for feature in selected] == ["f1", "f2", "f3"]
-
-
-def test_audit_loop_reserves_reaudit_budget_for_first_fix() -> None:
-    spec = _spec_by_group({"f1": "g1"})
-    fix_calls: list[str] = []
-    audit_calls: list[list[str]] = []
-
-    async def fix_agent(failing: FailingFeature, group: Group) -> RepairAttempt:
-        fix_calls.append(f"{group.id}:{failing.feature_id}")
-        return RepairAttempt(
-            feature_id=failing.feature_id,
-            group_id=group.id,
-            attempt_number=1,
-            succeeded=True,
-        )
-
-    async def re_audit(feature_ids: list[str]) -> list[dict[str, Any]]:
-        audit_calls.append(list(feature_ids))
-        return [_verdict(feature_id, "passed") for feature_id in feature_ids]
-
-    result = asyncio.run(
-        repair_failing_features(
-            spec=spec,
-            feature_verdicts=[_verdict("f1")],
-            fix_agent=fix_agent,
-            re_audit=re_audit,
-            max_audit_passes=1,
-            audit_passes_so_far=1,
-        )
-    )
-
-    assert fix_calls == ["g1:f1"]
-    assert audit_calls == [["f1"]]
-    assert result.audit_passes_run == 2
-
-
-def test_audit_loop_raises_on_orphan_failing_feature() -> None:
-    spec = Spec(
-        intent="x",
-        groups=[Group(id="g", name="G")],
-        features=[Feature(id="orphan", name="orphan", group_id="")],
-    )
-
-    with pytest.raises(ValueError, match="without repair group"):
-        features_to_repair(spec, [_verdict("orphan")], max_attempts_per_run=10)
-
-
 def test_context_slice_resolver_replaces_ambiguous_full_fallback(tmp_path: Path) -> None:
     parent = tmp_path / "parent"
     child = tmp_path / "child"
@@ -510,47 +423,3 @@ async def test_context_scope_resolution_agent_returns_resolved_scope(
     assert events[-1]["event"] == "context_scope_resolution_agent_done"
     assert events[-1]["ok"] is True
 
-
-def test_out_of_scope_write_blocks_until_amended_or_reverted(tmp_path: Path) -> None:
-    _init_repo(tmp_path)
-    (tmp_path / "peer.txt").write_text("baseline\n", encoding="utf-8")
-    _git(tmp_path, "add", "peer.txt")
-    _git(tmp_path, "commit", "-q", "-m", "peer baseline")
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    attempts = 0
-
-    async def overreaching_agent(agent_input: BuildAgentInput) -> BuildAgentOutput:
-        nonlocal attempts
-        attempts += 1
-        (agent_input.worktree / "owned.txt").write_text("owned\n", encoding="utf-8")
-        (agent_input.worktree / "peer.txt").write_text(f"tampered {attempts}\n", encoding="utf-8")
-        return BuildAgentOutput(succeeded=True)
-
-    spec = Spec(
-        intent="x",
-        groups=[
-            Group(
-                id="leaf",
-                name="Leaf",
-                owned_paths=["owned.txt"],
-                checks=[_passing_check()],
-            ),
-            Group(id="peer", name="Peer", owned_paths=["peer.txt"], checks=[]),
-        ],
-    )
-
-    result = asyncio.run(
-        run_build(
-            spec,
-            project_dir=tmp_path,
-            session_dir=session_dir,
-            build_agent=overreaching_agent,
-        )
-    )
-    leaf = next(group for group in result.group_results if group.group_id == "leaf")
-
-    assert leaf.status == GroupStatus.FAILED_SCOPE
-    assert "peer.txt" in leaf.scope_warnings
-    assert "scope violation" in leaf.failure_narrative
-    assert attempts >= 1

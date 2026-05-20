@@ -33,35 +33,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
 from typing import Any
 
-from otto.audit import AuditResult, AuditVerdict, GroupVerdict
-from otto.build import BuildResult, GroupResult, GroupStatus
-from otto.checks import Evidence
-from otto.merge_queue import MergeQueueResult, MergeResult, MergeStatus
-from otto.spec_compile import (
-    Feature,
-    FeatureProofBlock,
-    Finding,
-    Group,
-    Spec,
-    WalkthroughEntry,
-    build_feature_proof_blocks,
-    feature_proof_block_to_html,
-    feature_proof_blocks_to_dicts,
-    spec_to_dict,
-)
-from otto.token_usage import (
-    format_token_spend,
-    message_file_breakdown_from_messages,
-    phase_breakdown_from_messages,
-    total_token_usage_from_phases,
-)
+from otto.token_usage import format_token_spend
 
 logger = logging.getLogger("otto.render")
 
@@ -147,220 +124,6 @@ def _path_to_str(p: Path | str) -> str:
     return str(p)
 
 
-def _evidence_to_dict(check_kind: str, evidence: Evidence) -> dict[str, Any]:
-    return {
-        "kind": check_kind,
-        "passed": evidence.passed,
-        "detail": evidence.detail,
-        "duration_s": evidence.duration_s,
-        "started_at": evidence.started_at,
-        "artifacts": [_path_to_str(p) for p in evidence.artifacts],
-        "raw": _safe_truncate(evidence.raw, 4096),
-    }
-
-
-def _safe_truncate(value: Any, max_chars: int) -> Any:
-    """Truncate string values inside a dict for JSON safety."""
-    if isinstance(value, str) and len(value) > max_chars:
-        return value[:max_chars] + "...[truncated]"
-    if isinstance(value, dict):
-        return {k: _safe_truncate(v, max_chars) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_safe_truncate(v, max_chars) for v in value]
-    return value
-
-
-def compose_proof_packet(
-    spec: Spec,
-    build_result: BuildResult,
-    merge_result: MergeQueueResult,
-    audit_result: AuditResult,
-    *,
-    wall_s: float,
-    cost_usd: float,
-    session_dir: Path | None = None,
-) -> ProofPacket:
-    """Build a ProofPacket from the four pipeline outputs."""
-    audit_by_group: dict[str, GroupVerdict] = {
-        v.group_id: v for v in audit_result.group_verdicts
-    }
-    merge_by_group: dict[str, MergeResult] = {
-        r.group_id: r for r in merge_result.results
-    }
-    build_by_group: dict[str, GroupResult] = {
-        r.group_id: r for r in build_result.group_results
-    }
-    product_passed = audit_result.verdict == AuditVerdict.PASSED
-
-    group_packets: list[GroupPacket] = []
-    for s in spec.groups:
-        bres = build_by_group.get(s.id)
-        mres = merge_by_group.get(s.id)
-        averdict = audit_by_group.get(s.id)
-
-        check_evidence: list[dict[str, Any]] = []
-        # Prefer merge-time evidence (most recent) over build-time, but
-        # fall back to build-time if merge didn't run for this slice.
-        evidence_source = mres.group_recheck_evidence if mres else (bres.last_evidence if bres else [])
-        for c, ev in zip(s.checks, evidence_source, strict=False):
-            kind = type(c).__name__
-            check_evidence.append(_evidence_to_dict(kind, ev))
-
-        landed = bool(mres and mres.status == MergeStatus.LANDED)
-        if landed:
-            group_status = "landed"
-        elif mres and mres.status == MergeStatus.REDUNDANT:
-            group_status = "redundant"
-        elif product_passed:
-            # Layer 2 repairs can fix the integrated product after an earlier
-            # group build/merge blocker. Final proof should not carry stale blockers.
-            group_status = "passing"
-        elif bres and bres.status == GroupStatus.PASSING:
-            group_status = "passing"  # passed build but did not land
-        elif bres:
-            group_status = bres.status.value
-        else:
-            group_status = "pending"
-
-        failure = ""
-        if product_passed:
-            failure = ""
-        elif mres and mres.status == MergeStatus.BLOCKED:
-            failure = mres.failure_narrative
-        elif mres and mres.status == MergeStatus.REDUNDANT:
-            failure = (
-                mres.failure_narrative
-                or "No product diff landed; dependency was satisfied by already-integrated work."
-            )
-        elif bres and bres.status in (
-            GroupStatus.BLOCKED,
-            GroupStatus.FAILED_SCOPE,
-            GroupStatus.DEGRADED,
-        ):
-            failure = bres.failure_narrative
-
-        group_packets.append(
-            GroupPacket(
-                group_id=s.id,
-                name=s.name,
-                status=group_status,
-                landed=landed,
-                landed_commit=mres.landed_commit if mres else "",
-                branch=bres.branch if bres else "",
-                owned_paths=list(s.owned_paths),
-                check_evidence=check_evidence,
-                audit_verdict={
-                    "passed": averdict.passed,
-                    "detail": averdict.detail,
-                } if averdict else None,
-                failure_narrative=failure,
-                repair_attempts=mres.repair_attempts if mres else 0,
-            )
-        )
-
-    # v2.2 + phase 4: amendments rendered for human review.
-    amendments_render = [
-        {
-            "tier": a.tier,
-            "actor": a.actor,
-            "reason": a.reason,
-            "ts": a.ts,
-            "trigger_event_id": a.trigger_event_id,
-            "diff_sha256_before": a.diff_sha256_before[:16] if a.diff_sha256_before else "",
-            "diff_sha256_after": a.diff_sha256_after[:16] if a.diff_sha256_after else "",
-        }
-        for a in spec.amendments
-    ]
-
-    # A0.4: render per-Feature audits as a feature checklist.
-    feature_audit_render = [
-        {
-            "feature_id": fa.feature_id,
-            "name": fa.name,
-            "status": fa.status,
-            "detail": fa.detail,
-            "evidence_refs": list(fa.evidence_refs),
-        }
-        for fa in audit_result.feature_audits
-    ]
-
-    # A3: per-Feature proof blocks (research §7). Best-effort population:
-    # we map FeatureAudit entries (by feature_id first, then name/id
-    # compatibility fallback) into the verdict-dict shape
-    # `build_feature_proof_blocks` expects. Walkthrough entries flow in from
-    # `audit_result.walkthrough_entries` (parsed during run_audit by
-    # `_validate_walkthrough_jsonl`) so per-Feature blocks carry their
-    # walkthrough trace. Empty list → helper's "no entries tagged"
-    # empty-state per research §4 honesty rule.
-    feature_verdict_dicts: list[dict[str, Any]] = []
-    if spec.features:
-        audits_by_key: dict[str, Any] = {}
-        for fa in audit_result.feature_audits:
-            if fa.feature_id:
-                audits_by_key[fa.feature_id] = fa
-            audits_by_key[fa.name] = fa
-        for feature in spec.features:
-            fa = audits_by_key.get(feature.id) or audits_by_key.get(feature.name)
-            if fa is None:
-                continue
-            feature_verdict_dicts.append({
-                "feature_id": feature.id,
-                "verdict": fa.status,
-                "detail": fa.detail,
-                "evidence_refs": list(fa.evidence_refs),
-            })
-        feature_blocks = build_feature_proof_blocks(
-            spec,
-            walkthrough_entries=list(audit_result.walkthrough_entries),
-            feature_verdicts=feature_verdict_dicts,
-        )
-        feature_dicts = feature_proof_blocks_to_dicts(feature_blocks)
-    else:
-        feature_dicts = []
-
-    phase_usage: dict[str, dict[str, Any]] = {}
-    token_usage: dict[str, int] = {}
-    agent_usage_top: list[dict[str, Any]] = []
-    if session_dir is not None:
-        phase_usage = phase_breakdown_from_messages(session_dir)
-        token_usage = total_token_usage_from_phases(phase_usage)
-        agent_usage_top = message_file_breakdown_from_messages(session_dir)[:10]
-
-    return ProofPacket(
-        schema_version=PROOF_PACKET_SCHEMA_VERSION,
-        intent=spec.intent,
-        project_kind=spec.project_kind,
-        verdict=audit_result.verdict.value,
-        wall_s=wall_s,
-        cost_usd=cost_usd,
-        structure=dict(spec.structure.payload or {}),
-        non_goals=list(spec.non_goals),
-        done_means=list(spec.done_means),
-        groups=group_packets,
-        audit_narrative=audit_result.narrative,
-        walkthrough_artifacts=[_path_to_str(p) for p in audit_result.walkthrough_artifacts],
-        blocked_group_ids=(
-            []
-            if product_passed
-            else list(merge_result.blocked_ids) + list(build_result.blocked_ids)
-        ),
-        landed_group_ids=[
-            group_id
-            for group_id in merge_result.landed_ids
-            if group_id not in set(merge_result.redundant_ids)
-        ],
-        redundant_group_ids=list(merge_result.redundant_ids),
-        amendments=amendments_render,
-        quality_score=audit_result.quality_score,
-        quality_findings=list(audit_result.quality_findings),
-        feature_audits=feature_audit_render,
-        features=feature_dicts,
-        token_usage=token_usage,
-        phase_usage=phase_usage,
-        agent_usage_top=agent_usage_top,
-    )
-
-
 # ---------------------------------------------------------------------------
 # JSON rendering
 # ---------------------------------------------------------------------------
@@ -425,9 +188,11 @@ def proof_packet_from_dict(payload: dict[str, Any]) -> ProofPacket:
     """
     if not isinstance(payload, dict):
         raise ValueError("proof-packet payload must be a JSON object")
-    raw_groups = payload.get("groups")
-    if not isinstance(raw_groups, list):
-        raw_groups = payload.get("slices") if isinstance(payload.get("slices"), list) else []
+    raw_groups: list[Any] = []
+    if isinstance(payload.get("groups"), list):
+        raw_groups = payload["groups"]
+    elif isinstance(payload.get("slices"), list):
+        raw_groups = payload["slices"]
     groups: list[GroupPacket] = []
     for raw in raw_groups:
         if not isinstance(raw, dict):
@@ -705,70 +470,18 @@ def _render_spec_summary(packet: ProofPacket) -> str:
     return "\n".join(parts)
 
 
-def _feature_block_from_dict(payload: dict[str, Any]) -> FeatureProofBlock:
-    """Reconstruct a FeatureProofBlock from its serialised dict shape.
-
-    Inverse of `feature_proof_block_to_dict`. Lets render layer hand
-    `packet.features[]` dicts back to the canonical HTML helper without
-    duplicating template logic.
-    """
-    raw_entries = payload.get("walkthrough_entries") or []
-    entries: list[WalkthroughEntry] = []
-    core_keys = {"t", "feature_ids", "action_kind", "narrative"}
-    for raw in raw_entries:
-        if not isinstance(raw, dict):
-            continue
-        extras = {k: v for k, v in raw.items() if k not in core_keys}
-        entries.append(
-            WalkthroughEntry(
-                t=str(raw.get("t") or ""),
-                feature_ids=[str(fid) for fid in (raw.get("feature_ids") or [])],
-                action_kind=str(raw.get("action_kind") or "exploration"),
-                narrative=str(raw.get("narrative") or ""),
-                extras=extras,
-            )
-        )
-    findings_raw = payload.get("findings") or []
-    findings: list[Finding] = []
-    for raw in findings_raw:
-        if not isinstance(raw, dict):
-            continue
-        findings.append(
-            Finding(
-                severity=str(raw.get("severity") or "important"),
-                text=str(raw.get("text") or ""),
-                feature_id=str(raw.get("feature_id") or ""),
-            )
-        )
-    return FeatureProofBlock(
-        feature_id=str(payload.get("feature_id") or ""),
-        name=str(payload.get("name") or ""),
-        description=str(payload.get("description") or ""),
-        group_id=str(payload.get("group_id") or ""),
-        verdict=payload.get("verdict"),
-        detail=str(payload.get("detail") or ""),
-        walkthrough_entries=entries,
-        shared_with=[str(s) for s in (payload.get("shared_with") or [])],
-        evidence_completeness=str(payload.get("evidence_completeness") or "full"),
-        coverage_confidence=str(payload.get("coverage_confidence") or "high"),
-        check_evidence_refs=[str(r) for r in (payload.get("check_evidence_refs") or [])],
-        files_changed=[str(f) for f in (payload.get("files_changed") or [])],
-        repair_history=list(payload.get("repair_history") or []),
-        audit_narrative_excerpt=str(payload.get("audit_narrative_excerpt") or ""),
-        findings=findings,
-    )
-
-
 def _render_feature_section(packet: ProofPacket, *, session_dir: Path | None) -> str:
-    """Render the per-Feature proof section (A3 — research §7).
+    """Render the per-Feature proof section.
 
-    Emits one `<section>` per Feature (in spec order) by handing each
-    serialised feature-dict to `feature_proof_block_to_html`. Cross-link
-    correctness (multi-Feature entries appearing in each Feature's
-    section) is preserved by `build_feature_proof_blocks` upstream.
+    Emits one minimal `<section>` per Feature dict carried in
+    ``packet.features``. Empty `packet.features` produces "" so legacy
+    and v5 packets without per-Feature blocks render unchanged.
 
-    Empty `packet.features` produces an empty section (no header, no
-    content) so legacy packets render unchanged.
+    Stripped post-legacy-purge: previously delegated to
+    ``feature_proof_block_to_html`` in the now-deleted
+    ``otto.spec_compile`` module. The new renderer reads the dict
+    payload directly — schema is stable, no dataclass round-trip
+    needed for the read path.
     """
     if not packet.features:
         return ""
@@ -776,12 +489,22 @@ def _render_feature_section(packet: ProofPacket, *, session_dir: Path | None) ->
     for payload in packet.features:
         if not isinstance(payload, dict):
             continue
-        block = _feature_block_from_dict(payload)
-        parts.append(
-            feature_proof_block_to_html(
-                block, project_kind=packet.project_kind,
-            )
-        )
+        feature_id = escape(str(payload.get("feature_id") or ""))
+        name = escape(str(payload.get("name") or feature_id))
+        verdict_raw = payload.get("verdict")
+        verdict = escape(str(verdict_raw)) if verdict_raw else ""
+        detail = escape(str(payload.get("detail") or ""))
+        description = escape(str(payload.get("description") or ""))
+        parts.append('<section class="feature">')
+        parts.append(f"<h3>{name}")
+        if verdict:
+            parts.append(f' <span class="feature-verdict">[{verdict}]</span>')
+        parts.append("</h3>")
+        if description:
+            parts.append(f"<p>{description}</p>")
+        if detail:
+            parts.append(f"<p><em>{detail}</em></p>")
+        parts.append("</section>")
     return "\n".join(parts)
 
 
@@ -937,45 +660,9 @@ def _render_merge_state(packet: ProofPacket) -> str:
 # ---------------------------------------------------------------------------
 
 
-def write_proof_packet(
-    packet: ProofPacket,
-    session_dir: Path,
-) -> tuple[Path, Path]:
-    """Write proof-packet.html and proof-packet.json into session_dir.
-
-    Returns (html_path, json_path).
-    """
-    session_dir.mkdir(parents=True, exist_ok=True)
-    html_path = session_dir / PROOF_PACKET_HTML
-    json_path = session_dir / PROOF_PACKET_JSON
-    html = render_html(packet, session_dir=session_dir)
-    json_text = render_json(packet)
-    html_path.write_text(html, encoding="utf-8")
-    json_path.write_text(json_text, encoding="utf-8")
-    return html_path, json_path
-
-
 # ---------------------------------------------------------------------------
 # Convenience entry point
 # ---------------------------------------------------------------------------
-
-
-def render_run(
-    spec: Spec,
-    *,
-    session_dir: Path,
-    build_result: BuildResult,
-    merge_result: MergeQueueResult,
-    audit_result: AuditResult,
-    wall_s: float,
-    cost_usd: float,
-) -> tuple[Path, Path]:
-    """Compose + write both formats. Returns (html_path, json_path)."""
-    packet = compose_proof_packet(
-        spec, build_result, merge_result, audit_result,
-        wall_s=wall_s, cost_usd=cost_usd, session_dir=session_dir,
-    )
-    return write_proof_packet(packet, session_dir)
 
 
 __all__ = [
@@ -984,16 +671,9 @@ __all__ = [
     "PROOF_PACKET_SCHEMA_VERSION",
     "ProofPacket",
     "GroupPacket",
-    "compose_proof_packet",
     "load_proof_packet",
     "proof_packet_from_dict",
     "rerender_proof_packet",
     "render_html",
     "render_json",
-    "render_run",
-    "write_proof_packet",
 ]
-
-
-# Pin imports the dispatch flow needs but doesn't reference at module top level.
-_ = (Iterable, AuditVerdict, time, Group, spec_to_dict, Feature)

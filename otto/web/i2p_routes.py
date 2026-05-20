@@ -38,7 +38,6 @@ from typing import Any, Callable
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from otto.spec_compile import load_spec, spec_to_dict
 from otto.spec_state import journal_path, replay
 from otto.web.session_resolver import iter_session_dirs, resolve_session_dir
 
@@ -114,12 +113,12 @@ def install_i2p_routes(
         if not spec_path.exists():
             raise HTTPException(status_code=404, detail="not an i2p session")
         try:
-            spec = load_spec(spec_path)
-            spec_data = spec_to_dict(spec)
+            spec_data = json.loads(spec_path.read_text(encoding="utf-8"))
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"spec load failed: {exc}") from exc
 
-        group_ids = [s["id"] for s in spec_data["groups"]]
+        # v5 FlatSpec carries no `groups` field; legacy specs do. Read defensively.
+        group_ids = [s["id"] for s in (spec_data.get("groups") or []) if isinstance(s, dict) and "id" in s]
         run_state = None
         if journal_path(session_dir).exists():
             try:

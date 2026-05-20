@@ -16,8 +16,13 @@ from otto.lead import (
     _read_agent_verdict_with_rewrite,
     _verdict_failure_reason,
 )
-from otto.merge_queue import _merge_raw_log_dir
 from otto.safe_slug import safe_slug
+
+
+def _merge_raw_log_dir(session_dir: Path, group_id: str) -> Path:
+    """Inline of the former otto.merge_queue helper — runner-owned raw merge log dir."""
+    return session_dir / "merge" / safe_slug(group_id, max_len=48)
+
 from otto.v5_clean_verify import CleanOracleIssue, CleanOracleResult, CleanOracleStepResult
 from otto.v5_preflight_repair import OracleRepairResult, RepairBudget, RepairPacket, run_oracle_repair_agent
 
