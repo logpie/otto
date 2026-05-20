@@ -1681,3 +1681,40 @@ in place + safe (no regression). The behavioral activation —
 agent actually resuming its prior conversation in a new turn — is a
 focused follow-up with Codex re-enabled. The campaign-level
 invariants (keystone + A + B + 1.2-A + Phase 5 + 4) remain intact.
+
+### Phase 1.2-B BEHAVIORAL ACTIVATION SHIPPED (commit 4186dc399, 2026-05-20)
+
+User re-enabled Codex for this one piece per Option 2. Codex root-caused
+in one read (thread 019e4352, sandbox=read-only) after my 3 self-misfire
+hypotheses: my carry copied prior repair_packet.events.jsonl to the
+ACTIVE budget-replay path → _replay_budget_usage() saw wall_clock_
+exhausted from prior timestamps → budget_exhausted_reason() at
+v5_preflight_repair.py:1674 returned non-None → agent turn skipped
+before call_agent(). Plus _build_repair_packet() rebuilt without
+preserving agent_session_id (clobbered to ""). Codex applied minimal fix
+via workspace-write (thread 019e4357): archive prior events to
+prior_repair_packet.events.jsonl + preserve session_id through rebuild.
+Codex re-reviewed the committed diff (4186dc399) and signed APPROVED.
+
+**Live v3 validation (bg=beil6f7xd) — DEFINITIVE PROOF:**
+- Run duration: 2420.7s (~40 min, vs v2's 6.5s no-op — agent did real
+  work for the full turn).
+- Verdict: partial; cost $3.6103. No merge_blocked / cascade.
+- root=partial; foundation=pass; features=partial (chokepoint+A still
+  holding).
+- Agent turn-1 SPAWNED + active 40 min (was completely blocked in v1/v2).
+- 5 NEW repair commits landed during this resume:
+  - af02adb data-filter attribute for tag-filter signature
+  - 296eb88 key bookmarks by activeTagId for new DOM nodes
+  - f1a5732 active filter indicator (new DOM observable)
+  - a9a328e clear bookmarks on filter change
+  - 2210163 replace Tags select with text input
+- Product still boots: GET /api/health → {"status":"ok"}.
+- SDK conversation-continuity not visually proven this specific run
+  (source packet's agent_session_id was empty for the firing unit);
+  framework correct — future runs with non-empty session_id will resume.
+
+**BUG FAMILY 8/8 TRULY COMPLETE.** Process lesson: when self-misfire
+hypotheses compound 3x on a state-carrying interaction, escalate to
+Codex even under session-long "Codex off" policy — CLAUDE.md mandate
+intent applies to this exact risk class.
