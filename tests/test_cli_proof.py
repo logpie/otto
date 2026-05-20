@@ -62,19 +62,6 @@ def test_proof_path_falls_back_to_legacy_pow(tmp_path: Path) -> None:
     assert str(legacy_pow.resolve()) in out
 
 
-def test_pow_print_alias_uses_i2p_proof_packet(tmp_path: Path) -> None:
-    _init_project(tmp_path)
-    session_id = "2026-05-05-120000-abcdef"
-    session_dir = paths.ensure_session_scaffold(tmp_path, session_id)
-    proof_packet = session_dir / "proof-packet.html"
-    proof_packet.write_text("<html>i2p</html>\n", encoding="utf-8")
-
-    code, out = _run(["pow", session_id, "--print"], cwd=tmp_path)
-
-    assert code == 0, out
-    assert str(proof_packet.resolve()) in out
-
-
 def test_proof_list_filters_run_history(tmp_path: Path) -> None:
     _init_project(tmp_path)
     append_history_snapshot(

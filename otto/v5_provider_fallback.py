@@ -26,8 +26,10 @@ Default mapping (from otto.yaml or otto/config.py defaults):
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Literal
@@ -108,6 +110,10 @@ def fallback_provider(config: dict[str, Any]) -> str | None:
     )
 
 
+def _summary_lock_path(summary_path: Path) -> Path:
+    return summary_path.with_suffix(summary_path.suffix + ".lock")
+
+
 def append_attempt(
     summary_path: Path,
     *,
@@ -120,39 +126,52 @@ def append_attempt(
 ) -> None:
     """Append a per-provider attempt entry to a session's summary.json.
 
-    Atomic: read-modify-write with a small lock-free pattern (single writer
-    per task is the contract).
+    Atomic: read-modify-write is serialized with a sidecar fcntl lock because
+    parallel child tasks can append to the same root session summary.
     """
     started_at = started_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if not summary_path.exists():
         return  # caller should ensure summary exists; nothing to do
 
-    try:
-        data = json.loads(summary_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(data, dict):
-        return
-
-    attempts = data.setdefault("cost_attempts", [])
-    if not isinstance(attempts, list):
-        attempts = []
-        data["cost_attempts"] = attempts
-    attempts.append({
-        "provider": provider,
-        "cost_usd": float(cost_usd),
-        "outcome": outcome,
-        "duration_s": float(duration_s),
-        "started_at": started_at,
-        "fallback_reason": fallback_reason,
-    })
-    # Keep top-level cost_usd as the cumulative sum.
-    data["cost_usd"] = sum(
-        float(a.get("cost_usd", 0.0))
-        for a in attempts if isinstance(a, dict)
+    lock_fd = os.open(
+        str(_summary_lock_path(summary_path)),
+        os.O_CREAT | os.O_RDWR,
+        0o644,
     )
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if not summary_path.exists():
+            return
+        try:
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
 
-    tmp = summary_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    import os
-    os.replace(tmp, summary_path)
+        attempts = data.setdefault("cost_attempts", [])
+        if not isinstance(attempts, list):
+            attempts = []
+            data["cost_attempts"] = attempts
+        attempts.append({
+            "provider": provider,
+            "cost_usd": float(cost_usd),
+            "outcome": outcome,
+            "duration_s": float(duration_s),
+            "started_at": started_at,
+            "fallback_reason": fallback_reason,
+        })
+        # Keep top-level cost_usd as the cumulative sum.
+        data["cost_usd"] = sum(
+            float(a.get("cost_usd", 0.0))
+            for a in attempts if isinstance(a, dict)
+        )
+
+        tmp = summary_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, summary_path)
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)

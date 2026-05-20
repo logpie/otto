@@ -17,7 +17,6 @@ os.environ.pop("CLAUDECODE", None)
 import click
 
 from otto.config import (
-    ConfigError,
     agent_effort,
     agent_provider,
     effective_agent_model,
@@ -201,42 +200,6 @@ def main():
     # Scope the bypass to ONE level — strip from env now so nested subprocesses
     # do not inherit it. Safe to do unconditionally (no-op if not set).
     os.environ.pop("OTTO_INTERNAL_QUEUE_RUNNER", None)
-
-
-@main.command(context_settings=CONTEXT_SETTINGS)
-@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address.")
-@click.option("--port", default=8765, show_default=True, type=int, help="Bind port.")
-@click.option("--open/--no-open", "open_browser", default=True, show_default=True,
-              help="Open the browser after the server starts.")
-@click.option("--allow-remote", is_flag=True,
-              help="Allow binding to a non-localhost address.")
-@click.option("--project-launcher", is_flag=True,
-              help="Start at the managed project launcher instead of selecting the current directory.")
-@click.option("--projects-root", default="~/otto-projects", show_default=True,
-              type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
-              help="Managed projects root used by the launcher.")
-@click.option("--cwd-project", is_flag=True,
-              help="Use the current directory as the active project even for remote binds.")
-def dashboard(
-    host: str,
-    port: int,
-    open_browser: bool,
-    allow_remote: bool,
-    project_launcher: bool,
-    projects_root: Path,
-    cwd_project: bool,
-) -> None:
-    """Compatibility alias for `otto web`."""
-    console.print("  `otto dashboard` is deprecated; opening web Mission Control.")
-    _run_web_command(
-        host=host,
-        port=port,
-        open_browser=open_browser,
-        allow_remote=allow_remote,
-        project_launcher=project_launcher,
-        projects_root=projects_root,
-        cwd_project=cwd_project,
-    )
 
 
 @main.command("web", context_settings=CONTEXT_SETTINGS)
@@ -680,62 +643,16 @@ def certify(args):  # noqa: ARG001
     _exit_legacy_certify_removed()
 
 
-@main.command("render", context_settings=CONTEXT_SETTINGS)
-@click.argument("session", type=click.Path(exists=False, path_type=Path))
-@click.option(
-    "--project-dir",
-    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
-    default=None,
-    help=(
-        "Project root used when SESSION is a session id. Defaults to the "
-        "current git worktree root."
-    ),
-)
-@click.option(
-    "--rewrite-json",
-    is_flag=True,
-    help=(
-        "Also rewrite proof-packet.json in canonical current format. "
-        "By default only proof-packet.html is regenerated."
-    ),
-)
-def render_command(session: Path, project_dir: Path | None, rewrite_json: bool) -> None:
-    """Compatibility alias for `otto proof render`."""
-    try:
-        from otto.cli_proof import resolve_render_session_dir
-        from otto.render import rerender_proof_packet
-
-        session_dir = resolve_render_session_dir(session, project_dir=project_dir)
-        html_path, json_path = rerender_proof_packet(
-            session_dir,
-            rewrite_json=rewrite_json,
-        )
-    except (ConfigError, FileNotFoundError, ValueError) as exc:
-        raise click.ClickException(str(exc)) from exc
-
-    console.print(f"  Rendered proof packet: {html_path}")
-    if rewrite_json:
-        console.print(f"  Rewrote JSON packet: {json_path}")
-
 # Setup command (registered from otto/cli_setup.py)
 from otto.cli_setup import register_setup_command  # noqa: E402
 register_setup_command(main)
-
-# History command (registered from otto/cli_logs.py)
-from otto.cli_logs import register_history_command, register_replay_command  # noqa: E402
-register_history_command(main)
-register_replay_command(main)
-
-# PoW command (registered from otto/cli_pow.py)
-from otto.cli_pow import register_pow_command  # noqa: E402
-register_pow_command(main)
 
 # Proof/debug commands (canonical artifact and diagnostic namespaces)
 from otto.cli_proof import register_debug_command, register_proof_command  # noqa: E402
 register_proof_command(main)
 register_debug_command(main)
 
-# Improve commands (registered from otto/cli_improve.py)
+# Improve commands (stub group — kept as migration landing pad)
 from otto.cli_improve import register_improve_commands  # noqa: E402
 register_improve_commands(main)
 
@@ -743,11 +660,7 @@ register_improve_commands(main)
 from otto.cli_queue import register_queue_commands  # noqa: E402
 register_queue_commands(main)
 
-# Cleanup command (Mission Control terminal-record GC)
-from otto.cli_cleanup import register_cleanup_command  # noqa: E402
-register_cleanup_command(main)
-
-# Run command (intent-to-product pipeline, Phase A: compile-only)
+# Run command (stub — kept as migration landing pad pointing at `otto v5 run`)
 from otto.cli_run import register_run_command  # noqa: E402
 register_run_command(main)
 

@@ -1,14 +1,16 @@
-"""Otto CLI — history command for build log inspection."""
+"""Helpers shared by `otto proof list` and `otto debug narrative`.
+
+Used to register top-level aliases (`otto history`, `otto replay`); both
+aliases were removed in the Part-2 simplification — these helpers are
+kept because `otto proof list` and `otto debug narrative` import them.
+"""
 
 import json
 import sys
 from datetime import datetime
 from pathlib import Path
 
-import click
-
-from otto.display import CONTEXT_SETTINGS, console, format_cost, format_duration, rich_escape
-from otto.config import require_git, resolve_project_dir
+from otto.display import console, format_cost, format_duration, rich_escape
 from otto.history import command_family, normalize_command_label
 from otto import paths
 from otto.runs.history import load_project_history_rows
@@ -144,36 +146,3 @@ def regenerate_narrative(project_dir: Path, session_id: str | None) -> None:
     )
 
 
-def register_history_command(main: click.Group) -> None:
-    """Register the history command on the main CLI group."""
-
-    @main.command(context_settings=CONTEXT_SETTINGS)
-    @click.option("-n", "--limit", "limit_", default=20, help="Number of runs to show")
-    @click.option(
-        "--command",
-        "command_filter",
-        type=click.Choice(["all", "run", "build", "certify", "improve"], case_sensitive=False),
-        default="all",
-        show_default=True,
-        help="Filter history by command family",
-    )
-    def history(limit_, command_filter):
-        """Compatibility alias for `otto proof list`."""
-        require_git()
-        project_dir = resolve_project_dir(Path.cwd())
-        print_history(project_dir, limit_=limit_, command_filter=command_filter)
-
-
-def register_replay_command(main: click.Group) -> None:
-    """Register `otto replay <session-id>` — regenerate narrative.log
-    from messages.jsonl via the current formatter. Use after upgrading
-    otto to re-render old sessions with the new layout/glyphs.
-    """
-
-    @main.command(context_settings=CONTEXT_SETTINGS)
-    @click.argument("session_id", required=False)
-    def replay(session_id):
-        """Compatibility alias for `otto debug narrative`."""
-        require_git()
-        project_dir = resolve_project_dir(Path.cwd())
-        regenerate_narrative(project_dir, session_id)

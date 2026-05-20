@@ -340,14 +340,6 @@ def create_app(
         project_dir_provider=lambda: getattr(app.state, "project_dir", None),
     )
 
-    # A5: spec-review surface — GET markdown / POST edit / POST approve.
-    # Consumed by SpecReviewPage (otto/web/client/src/components/spec/).
-    from otto.web.spec_review_routes import install_spec_review_routes
-    install_spec_review_routes(
-        app,
-        project_dir_provider=lambda: getattr(app.state, "project_dir", None),
-    )
-
     app.mount("/static", _CacheHeaderStaticFiles(directory=static_dir), name="static")
     return app
 

@@ -955,22 +955,6 @@ class TestHistoryOrdering:
         assert "certify [merge-cert]" in result.output
         assert "build [merge-cert]" not in result.output
 
-    def test_pow_help_and_missing_session(self, tmp_git_repo):
-        from click.testing import CliRunner
-        from otto.cli import main
-
-        with patch("pathlib.Path.cwd", return_value=tmp_git_repo):
-            help_result = CliRunner().invoke(main, ["pow", "--help"], catch_exceptions=False)
-            missing_result = CliRunner().invoke(main, ["pow", "missing-session", "--print"], catch_exceptions=False)
-
-        assert help_result.exit_code == 0
-        assert "Open a proof-of-work report." in help_result.output
-        assert "[RUN_ID]" in help_result.output
-        assert "--print" in help_result.output
-        assert missing_result.exit_code == 1
-        assert "session not found: missing-session" in missing_result.output
-
-
 class TestResolveResume:
     """resolve_resume handles the four checkpoint states consistently."""
 

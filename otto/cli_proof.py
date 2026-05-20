@@ -200,9 +200,20 @@ def register_proof_command(main: click.Group) -> None:
     @click.argument("run_id")
     def proof_cleanup(run_id: str) -> None:
         """Remove one terminal or abandoned live Mission Control record."""
-        from otto.cli_cleanup import cleanup_live_record_cli
+        from otto.runs.registry import cleanup_live_record
 
-        cleanup_live_record_cli(Path.cwd(), run_id)
+        try:
+            record = cleanup_live_record(Path.cwd(), run_id)
+        except FileNotFoundError:
+            error_console.print(f"[error]No live record found for {rich_escape(run_id)}[/error]")
+            sys.exit(2)
+        except ValueError as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
+        console.print(
+            f"  [success]Removed[/success] live record [info]{record.run_id}[/info] "
+            f"({record.status}); history preserved."
+        )
 
 
 def register_debug_command(main: click.Group) -> None:
