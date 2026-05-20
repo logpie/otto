@@ -45,6 +45,8 @@ import socket
 import time
 from collections.abc import Iterator
 from pathlib import Path
+
+from otto.schemas import TaskGraphEntry
 from typing import Any, Literal
 
 from otto.paths import cross_sessions_dir
@@ -183,8 +185,13 @@ def read_graph(project_dir: Path) -> dict[str, Any]:
     return graph
 
 
-def get_task(project_dir: Path, task_id: str) -> dict[str, Any] | None:
-    """Return one task entry or None."""
+def get_task(project_dir: Path, task_id: str) -> TaskGraphEntry | None:
+    """Return one task entry or None.
+
+    Return type is the documentation TypedDict from ``otto.schemas`` so
+    callers' editors surface the known keys. Behaviour is unchanged: the
+    underlying value is a plain dict and TypedDict is ``total=False``.
+    """
     graph = read_graph(project_dir)
     return graph["tasks"].get(task_id)
 

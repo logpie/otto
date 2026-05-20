@@ -356,19 +356,45 @@ If you built inline, write `<session_dir>/verdict.json` as a real file:
     "skipped": [{"feature": "name", "reason": "..."}]
   },
   "summary": "one-line honest summary",
-  "evidence": ["path/to/test.log"],
+  "evidence": ["build/test-output.log"],
   "test_command": "actual command(s) run",
   "decisions_appended": [
-    {"decision_id": "dec-...", "summary": "contract decision"}
+    {"decision_id": "dec-20260520-contracts-1", "summary": "contract decision"}
   ]
 }
 ```
+
+Your verdict MUST include all of: `verdict`, `summary`, `journeys` (array,
+may be empty if your scope has no applicable journeys), `intent_coverage`,
+and either `evidence` or `test_command` (preferably both). Field-shape
+requirements:
+- `intent_coverage` MUST be an object with keys `built`, `partial`, and
+  `skipped`. Each `partial` entry MUST be an object with `feature` and
+  `gap` (and optionally `what_works`). Each `skipped` entry MUST be an
+  object with `feature` and `reason`. Bare strings or other shapes are
+  invalid.
+- `evidence` paths MUST be relative to `session_dir` (e.g.
+  `build/test-output.log`), not absolute paths and not paths outside the
+  session. Files at these paths must exist when you yield.
+- `decisions_appended` (when present) MUST be an array of objects each
+  with `decision_id` and `summary`. Generate `decision_id` as
+  `dec-<YYYYMMDD>-<scope>-<N>` (e.g. `dec-20260520-contracts-1`),
+  unique within your run.
 
 `pass` means all applicable journeys passed and the scoped intent is
 substantially built. Use `partial` for failed journeys or meaningful gaps.
 Use `unverified` only when tests could not run.
 Do not write a bare status object such as `{"status":"success"}`; Otto's
 canonical contract is the `verdict` object above.
+
+If you decomposed, write nothing here. If you built inline, write the
+verdict above.
+<!-- audit:F-02 applied -->
+<!-- audit:F-20 applied -->
+<!-- audit:F-21 applied -->
+<!-- audit:F-22 applied -->
+<!-- audit:F-23 applied -->
+<!-- audit:F-24 applied -->
 
 ## Tools
 
