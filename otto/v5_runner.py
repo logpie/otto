@@ -4697,6 +4697,15 @@ async def run_v5_pipeline(
                     "journey_count": len(spec.behavior_journeys),
                     "lint_warnings": len(spec.lint_warnings),
                 })
+                # Phase 3: durable checkpoint event for resume + audit.
+                # Best-effort; checkpoint failure must not block the run.
+                _record_checkpoint_event_safely(
+                    root_session_dir, "compile_done",
+                    {
+                        "journey_count": len(spec.behavior_journeys),
+                        "lint_warnings": len(spec.lint_warnings),
+                    },
+                )
             except SpecContractRepairExhaustedError as exc:
                 logger.warning("flat spec pass-model repair exhausted: %s", exc)
                 result.verdict = "merge_blocked"
@@ -4764,6 +4773,15 @@ async def run_v5_pipeline(
                 "decomposition": root_result.decomposition,
                 "emitted": len(root_result.emitted_subtask_ids),
             })
+            # Phase 3: durable checkpoint event when decomposition emits.
+            if root_result.decomposition == "emit" and root_result.emitted_subtask_ids:
+                _record_checkpoint_event_safely(
+                    root_session_dir, "decompose_done",
+                    {
+                        "task_id": ROOT_TASK_ID,
+                        "emitted_subtask_ids": list(root_result.emitted_subtask_ids),
+                    },
+                )
             _commit_root_inline_changes(
                 project_dir=project_dir,
                 root_branch=root_branch,
@@ -4985,6 +5003,15 @@ async def run_v5_pipeline(
                 "task_id": ROOT_TASK_ID,
                 "verdict": integration_result.verdict,
             })
+            # Phase 3: durable checkpoint event for the integration verdict.
+            _record_checkpoint_event_safely(
+                root_session_dir, "integration_done",
+                {
+                    "task_id": ROOT_TASK_ID,
+                    "verdict": integration_result.verdict,
+                    "cost_usd": float(integration_result.cost_usd or 0.0),
+                },
+            )
             # Override root's verdict with the integration verdict (which audits the FULL product).
             set_verdict(
                 project_dir, ROOT_TASK_ID, integration_result.verdict,
@@ -10074,6 +10101,28 @@ def _emit(on_event: Any, payload: dict[str, Any]) -> None:
         on_event(payload)
     except Exception:  # noqa: BLE001 — observability is best-effort
         pass
+
+
+def _record_checkpoint_event_safely(
+    session_dir: Path | None,
+    kind: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Phase 3 (plan-checkpoint-resume-v2.md): durable checkpoint event
+    write at phase boundaries. Best-effort — never raises into the
+    runner. session_dir=None silently skips (some early/error paths
+    don't have a session yet).
+    """
+    if session_dir is None:
+        return
+    try:
+        from otto.v5_checkpoint import record_and_persist
+        record_and_persist(session_dir, kind, payload)
+    except Exception as exc:  # noqa: BLE001 - checkpoint failure must not block the run
+        logger.warning(
+            "checkpoint event '%s' failed to record at %s: %s",
+            kind, session_dir, exc,
+        )
 
 
 def _build_decomp_runtime_context(
