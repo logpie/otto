@@ -76,10 +76,13 @@ When you decompose:
   partition from the scaffold it actually builds.
 - Emit the architect/scaffold child with `task_role="foundation"`; ordinary
   build leaves use `task_role="feature"` and `depends_on=[architect_task_id]`
-  when a foundation child exists. These are the ONLY two valid values for
-  `task_role` — any other string (e.g. `"integration"`, `"scaffold"`,
-  `"glue"`) is invalid and the runner will reject the subtask. Integration is
-  not a `task_role`; Otto schedules it automatically after children.
+  when a foundation child exists. These are the only two `task_role` values
+  you should emit during decomposition — never `"scaffold"`, `"glue"`, or
+  other ad-hoc strings (the runner silently coerces unknowns to `"feature"`,
+  which masks the mistake). Two other `task_role` values exist in the
+  schema but are reserved for the runner itself: `"contract_amendment"`
+  (auto-emitted when a contract patch is required) and `"integration"`
+  (auto-emitted after children land). Do not emit them yourself.
 - The architect, if emitted, must build inline and must not decompose.
 <!-- audit:F-03 applied -->
 

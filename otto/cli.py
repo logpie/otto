@@ -616,8 +616,7 @@ def _new_run_id(project_dir: "Path | None" = None) -> str:
 
 def _exit_legacy_build_removed() -> None:
     """Phase C.3: legacy v3 build pipeline (build_agentic_v3 + run_certify_fix_loop)
-    is gone. Point users at the new --i2p path (now the default in
-    ``otto/config.py::default_pipeline``).
+    is gone. Point users at the new --i2p path (the only path now).
     """
     error_console.print(
         "[error]Legacy v3 build pipeline has been removed in Phase C. "
@@ -628,8 +627,7 @@ def _exit_legacy_build_removed() -> None:
 
 def _exit_legacy_certify_removed() -> None:
     """Phase C.2: legacy ``run_agentic_certifier`` dispatch is gone. Point
-    users at the new ``--i2p`` path (default in
-    ``otto/config.py::default_pipeline``).
+    users at the new ``--i2p`` path (the only path now).
 
     Mirrors ``_exit_legacy_build_removed`` for the certify subcommand —
     one helper per subcommand keeps each migration message close to

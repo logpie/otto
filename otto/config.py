@@ -62,13 +62,6 @@ DEFAULTS: dict[str, Any] = {
     # Features (opt-in)
     "memory":                 False,
 
-    # Phase B.3 cutover (tick 62): default flipped from "legacy" to "i2p".
-    # `otto build` / `otto certify` / `otto improve` now route through the
-    # new intent-to-product stack (compile → seed → build → merge → audit
-    # → audit → render). Users hitting regressions fall back via
-    # `--legacy` for one cycle before Phase C deletes the legacy paths.
-    "default_pipeline":       "i2p",      # "legacy" | "i2p"
-
     # Queue settings — used by `otto queue` runner and `otto merge`.
     # See plan-parallel.md §3.3.
     "queue": {
@@ -462,8 +455,16 @@ def get_max_rounds(config: dict[str, Any]) -> int:
     return value
 
 
+MAX_TURNS_PER_CALL_HARD_LIMIT = 500
+
+
 def get_max_turns_per_call(config: dict[str, Any]) -> int:
-    """Read max_turns_per_call from config with validation."""
+    """Read max_turns_per_call from config with validation.
+
+    Default lives in DEFAULT_CONFIG; users may raise it (e.g. via `--max-turns`
+    or via `otto.yaml`) up to MAX_TURNS_PER_CALL_HARD_LIMIT. Caps above the
+    hard limit are rejected so a typo cannot let an agent loop run forever.
+    """
     import logging
     _logger = logging.getLogger("otto.config")
     default = int(DEFAULT_CONFIG.get("max_turns_per_call", 200))
@@ -474,8 +475,10 @@ def get_max_turns_per_call(config: dict[str, Any]) -> int:
         return default
     if value < 1:
         raise ConfigError("max_turns_per_call must be at least 1")
-    if value > default:
-        raise ConfigError(f"max_turns_per_call must be <= {default}")
+    if value > MAX_TURNS_PER_CALL_HARD_LIMIT:
+        raise ConfigError(
+            f"max_turns_per_call must be <= {MAX_TURNS_PER_CALL_HARD_LIMIT}"
+        )
     return value
 
 
