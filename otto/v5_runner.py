@@ -7779,26 +7779,21 @@ async def _merge_child_branch(
 
     source_branch = child_branch_name(child_task_id)
     commit_msg = f"v5 task {child_task_id}: {result.verdict}"
-    feedback = _foundation_contract_write_feedback(
+    # Locked campaign invariant: foundation-contract write violations LAND
+    # with annotation AFTER the commit/merge succeeds — never as a
+    # pre-commit refusal. The prior pre-commit/pre-merge early-returns
+    # would orphan ALL of the child's work in the worktree when ANY single
+    # file touched a foundation-owned path (e.g., a child appending a fix
+    # to conftest.py would lose 20 unrelated auth files). See
+    # [[project_v5_one_hard_gate_redesign]]: "always LAND a coherent,
+    # bootable product; bugs acceptable; discarded work is not."
+    worktree_contract_violation = _foundation_contract_write_feedback(
         project_dir=project_dir,
         acting_task_id=child_task_id,
         parent_integration_branch=parent_integration_branch,
         changed_paths=_git_diff_name_only(child_worktree),
         operation="child_worktree_commit",
     )
-    if feedback is not None:
-        detail = _foundation_contract_write_block_detail(feedback)
-        _record_structured_merge_failed(
-            project_dir=project_dir,
-            task_id=child_task_id,
-            result=result,
-            reason=detail,
-            origin="foundation_contract_write_gate",
-            phase="commit",
-            structured_reason=feedback,
-            on_event=on_event,
-        )
-        return
     ok, detail = commit_worktree(worktree_path=child_worktree, message=commit_msg)
     if not ok:
         logger.warning("commit_worktree(%s) failed: %s", child_task_id, detail)
@@ -7822,28 +7817,42 @@ async def _merge_child_branch(
             on_event=on_event,
         )
         return
+    if worktree_contract_violation is not None:
+        annotate_detail = _foundation_contract_write_block_detail(worktree_contract_violation)
+        # LAND-with-annotation: commit has already landed; this records the
+        # violation for downstream review without discarding the work.
+        _record_structured_merge_failed(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=annotate_detail,
+            origin="foundation_contract_write_gate",
+            phase="post_commit_annotation",
+            structured_reason=worktree_contract_violation,
+            on_event=on_event,
+        )
 
     pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
-    feedback = _foundation_contract_write_feedback(
+    # Branch-delta contract check (annotate-only — see worktree gate comment).
+    branch_delta_contract_violation = _foundation_contract_write_feedback(
         project_dir=project_dir,
         acting_task_id=child_task_id,
         parent_integration_branch=parent_integration_branch,
         changed_paths=_git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
         operation="child_branch_merge_delta",
     )
-    if feedback is not None:
-        detail = _foundation_contract_write_block_detail(feedback)
+    if branch_delta_contract_violation is not None:
+        annotate_detail = _foundation_contract_write_block_detail(branch_delta_contract_violation)
         _record_structured_merge_failed(
             project_dir=project_dir,
             task_id=child_task_id,
             result=result,
-            reason=detail,
+            reason=annotate_detail,
             origin="foundation_contract_write_gate",
-            phase="merge",
-            structured_reason=feedback,
+            phase="pre_merge_annotation",
+            structured_reason=branch_delta_contract_violation,
             on_event=on_event,
         )
-        return
     try:
         ok, detail = merge_child_into_integration(
             project_dir=project_dir,
@@ -7891,26 +7900,29 @@ async def _merge_child_branch(
             return
         if repaired:
             pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
-            feedback = _foundation_contract_write_feedback(
+            # Post-conflict-repair contract check (annotate-only — locked
+            # campaign invariant; see worktree gate comment).
+            conflict_repair_contract_violation = _foundation_contract_write_feedback(
                 project_dir=project_dir,
                 acting_task_id=child_task_id,
                 parent_integration_branch=parent_integration_branch,
                 changed_paths=_git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
                 operation="merge_after_conflict_repair_delta",
             )
-            if feedback is not None:
-                detail = _foundation_contract_write_block_detail(feedback)
+            if conflict_repair_contract_violation is not None:
+                annotate_detail = _foundation_contract_write_block_detail(
+                    conflict_repair_contract_violation
+                )
                 _record_structured_merge_failed(
                     project_dir=project_dir,
                     task_id=child_task_id,
                     result=result,
-                    reason=detail,
+                    reason=annotate_detail,
                     origin="foundation_contract_write_gate",
-                    phase="merge_conflict_repair",
-                    structured_reason=feedback,
+                    phase="merge_conflict_repair_annotation",
+                    structured_reason=conflict_repair_contract_violation,
                     on_event=on_event,
                 )
-                return
             try:
                 ok, detail = merge_child_into_integration(
                     project_dir=project_dir,
@@ -8208,26 +8220,29 @@ async def _merge_child_branch(
             return
         if repaired:
             pre_merge_ref = _git_capture(project_dir, ["rev-parse", parent_integration_branch])
-            feedback = _foundation_contract_write_feedback(
+            # Post-upward-repair contract check (annotate-only — locked
+            # campaign invariant; see worktree gate comment).
+            upward_repair_contract_violation = _foundation_contract_write_feedback(
                 project_dir=project_dir,
                 acting_task_id=child_task_id,
                 parent_integration_branch=parent_integration_branch,
                 changed_paths=_git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
                 operation="merge_after_upward_repair_delta",
             )
-            if feedback is not None:
-                detail = _foundation_contract_write_block_detail(feedback)
+            if upward_repair_contract_violation is not None:
+                annotate_detail = _foundation_contract_write_block_detail(
+                    upward_repair_contract_violation
+                )
                 _record_structured_merge_failed(
                     project_dir=project_dir,
                     task_id=child_task_id,
                     result=result,
-                    reason=detail,
+                    reason=annotate_detail,
                     origin="foundation_contract_write_gate",
-                    phase="upward_merge_gate",
-                    structured_reason=feedback,
+                    phase="upward_merge_gate_annotation",
+                    structured_reason=upward_repair_contract_violation,
                     on_event=on_event,
                 )
-                return
             try:
                 ok, detail = merge_child_into_integration(
                     project_dir=project_dir,
@@ -8456,26 +8471,29 @@ async def _merge_child_branch(
                 on_event=on_event,
             )
             return
-        feedback = _foundation_contract_write_feedback(
+        # Post-integration-union-repair contract check (annotate-only —
+        # locked campaign invariant; see worktree gate comment).
+        union_repair_contract_violation = _foundation_contract_write_feedback(
             project_dir=project_dir,
             acting_task_id=child_task_id,
             parent_integration_branch=parent_integration_branch,
             changed_paths=_git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
             operation="merge_after_integration_union_repair_delta",
         )
-        if feedback is not None:
-            detail = _foundation_contract_write_block_detail(feedback)
+        if union_repair_contract_violation is not None:
+            annotate_detail = _foundation_contract_write_block_detail(
+                union_repair_contract_violation
+            )
             _record_structured_merge_failed(
                 project_dir=project_dir,
                 task_id=child_task_id,
                 result=result,
-                reason=detail,
+                reason=annotate_detail,
                 origin="foundation_contract_write_gate",
-                phase="integration_union_guard",
-                structured_reason=feedback,
+                phase="integration_union_guard_annotation",
+                structured_reason=union_repair_contract_violation,
                 on_event=on_event,
             )
-            return
         try:
             ok, detail = merge_child_into_integration(
                 project_dir=project_dir,
