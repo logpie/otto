@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import logging
 import re
 import subprocess
 import sys
@@ -742,7 +743,11 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
         untracked = _run_git(
             project_dir, "status", "--porcelain", "--untracked-files=all"
         )
-    except Exception:
+    except Exception as exc:
+        logging.getLogger("otto.config").warning(
+            "untracked-file detection failed (%s: %s); treating as no untracked dirt",
+            type(exc).__name__, exc,
+        )
         untracked = None
     if untracked is not None:
         if untracked.returncode == 0:

@@ -238,8 +238,11 @@ def _v5_root_branch(project_dir: Path, config: dict[str, Any]) -> str:
         detected = detect_default_branch(project_dir)
         if detected:
             return detected
-    except Exception:  # noqa: BLE001 - fall back to the historical default.
-        pass
+    except Exception as exc:  # noqa: BLE001 - fall back to the historical default.
+        logger.warning(
+            "default-branch auto-detection failed (%s: %s); falling back to 'main'",
+            type(exc).__name__, exc,
+        )
     return "main"
 
 
@@ -1133,7 +1136,11 @@ def _seed_scaffold_profile(
                 check=False,
             )
             return (hp.stdout or "").strip() or None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "seed-profile HEAD probe failed (%s: %s); proceeding without prior commit",
+                type(exc).__name__, exc,
+            )
             return None
 
     mat = materialize_seed(
@@ -1214,7 +1221,11 @@ def _resume_root_from_checkpoint(
         return None
     try:
         tasks = read_graph(project_dir).get("tasks") or {}
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "resume-checkpoint task-graph read failed (%s: %s); starting fresh",
+            type(exc).__name__, exc,
+        )
         return None
     root_t = tasks.get(ROOT_TASK_ID)
     if not isinstance(root_t, dict):

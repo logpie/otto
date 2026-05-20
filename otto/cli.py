@@ -149,7 +149,15 @@ def _version_callback(ctx: click.Context, _param: click.Parameter, value: bool) 
     try:
         from importlib.metadata import version as _pkg_version
         pkg_ver = _pkg_version("otto")
-    except Exception:
+    except Exception as exc:
+        # `dev` is shown when otto runs from a source checkout (no installed
+        # dist). If you see "dev" but otto IS installed, check the exception
+        # type below — PackageNotFoundError vs. anything else.
+        import logging
+        logging.getLogger("otto.cli").debug(
+            "otto package version lookup failed (%s: %s); rendering 'dev'",
+            type(exc).__name__, exc,
+        )
         pkg_ver = "dev"
     click.echo(f"otto {pkg_ver}  —  {branch}@{commit}{dirty}")
     click.echo(f"  source: {src}")

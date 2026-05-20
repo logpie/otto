@@ -219,11 +219,16 @@ def _validate_target_args(command: click.Command, argv: list[str]) -> None:
 
 def _watcher_is_alive(project_dir: Path, *, max_age_s: float = 10.0) -> bool:
     """Load state.json and return True iff the watcher heartbeat is fresh and live."""
+    import logging
     from otto.queue.schema import load_state
 
     try:
         state = load_state(project_dir)
-    except Exception:
+    except Exception as exc:
+        logging.getLogger("otto.cli_queue").warning(
+            "watcher-liveness state read failed (%s: %s); treating as not alive",
+            type(exc).__name__, exc,
+        )
         return False
     return watcher_alive(state, max_age_s=max_age_s)
 
