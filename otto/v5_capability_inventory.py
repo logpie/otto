@@ -193,12 +193,27 @@ def _safe_load_toml(p: Path) -> dict[str, Any] | None:
 
 
 def _is_noise(path: Path, root: Path) -> bool:
-    """Skip if any path component is a noise dir."""
+    """Skip if any path component (relative to `root`) is a noise dir.
+
+    Sibling of `_is_noise_file` which checks absolute path parts;
+    delegates to the shared `_path_parts_contain_noise_dir` helper
+    so the two stay in sync.
+    """
     try:
         rel = path.relative_to(root)
     except ValueError:
         return True
-    return any(part in _NOISE_DIRS for part in rel.parts)
+    return _path_parts_contain_noise_dir(rel.parts)
+
+
+def _path_parts_contain_noise_dir(parts: tuple[str, ...]) -> bool:
+    """Single source of truth for "this path traverses a noise dir
+    (node_modules, .venv, dist, …)". Used by `_is_noise` (relative
+    parts) and `_is_noise_file` (absolute parts).
+
+    Distinct from `v5_branching._is_noise_path` which is a
+    gitignore-check (different policy — kept separate by design)."""
+    return any(part in _NOISE_DIRS for part in parts)
 
 
 def _find_package_jsons(project_dir: Path) -> list[Path]:
@@ -1479,7 +1494,11 @@ def _task_is_route_registration_leaf(task: dict[str, Any]) -> bool:
 
 
 def _is_noise_file(path: Path) -> bool:
-    return any(part in _NOISE_DIRS for part in path.parts)
+    """True if `path`'s absolute path traverses a noise dir.
+
+    Sibling of `_is_noise` which requires path to be relative to a root;
+    both delegate to `_path_parts_contain_noise_dir`."""
+    return _path_parts_contain_noise_dir(path.parts)
 
 
 def _owned_pattern_files(project_dir: Path, pattern: str) -> set[str]:
