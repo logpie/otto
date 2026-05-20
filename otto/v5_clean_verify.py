@@ -48,7 +48,7 @@ from typing import Any, Literal, cast
 from otto.journey_scope_policy import ExecutionScope, applicability_for
 from otto.journey_verdict_sink import failed_journey_ids, resolve_journey_verdicts
 from otto.spec_compile_flat import StructuredSpecValidationError, load_flat_spec
-from otto.v5_common import iso_now as _iso_now
+from otto.observability import iso_timestamp as _iso_now
 from otto.defaults import (
     DEFAULT_CLEAN_VERIFY_TIMEOUT_S,
     DEFAULT_ORACLE_STAGE_TIMEOUT_S,

@@ -30,7 +30,8 @@ from otto.v5_clean_verify import (
     CleanOracleStepResult,
     verify_from_clean_oracle,
 )
-from otto.v5_common import git_capture as _git_capture, iso_now as _iso_now
+from otto.observability import iso_timestamp as _iso_now
+from otto.v5_common import git_capture as _git_capture
 
 import logging
 logger = logging.getLogger("otto.v5_preflight_repair")

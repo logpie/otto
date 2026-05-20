@@ -28,7 +28,7 @@ from otto import paths
 from otto.display import rich_escape
 from otto.theme import error_console
 from otto.config import checkpoint_fingerprint
-from otto.observability import iso_timestamp
+from otto.observability import iso_timestamp, read_json_dict
 
 logger = logging.getLogger("otto.checkpoint")
 
@@ -615,11 +615,11 @@ def write_checkpoint(
 
 
 def _read_prior(checkpoint_path: Path) -> dict[str, Any] | None:
-    """Read current on-disk checkpoint regardless of status. Returns None on error."""
-    try:
-        return json.loads(checkpoint_path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
+    """Read current on-disk checkpoint regardless of status. Returns None
+    on missing file or corruption (corruption is logged via logger)."""
+    return read_json_dict(
+        checkpoint_path, default=None, logger=logger, log_context="checkpoint prior"
+    )
 
 
 def _load_legacy_checkpoint(project_dir: Path) -> dict[str, Any] | None:
@@ -629,11 +629,10 @@ def _load_legacy_checkpoint(project_dir: Path) -> dict[str, Any] | None:
     Returns None on any error or when status is not active.
     """
     legacy_path = paths.legacy_checkpoint(project_dir)
-    try:
-        data = json.loads(legacy_path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
-    if data.get("status") not in ("in_progress", "paused"):
+    data = read_json_dict(
+        legacy_path, default=None, logger=logger, log_context="legacy checkpoint"
+    )
+    if data is None or data.get("status") not in ("in_progress", "paused"):
         return None
     return data
 
@@ -641,11 +640,10 @@ def _load_legacy_checkpoint(project_dir: Path) -> dict[str, Any] | None:
 def _scan_active_session_checkpoint(project_dir: Path) -> dict[str, Any] | None:
     candidates: list[tuple[str, float, str, dict[str, Any]]] = []
     for cp_path in paths.sessions_root(project_dir).glob("*/checkpoint.json"):
-        try:
-            data = json.loads(cp_path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            continue
-        if data.get("status") not in ("in_progress", "paused"):
+        data = read_json_dict(
+            cp_path, default=None, logger=logger, log_context="session checkpoint"
+        )
+        if data is None or data.get("status") not in ("in_progress", "paused"):
             continue
         try:
             mtime = cp_path.stat().st_mtime
@@ -669,23 +667,23 @@ def load_checkpoint(project_dir: Path, run_id: str | None = None) -> dict[str, A
     """
     if run_id:
         cp_path = _checkpoint_path_for(project_dir, run_id)
-        try:
-            data = json.loads(cp_path.read_text())
-            if data.get("status") in ("in_progress", "paused", "completed"):
-                return _normalize_checkpoint_data(data)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        data = read_json_dict(
+            cp_path, default=None, logger=logger, log_context="checkpoint by run_id"
+        )
+        if data is None:
             return None
+        if data.get("status") in ("in_progress", "paused", "completed"):
+            return _normalize_checkpoint_data(data)
 
     # 1 & 2: new layout via pointer.
     session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
     if session_path is not None:
         cp_path = session_path / "checkpoint.json"
-        try:
-            data = json.loads(cp_path.read_text())
-            if data.get("status") in ("in_progress", "paused"):
-                return _normalize_checkpoint_data(data)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pass
+        data = read_json_dict(
+            cp_path, default=None, logger=logger, log_context="checkpoint via pointer"
+        )
+        if data is not None and data.get("status") in ("in_progress", "paused"):
+            return _normalize_checkpoint_data(data)
 
     scanned = _scan_active_session_checkpoint(project_dir)
     if scanned is not None:
@@ -775,12 +773,13 @@ def complete_checkpoint(
 
     if cp_path is not None:
         if cp_path.exists():
-            try:
-                data = _normalize_checkpoint_data(json.loads(cp_path.read_text()))
+            raw = read_json_dict(
+                cp_path, default=None, logger=logger, log_context="checkpoint mark"
+            )
+            if raw is not None:
+                data = _normalize_checkpoint_data(raw)
                 _apply(data)
                 _write_checkpoint_file(cp_path, data)
-            except (json.JSONDecodeError, OSError):
-                pass
         paused_target = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
         if paused_target is not None and paused_target.name == cp_path.parent.name:
             paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
@@ -790,12 +789,13 @@ def complete_checkpoint(
     legacy_path = paths.legacy_checkpoint(project_dir)
     if not legacy_path.exists():
         return
-    try:
-        data = _normalize_checkpoint_data(json.loads(legacy_path.read_text()))
+    raw = read_json_dict(
+        legacy_path, default=None, logger=logger, log_context="legacy checkpoint mark"
+    )
+    if raw is not None:
+        data = _normalize_checkpoint_data(raw)
         _apply(data)
         _write_checkpoint_file(legacy_path, data)
-    except (json.JSONDecodeError, OSError):
-        pass
 
 
 def write_cancel_checkpoint_marker(
@@ -837,11 +837,11 @@ def _read_started_at(checkpoint_path: Path) -> str:
     """Preserve original started_at from existing checkpoint."""
     now_iso = iso_timestamp()
     if checkpoint_path.exists():
-        try:
-            data = json.loads(checkpoint_path.read_text())
+        data = read_json_dict(
+            checkpoint_path, default=None, logger=logger, log_context="started_at preserve"
+        )
+        if data is not None:
             return data.get("started_at", now_iso)
-        except (json.JSONDecodeError, OSError):
-            pass
     return now_iso
 
 def _write_checkpoint_file(checkpoint_path: Path, data: dict[str, Any]) -> None:

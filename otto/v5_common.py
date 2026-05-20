@@ -37,11 +37,6 @@ def git_capture(worktree: Path, args: list[str], *, timeout: int = 10) -> str:
     return (proc.stdout or "").strip()
 
 
-def iso_now() -> str:
-    """UTC timestamp in ``YYYY-MM-DDTHH:MM:SSZ`` form, suitable for journals."""
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
 def coerce_spec(spec: Any) -> dict[str, Any]:
     """Coerce a Spec dataclass or dict into a JSON-shaped dict (deep-copied).
 

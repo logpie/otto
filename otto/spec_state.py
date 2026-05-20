@@ -310,10 +310,6 @@ class RunState:
 # ---------------------------------------------------------------------------
 
 
-def _iso_now() -> str:
-    return iso_timestamp()
-
-
 def journal_path(session_dir: Path) -> Path:
     return Path(session_dir) / JOURNAL_FILENAME
 
@@ -388,7 +384,7 @@ def emit(
     feature_id: str = "",
     **extra: Any,
 ) -> Event:
-    """Convenience wrapper around `append_event` with `ts=_iso_now()`.
+    """Convenience wrapper around `append_event` with `ts=iso_timestamp()`.
 
     Returns the persisted Event with `event_id` populated; amendment
     callers store this id in `Amendment.trigger_event_id`.
@@ -396,7 +392,7 @@ def emit(
     `feature_id` is optional per-Feature attribution (see Event docstring).
     """
     event = Event(
-        ts=_iso_now(),
+        ts=iso_timestamp(),
         kind=kind,
         group_id=group_id,
         check_id=check_id,
