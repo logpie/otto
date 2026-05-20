@@ -153,7 +153,14 @@ def enqueue_subtask(
 
 
 def read_pending(project_dir: Path) -> list[dict[str, Any]]:
-    """Read all pending v5 subtasks. Phase 2 watcher consumes this."""
+    """Read all pending v5 subtasks. Phase 2 watcher consumes this.
+
+    Excludes entries with `superseded: True` — these are stale earlier
+    entries kept on disk for audit but no longer active. Used by the
+    retry-children path (`rewrite_pending_for_retry`) to canonicalize
+    to one active entry per task_id without losing history. See
+    plan-checkpoint-resume-v2.md Phase 1 + Codex Plan Gate R4#2.
+    """
     path = v5_pending_path(project_dir)
     if not path.exists():
         return []
@@ -166,9 +173,119 @@ def read_pending(project_dir: Path) -> list[dict[str, Any]]:
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(entry, dict):
+        if isinstance(entry, dict) and not entry.get("superseded"):
             out.append(entry)
     return out
+
+
+def rewrite_pending_for_retry(
+    project_dir: Path,
+    task_ids: list[str],
+    *,
+    retry_reason: str = "cli_retry_children",
+) -> dict[str, Any]:
+    """Atomic rewrite of v5_pending.jsonl for `retry-children`.
+
+    For each task_id in `task_ids`:
+      - Locate the latest pending entry for that task_id.
+      - Reset it to runnable state:
+        * verdict = None
+        * completed_at = None
+        * review_state = "approved" (NOT "" — `take_ready()` accepts
+          only "approved" or None; "" makes the entry invisible —
+          Codex Plan Gate R4#1)
+        * retry_count += 1
+        * retry_reason = retry_reason
+        * retry_initiated_at = now
+      - Mark all OTHER (older) entries for this task_id as
+        `superseded: True` so `read_pending()` excludes them and
+        duplicate-task preflight only sees the single active entry
+        (Codex Plan Gate R4#2).
+      - If no entry exists for the task_id, this function does NOT
+        synthesize one — the caller (retry-children CLI) is
+        responsible for creating one with proper context fields.
+
+    Atomic: locks v5_pending.jsonl, reads all, mutates in-memory,
+    writes to tmp + rename. Crash-safe.
+
+    Returns a summary dict:
+      {
+        "rewritten": [task_ids that had existing entries],
+        "missing": [task_ids that did NOT have existing entries],
+        "superseded_count": N (number of stale entries marked),
+      }
+
+    Caller responsibility: hold any higher-level retry lock; this
+    helper only locks the pending file itself.
+    """
+    path = v5_pending_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = _now_iso()
+    targets = set(task_ids)
+    rewritten: list[str] = []
+    missing: list[str] = []
+    superseded_count = 0
+
+    with _locked_append(path):
+        # Read existing entries.
+        existing: list[dict[str, Any]] = []
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(entry, dict):
+                    existing.append(entry)
+
+        # Find the latest entry per target task_id (last-write-wins;
+        # files are append-only so later entries are later in time).
+        latest_idx_by_task: dict[str, int] = {}
+        for idx, entry in enumerate(existing):
+            tid = str(entry.get("task_id") or "")
+            if tid in targets:
+                latest_idx_by_task[tid] = idx
+
+        # Mutate.
+        for tid in targets:
+            if tid not in latest_idx_by_task:
+                missing.append(tid)
+                continue
+            # Mark older entries for this task as superseded.
+            for idx, entry in enumerate(existing):
+                if (
+                    str(entry.get("task_id") or "") == tid
+                    and idx != latest_idx_by_task[tid]
+                    and not entry.get("superseded")
+                ):
+                    entry["superseded"] = True
+                    superseded_count += 1
+            # Reset the latest entry to runnable.
+            latest = existing[latest_idx_by_task[tid]]
+            latest["verdict"] = None
+            latest["completed_at"] = None
+            latest["review_state"] = "approved"
+            latest["retry_count"] = int(latest.get("retry_count", 0)) + 1
+            latest["retry_reason"] = retry_reason
+            latest["retry_initiated_at"] = now
+            latest["superseded"] = False
+            rewritten.append(tid)
+
+        # Atomic write: tmp file + rename.
+        tmp = path.with_suffix(".jsonl.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            for entry in existing:
+                f.write(json.dumps(entry) + "\n")
+        os.replace(str(tmp), str(path))
+
+    return {
+        "rewritten": rewritten,
+        "missing": missing,
+        "superseded_count": superseded_count,
+    }
 
 
 def _reconcile_pending_entry_with_graph(
