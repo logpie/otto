@@ -1275,10 +1275,10 @@ def _resume_root_from_checkpoint(
     # not just the orchestrator. Best-effort: failures here logged but
     # don't block resume — agent simply starts fresh in that case.
     try:
-        carried = _carry_prior_repair_packets(project_dir, root_session_dir)
+        carried = _carry_and_reset_prior_repair_packets(project_dir, root_session_dir)
     except Exception as exc:  # noqa: BLE001 - resume is best-effort
         logger.warning(
-            "Phase 1.2-B: _carry_prior_repair_packets failed: %s; "
+            "Phase 1.2-B: _carry_and_reset_prior_repair_packets failed: %s; "
             "proceeding without carried packets",
             exc,
         )
@@ -2792,8 +2792,8 @@ from otto.v5.preflight_oracle import (  # noqa: E402, F401
 )
 
 from otto.v5.repair import (  # noqa: E402, F401
-    _StaleTargetRetryResult,
-    _carry_prior_repair_packets,
+    _UpwardMergeRetryResult,
+    _carry_and_reset_prior_repair_packets,
     _child_repair_helper_crashed_feedback,
     _conflict_packet_for_refusal,
     _contract_amendment_attempt_count,
@@ -2812,7 +2812,7 @@ from otto.v5.repair import (  # noqa: E402, F401
     _repair_child_merge_conflict_once,
     _repair_child_stale_target_gate_once,
     _repair_child_upward_merge_gate_once,
-    _repair_stale_target_and_retry_merge,
+    _repair_child_upward_merge_after_failure,
     _repair_subtree_propagation_once,
     _route_out_of_scope_smoke_failure,
     _run_child_verify_repair_packet,

@@ -1201,7 +1201,7 @@ def _refresh_child_result_from_verdict_file(
         )
     return result
 
-def _carry_prior_repair_packets(
+def _carry_and_reset_prior_repair_packets(
     project_dir: Path,
     new_root_session_dir: Path,
 ) -> int:
@@ -1219,7 +1219,9 @@ def _carry_prior_repair_packets(
     including the OLD ``session_dir``; without rewriting, a subsequent
     ``persist()`` would write back to the old location (research-phase-
     1.2-b.md). Codex was waived this session — extra-careful TDD via
-    test_phase_1_2_b_carry_repair_packet.py."""
+    test_phase_1_2_b_carry_repair_packet.py.
+
+    Also resets the per-attempt bookkeeping."""
     import shutil
 
     prior_packets = sorted(
@@ -1809,16 +1811,17 @@ async def _repair_child_stale_target_gate_once(
     return repaired, repair_detail, feedback
 
 @dataclass(frozen=True)
-class _StaleTargetRetryResult:
-    """Result of `_repair_stale_target_and_retry_merge`.
+class _UpwardMergeRetryResult:
+    """Result of `_repair_child_upward_merge_after_failure`.
 
-    Despite the function name (kept for git-blame continuity), this is NOT
-    a cheap re-fetch + retry. The function runs a full Lead repair agent
-    (~200-300s) against the child task to resolve upward-merge-gate
-    blockers, then attempts the merge once. The "stale_target" framing
-    survives from an earlier model where the only failure mode was a
-    stale parent ref; today it covers any upward-merge-gate failure
-    including real semantic conflicts. Audit ref: audit3-repair-loops.md.
+    This was renamed from the historical stale-target helper name; the old
+    name is gone. This is NOT a cheap re-fetch + retry. The function runs a
+    full Lead repair agent (~200-300s) against the child task to resolve
+    upward-merge-gate blockers, then attempts the merge once. The old
+    "stale_target" framing came from an earlier model where the only
+    failure mode was a stale parent ref; today it covers any
+    upward-merge-gate failure including real semantic conflicts. Audit ref:
+    audit3-repair-loops.md.
     """
 
     ok: bool
@@ -1826,7 +1829,7 @@ class _StaleTargetRetryResult:
     pre_merge_ref: str
     terminal_recorded: bool = False
 
-async def _repair_stale_target_and_retry_merge(
+async def _repair_child_upward_merge_after_failure(
     *,
     project_dir: Path,
     child_task_id: str,
@@ -1845,7 +1848,7 @@ async def _repair_stale_target_and_retry_merge(
     check_union_after_merge: bool = False,  # noqa: ARG001 — surface kept for compat; see docstring
     emit_union_feedback: bool = False,
     on_event: Any = None,
-) -> _StaleTargetRetryResult:
+) -> _UpwardMergeRetryResult:
     """Re-enter the existing child repair loop, retry merge, and own terminal blocks."""
     from otto.v5_branching import merge_child_into_integration
 
@@ -1882,7 +1885,7 @@ async def _repair_stale_target_and_retry_merge(
         *,
         reason: str,
         structured_reason: dict[str, Any],
-    ) -> _StaleTargetRetryResult:
+    ) -> _UpwardMergeRetryResult:
         _v5r._record_structured_merge_failed(
             project_dir=project_dir,
             task_id=child_task_id,
@@ -1893,7 +1896,7 @@ async def _repair_stale_target_and_retry_merge(
             structured_reason=structured_reason,
             on_event=on_event,
         )
-        return _StaleTargetRetryResult(
+        return _UpwardMergeRetryResult(
             ok=False,
             detail=reason,
             pre_merge_ref="",
@@ -1975,7 +1978,7 @@ async def _repair_stale_target_and_retry_merge(
                     result=result,
                     on_event=on_event,
                 ):
-                    return _StaleTargetRetryResult(
+                    return _UpwardMergeRetryResult(
                         ok=False,
                         detail=_v5r._preflight_blocking_summary(
                             "Child merge conflict repair smoke routed to owner",
@@ -2056,7 +2059,7 @@ async def _repair_stale_target_and_retry_merge(
             )
             return record_terminal(reason=reason, structured_reason=terminal_feedback)
 
-    return _StaleTargetRetryResult(
+    return _UpwardMergeRetryResult(
         ok=True,
         detail=merge_detail,
         pre_merge_ref=pre_merge_ref,
@@ -2221,4 +2224,3 @@ async def _repair_child_merge_conflict_once(
         "repair_packet": repair.packet_path,
     })
     return repair.verdict == "pass", repair.summary
-

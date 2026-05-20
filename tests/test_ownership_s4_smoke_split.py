@@ -280,7 +280,7 @@ async def test_stale_target_retry_routes_out_of_scope_smoke_without_repair_loop(
     monkeypatch.setattr(v5_runner, "_run_integration_smoke_preflight_with_repair", fake_repair_loop)
 
     result = LeadResult(task_id="leaf", verdict="pass", decomposition="inline", verify_called=True)
-    retry = await v5_runner._repair_stale_target_and_retry_merge(
+    retry = await v5_runner._repair_child_upward_merge_after_failure(
         project_dir=repo,
         child_task_id="leaf",
         child_worktree=repo,

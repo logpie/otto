@@ -189,7 +189,7 @@ class PipelineEvent(TypedDict, total=False):
 # repair-agent failures. The audit calls this out as one of the highest-
 # leverage typing targets.
 #
-# `_read_latest_conflict_packet` and `_carry_prior_repair_packets` read
+# `_read_latest_conflict_packet` and `_carry_and_reset_prior_repair_packets` read
 # the packet back; the repair agent's pass-model returns to it.
 
 RepairPhase = Literal[
@@ -221,7 +221,7 @@ class RepairPacket(TypedDict, total=False):
 
     Read by:
       - `otto.v5_preflight_repair._read_latest_conflict_packet`
-      - `otto.v5_runner._carry_prior_repair_packets`
+      - `otto.v5_runner._carry_and_reset_prior_repair_packets`
       - the repair agent (via the SDK input file)
     Written by:
       - `otto.v5_runner._run_preflight_payload_repair_session`

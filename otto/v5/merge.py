@@ -591,6 +591,7 @@ def _commit_integration_agent_changes(
         "worktree": str(worktree_path),
         "detail": detail,
     })
+
     if not ok:
         logger.warning("integration commit failed for %s: %s", task_id, detail)
         set_verdict(project_dir, task_id, "merge_blocked", cost_usd=result.cost_usd)
@@ -1654,7 +1655,7 @@ async def _merge_child_branch(
                     return
             else:
                 try:
-                    retry = await _v5r._repair_stale_target_and_retry_merge(
+                    retry = await _v5r._repair_child_upward_merge_after_failure(
                         project_dir=project_dir,
                         child_task_id=child_task_id,
                         child_worktree=child_worktree,
@@ -2066,7 +2067,7 @@ async def _merge_child_branch(
             detail = f"merge after integration union repair crashed: {type(exc).__name__}: {exc}"
         if not ok:
             try:
-                retry = await _v5r._repair_stale_target_and_retry_merge(
+                retry = await _v5r._repair_child_upward_merge_after_failure(
                     project_dir=project_dir,
                     child_task_id=child_task_id,
                     child_worktree=child_worktree,
@@ -2144,7 +2145,7 @@ async def _merge_child_branch(
                 or _integration_union_reason_text(followup_feedback)
             )
             try:
-                retry = await _v5r._repair_stale_target_and_retry_merge(
+                retry = await _v5r._repair_child_upward_merge_after_failure(
                     project_dir=project_dir,
                     child_task_id=child_task_id,
                     child_worktree=child_worktree,
@@ -2219,4 +2220,3 @@ async def _merge_child_branch(
         "task_id": child_task_id,
         "into": parent_integration_branch,
     })
-

@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from otto.v5_runner import _build_repair_packet, _carry_prior_repair_packets
+from otto.v5_runner import _build_repair_packet, _carry_and_reset_prior_repair_packets
 
 
 def _make_prior_session(
@@ -69,7 +69,7 @@ def test_carries_session_id_and_rewrites_packet_dir():
         agent_session_id="SESS-XYZ",
     )
     new_session_dir = pdir / "otto_logs" / "sessions" / "s-new"
-    n = _carry_prior_repair_packets(pdir, new_session_dir)
+    n = _carry_and_reset_prior_repair_packets(pdir, new_session_dir)
     assert n == 1
     new_packet = (
         new_session_dir / "integration" / "repair"
@@ -101,7 +101,7 @@ def test_copies_events_jsonl_sibling():
         agent_session_id="X", write_events=True,
     )
     new_session_dir = pdir / "otto_logs" / "sessions" / "s-new"
-    _carry_prior_repair_packets(pdir, new_session_dir)
+    _carry_and_reset_prior_repair_packets(pdir, new_session_dir)
     active_events = (
         new_session_dir / "integration" / "repair"
         / "root-integration_smoke-pre_agent" / "repair_packet.events.jsonl"
@@ -173,7 +173,7 @@ def test_most_recent_per_unit_wins():
         agent_session_id="NEW",
     )
     new_session_dir = pdir / "otto_logs" / "sessions" / "s-new"
-    _carry_prior_repair_packets(pdir, new_session_dir)
+    _carry_and_reset_prior_repair_packets(pdir, new_session_dir)
     loaded = json.loads(
         (new_session_dir / "integration" / "repair" / "u" / "repair_packet.json")
         .read_text(encoding="utf-8")
@@ -184,7 +184,7 @@ def test_most_recent_per_unit_wins():
 def test_no_prior_packets_is_noop():
     pdir = Path(tempfile.mkdtemp())
     new_session_dir = pdir / "otto_logs" / "sessions" / "s-new"
-    n = _carry_prior_repair_packets(pdir, new_session_dir)
+    n = _carry_and_reset_prior_repair_packets(pdir, new_session_dir)
     assert n == 0
     # No repair dir should be created.
     assert not (new_session_dir / "integration").exists()
