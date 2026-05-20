@@ -374,7 +374,12 @@ def _load_yaml_raw(config_path: Path) -> dict[str, Any]:
 
     try:
         raw = _yaml.safe_load(config_path.read_text()) or {}
-    except Exception:
+    except Exception as exc:
+        import logging
+        logging.getLogger("otto.cli").warning(
+            "yaml load of %s failed (%s: %s); treating as empty config",
+            config_path, type(exc).__name__, exc,
+        )
         return {}
     return raw if isinstance(raw, dict) else {}
 

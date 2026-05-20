@@ -50,15 +50,16 @@ def iter_session_dirs(project_dir: Path) -> list[ResolvedSession]:
     the selected project.
     """
 
+    from otto import paths as _paths
     project_root = project_dir.resolve(strict=False)
     roots: list[tuple[Path, str, Path | None]] = [
-        (project_root / "otto_logs" / "sessions", "project", None)
+        (_paths.sessions_root(project_root), "project", None)
     ]
     worktrees_root = project_root / ".worktrees"
     if worktrees_root.exists() and worktrees_root.is_dir():
         for child in sorted(worktrees_root.iterdir(), key=lambda p: p.name):
             if child.is_dir():
-                roots.append((child / "otto_logs" / "sessions", "worktree", child))
+                roots.append((_paths.sessions_root(child), "worktree", child))
 
     by_id: dict[str, ResolvedSession] = {}
     for root, source, worktree in roots:

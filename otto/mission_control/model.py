@@ -1112,7 +1112,11 @@ def _queue_history_argv(project_dir: Path, task_id: str) -> list[str]:
         for task in load_queue(project_dir):
             if task.id == task_id:
                 return list(task.command_argv)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "queue history argv lookup for %s failed (%s: %s); returning []",
+            task_id, type(exc).__name__, exc,
+        )
         return []
     return []
 
@@ -1124,7 +1128,11 @@ def _queue_history_failure_reason(project_dir: Path, task_id: str | None) -> str
         from otto.queue.schema import load_state
 
         state = load_state(project_dir)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "queue state load for failure-reason lookup failed (%s: %s)",
+            type(exc).__name__, exc,
+        )
         return None
     tasks = state.get("tasks") if isinstance(state, dict) else None
     task_state = tasks.get(task_id) if isinstance(tasks, dict) else None

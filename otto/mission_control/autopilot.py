@@ -1341,13 +1341,21 @@ def _merge_live_record_stale(project_dir: Path, merge_id: str) -> bool:
         from otto.runs.schema import is_terminal_status
 
         record = load_live_record(project_dir, merge_id)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "merge live-record load failed for %s (%s: %s); treating as stale",
+            merge_id, type(exc).__name__, exc,
+        )
         return True
     if is_terminal_status(record.status):
         return True
     try:
         return writer_identity_gone_or_stale(record.writer)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "writer-identity check failed for %s (%s: %s); treating as stale",
+            merge_id, type(exc).__name__, exc,
+        )
         return True
 
 

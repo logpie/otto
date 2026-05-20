@@ -235,7 +235,11 @@ def install_run_view_routes(
 def _run_view_runtime_defaults(project: Path) -> dict[str, Any]:
     try:
         defaults = serialize_project(project).get("defaults")
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "run-view runtime defaults lookup failed (%s: %s); using {}",
+            type(exc).__name__, exc,
+        )
         return {}
     return defaults if isinstance(defaults, dict) else {}
 

@@ -1222,8 +1222,8 @@ def _carry_prior_repair_packets(
     import shutil
 
     prior_packets = sorted(
-        project_dir.glob(
-            "otto_logs/sessions/*/integration/repair/*/repair_packet.json"
+        _paths.sessions_root(project_dir).glob(
+            "*/integration/repair/*/repair_packet.json"
         ),
         key=lambda p: p.stat().st_mtime,
         reverse=True,  # most recent first

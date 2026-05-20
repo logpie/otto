@@ -1218,7 +1218,8 @@ def _charter_line_counts(charter_text: str) -> dict[str, int]:
 
 def _latest_spec_payload(project_dir: Path) -> dict[str, Any] | None:
     """Best-effort lookup for the root v5 spec when callers do not pass one."""
-    sessions = project_dir / "otto_logs" / "sessions"
+    from otto import paths as _paths
+    sessions = _paths.sessions_root(project_dir)
     if not sessions.exists():
         return None
     candidates = sorted(

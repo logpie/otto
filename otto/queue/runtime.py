@@ -122,7 +122,11 @@ def watcher_alive(state: dict, *, max_age_s: float = 10.0) -> bool:
         except PermissionError:
             return True
         return True
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "watcher pid liveness check failed (%s: %s); treating as dead",
+            type(exc).__name__, exc,
+        )
         return False
 
 

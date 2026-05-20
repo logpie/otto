@@ -58,8 +58,9 @@ def resolve_render_session_dir(
         if project_dir is not None
         else resolve_project_dir(Path.cwd())
     )
-    candidate = (root / "otto_logs" / "sessions" / str(session)).resolve()
-    sessions_root = (root / "otto_logs" / "sessions").resolve()
+    from otto import paths as _paths
+    candidate = (_paths.sessions_root(root) / str(session)).resolve()
+    sessions_root = _paths.sessions_root(root).resolve()
     try:
         candidate.relative_to(sessions_root)
     except ValueError as exc:

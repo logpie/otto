@@ -44,7 +44,8 @@ def cache_key_hash(key_payload: dict[str, Any]) -> str:
 
 
 def spec_cache_root(project_dir: Path) -> Path:
-    return project_dir / "otto_logs" / "cross-sessions" / "spec-cache"
+    from otto import paths as _paths
+    return _paths.cross_sessions_dir(project_dir) / "spec-cache"
 
 
 def lookup_spec_cache(project_dir: Path, key_payload: dict[str, Any]) -> SpecCacheHit | None:

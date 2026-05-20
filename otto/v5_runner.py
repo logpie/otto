@@ -1245,7 +1245,7 @@ def _resume_root_from_checkpoint(
     if persisted_intent and persisted_intent != str(intent).strip():
         return None
     specs = sorted(
-        project_dir.glob("otto_logs/sessions/*/spec/spec.json"),
+        _paths.sessions_root(project_dir).glob("*/spec/spec.json"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -2521,7 +2521,7 @@ def _write_toolchain_preflight_log(
     retry_count: int,
     result: dict[str, Any],
 ) -> Path:
-    log_dir = project_dir / "otto_logs" / "preflight"
+    log_dir = _paths.logs_dir(project_dir) / "preflight"
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f"toolchain-preflight-{architect_task_id}-attempt-{retry_count + 1}.json"
     payload = {

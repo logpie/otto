@@ -1587,7 +1587,7 @@ async def _run_integration(
     target_spec = integration_session_dir / "spec" / "spec.json"
     if not target_spec.exists():
         try:
-            sessions_root = project_dir / "otto_logs" / "sessions"
+            sessions_root = _paths.sessions_root(project_dir)
             if sessions_root.exists():
                 for sib in sorted(sessions_root.iterdir()):
                     candidate = sib / "spec" / "spec.json"
@@ -1820,7 +1820,7 @@ def _write_integration_packet(
     return path
 
 def _find_session_dir_for_task(project_dir: Path, task_id: str) -> str:
-    sessions_root = project_dir / "otto_logs" / "sessions"
+    sessions_root = _paths.sessions_root(project_dir)
     if not sessions_root.exists():
         return ""
     matches: list[Path] = []
