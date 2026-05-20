@@ -1541,3 +1541,104 @@ FIX (evidence-driven, no-Codex this session):
   real repaired state, not the discarded one.
 A makes it LAND; B makes what lands contain the repair. Together = the
 end-to-end Linkboard fix. Deeper boot-maximization stays full-Phase-3.
+
+### Part A DONE (commit 9185b1837); Part B = full Phase 1.2 (2026-05-19)
+
+Part A shipped + tested (23/23 keystone+Task5 green, ruff clean):
+`_integration_terminal_verdict` routes the post-agent terminal through
+the chokepoint → VERIFICATION cause → LAND `partial`+annotation. The run
+no longer REFUSES at root (merge_blocked→partial). Decisive refusal fix.
+
+Part B finding (why it's NOT an inline slice): the timed-out pre-agent
+smoke-repair takes the escalated branch `if _preflight_repair_escalated:
+integration_result = _preflight_blocked_result(...)` (v5_runner.py:4692)
+which SKIPS `_commit_integration_agent_changes` (else-branch only) AND
+sets `post_preflight_result = preflight_result` (no re-run). So
+preserving the work needs: (1) commit runner-committable dirty state on
+the escalated branch, AND (2) re-run the post-agent smoke against the
+committed tree so the fix is actually evaluated. That is the Phase 1.2
+landing-transaction (plan-v5-one-hard-gate.md Phase 1.2 / Task #8) —
+correctness-critical escalated-path control flow, not a hack. Deferred to
+a proper focused Task #8 implementation (Codex waived → MORE care, not
+less). Part A alone already makes Linkboard LAND (partial) instead of
+refuse; Part B improves WHAT lands (near-fixed vs pre-repair state).
+
+### Validation e2e — Part A + Part B PROVEN end-to-end (2026-05-19)
+
+Run `bp237rgkr` on project `fastrepro-linkboard-140038`, exit 0, cost
+$3.73, duration 2656s (~44min).
+- Same trigger as prior: `Agent timed out after 1199s` on the integration
+  smoke-pre repair turn.
+- **Part A working:** `integration root: partial` → `Verdict: partial`
+  (prior run: `Verdict: merge_blocked`). task_graph: root=partial,
+  foundation=pass, features=pass+partial(landed_with_annotation). Zero
+  merge_blocked, zero cascade, zero architect-reentry in run.out.
+- **Part B working:** product `git log` contains commit `73fec6b otto:
+  preserve timed-out integration-repair work (Phase 1.2 Task #8)` — the
+  helper fired and committed the timed-out repair agent's work.
+- **Product BOOTS:** backend `uvicorn` started, `GET /api/health` →
+  `{"status":"ok"}`. The landed `partial` product is viable, not just a
+  verdict label.
+- Direct A/B vs the prior `Verdict: merge_blocked` + discarded work run.
+
+### Phase 1.2-A in-progress validation (resume) — RUNNING
+
+Conclusive proof of the dev-velocity multiplier: with root=partial
+persisted in task_graph (from above), `otto v5 run` on the same project
+should now resume (was rejected pre-1.2-A). Launched `bxxiarqol` —
+expected: emits `v5_resume_from_checkpoint` event, SKIPS compile +
+foundation + feature builds, re-enters integration only (~10-20min vs
+~44min from-scratch). Outcome pending; will be appended on exit.
+
+**RESUME RESULT (2026-05-19, bg=bxxiarqol):** Phase 1.2-A PROVEN.
+- Wall-time **1277s (~21min) vs. 2656s from-scratch** — saved ~26min.
+- Rebuild lines in run.out: **0** (no compile/child-build) — entire
+  pre-integration phase skipped exactly as 1.2-A claimed.
+- Cost $3.34. merge_blocked/cascade count: 0.
+- Root verdict: `partial` (Part A chokepoint held at post-agent terminal).
+- Product still BOOTS: GET /api/health → {"status":"ok"}.
+- **Real product progress committed:** git log shows the resume's repair
+  agent committed `6dce32e feat: implement tags CRUD and fix register
+  flow for UI journey` (Auth-tab default fix, new backend tags router,
+  full TagsPage) and `d98afdd feat(bookmarks): merge tag management into
+  BookmarksPage for journey` (cross-page nav fix). Three waves of repair
+  preserved cumulatively: 73fec6b (Part B from-scratch preserve) →
+  6dce32e → d98afdd.
+
+This validates the entire keystone + A + B + 1.2-A stack end-to-end on
+a real product with real bugs. Pending = Phase 1.2-B (cut-mid-repair
+landing_pending → resume CONTINUES the in-flight repair turn). Different
+from 1.2-A (which re-enters integration from the phase boundary).
+
+### Full-stack validation e2e (bpfm196fo, 2026-05-19) — NO REGRESSION
+
+Project fastrepro-linkboard-validate-155831, full 7-commit stack
+(keystone + Part A + Part B + 1.2-A + Polish + Phase 5 + Phase 4). Exit
+0, cost $4.0993, duration 3632.8s (~60.5min).
+- Verdict: **partial** (NEVER merge_blocked — keystone+Part A end-to-end).
+- task_graph: foundation=pass, features=partial+landed_annot=True both.
+  merge_blocked_origin=None everywhere.
+- merge_blocked / cascade / architect_retry count in run.out: **0**.
+- Phase 5 (architect_contract_landed_partial) + Phase 4
+  (foundation_clean_boot_degraded_to_scaffold) event count: **0** —
+  expected, since this run's architect produced a buildable structure
+  and foundation passed clean-boot. The safety nets stayed silent;
+  unit tests already lock in their behavior when triggered.
+- Product boots: backend uvicorn started, GET /api/health returned
+  `{"status":"ok","ts":"2026-05-19T23:59:45..."}`.
+- Substantial product engineering captured across commits:
+  - c7e902a fix: resolve Tags locator conflict and stale-auth race in
+    journey executor (the EXACT bug live-predicted mid-run).
+  - 92f06f2 feat: always-visible add-tag and add-bookmark forms.
+  - ddda70c fix: use bcrypt directly (passlib 4.x incompatibility).
+  - 4c63f7f feat: implement auth, bookmarks, tags API routers.
+  - 4e78f82, 76b376c auth-tab/route fixes.
+  - c724e38 dec-002 decisions log entry.
+
+Comparison vs prior bp237rgkr: same structural shape (root=partial,
+features partial+landed, 0 refusal/cascade); more product surface chased
+(2 journey bugs vs 1); longer wall (3632s vs 2656s) because more real
+repair work was done. **No regression** — every keystone/A/B/1.2-A
+invariant from bp237rgkr held; Phase 5/4 paths didn't trigger but unit
+tests cover their behavior. Campaign substantively complete (7/8 layers
+shipped + validated; Phase 1.2-B deferred to focused follow-up).
