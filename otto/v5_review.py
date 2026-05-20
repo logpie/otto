@@ -25,8 +25,9 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
-from otto.queue.subtask import v5_pending_path
+from otto.paths import sidecar_lock_path
 from otto.observability import iso_timestamp
+from otto.queue.subtask import v5_pending_path
 
 logger = logging.getLogger("otto.v5_review")
 
@@ -40,7 +41,7 @@ def _locked_pending(project_dir: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.touch()
-    lock_path = path.with_suffix(".lock")
+    lock_path = sidecar_lock_path(path)
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)

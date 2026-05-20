@@ -83,6 +83,12 @@ LEGACY_ROUNDS_DIR_NAME = "rounds"
 LEGACY_RUNS_DIR_NAME = "runs"
 
 
+def sidecar_lock_path(path: Path) -> Path:
+    """Return the collision-safe sidecar lock path for a target file."""
+    target = Path(path)
+    return target.with_suffix(target.suffix + ".lock")
+
+
 def logs_dir(project_dir: Path) -> Path:
     """Return the otto_logs directory for a project."""
     return Path(project_dir) / LOGS_ROOT_NAME

@@ -29,7 +29,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from otto.paths import cross_sessions_dir
+from otto.paths import cross_sessions_dir, sidecar_lock_path
 from otto.observability import iso_timestamp
 
 V5_PENDING_FILENAME = "v5_pending.jsonl"
@@ -58,7 +58,7 @@ def _generate_task_id(intent: str) -> str:
 def _locked_append(path: Path):
     """Append-only fcntl-locked write to a JSONL file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_suffix(".lock")
+    lock_path = sidecar_lock_path(path)
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)

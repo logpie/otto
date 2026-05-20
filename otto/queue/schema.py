@@ -163,7 +163,7 @@ def append_task(project_dir: Path, task: QueueTask) -> None:
     """
     path = queue_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock = path.with_suffix(".yml.lock")
+    lock = otto_paths.sidecar_lock_path(path)
     with open(lock, "w") as lf:
         fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
         try:
@@ -185,7 +185,7 @@ def remove_task(project_dir: Path, task_id: str) -> bool:
     """
     path = queue_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock = path.with_suffix(".yml.lock")
+    lock = otto_paths.sidecar_lock_path(path)
     with open(lock, "w") as lf:
         fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
         try:
@@ -205,7 +205,7 @@ def reorder_tasks(project_dir: Path, prioritized_ids: list[str]) -> None:
         return
     path = queue_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock = path.with_suffix(".yml.lock")
+    lock = otto_paths.sidecar_lock_path(path)
     with open(lock, "w") as lf:
         fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
         try:

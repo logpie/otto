@@ -446,7 +446,7 @@ def append_jsonl_row(path: Path, row: dict[str, Any]) -> dict[str, Any]:
 def append_command_request(request_path: Path, row: dict[str, Any]) -> dict[str, Any]:
     """Append a command request under the same sidecar lock used by drains."""
     request_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = request_path.with_suffix(request_path.suffix + ".lock")
+    lock_path = paths.sidecar_lock_path(request_path)
     payload = json.dumps(row, separators=(",", ":"), sort_keys=False) + "\n"
     with lock_path.open("a", encoding="utf-8") as lock:
         if fcntl is not None:
@@ -523,7 +523,7 @@ def begin_command_drain(
 ) -> list[dict[str, Any]]:
     """Rename request log to `.processing` and return unacked command rows."""
     request_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = request_path.with_suffix(request_path.suffix + ".lock")
+    lock_path = paths.sidecar_lock_path(request_path)
     with lock_path.open("a", encoding="utf-8") as handle:
         if fcntl is not None:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)

@@ -59,6 +59,7 @@ import json
 import logging
 import os
 from otto.observability import iso_timestamp
+from otto.paths import sidecar_lock_path
 import subprocess
 import time
 from collections import defaultdict
@@ -318,7 +319,7 @@ def journal_path(session_dir: Path) -> Path:
 
 
 def _journal_lock_path(target: Path) -> Path:
-    return target.with_suffix(target.suffix + ".lock")
+    return sidecar_lock_path(target)
 
 
 def _next_event_id_for_target(target: Path) -> str:

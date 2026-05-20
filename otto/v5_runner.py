@@ -39,7 +39,6 @@ import shutil
 import subprocess
 import json
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable, Iterator
@@ -222,10 +221,6 @@ async def _await_with_run_deadline(
             fired_after_s=timeout,
             limit_kind="phase_cap" if capped else "run_budget",
         ) from exc
-
-
-def _new_session_id() -> str:
-    return time.strftime("%Y-%m-%d-%H%M%S", time.gmtime()) + "-" + uuid.uuid4().hex[:6]
 
 
 def _v5_root_branch(project_dir: Path, config: dict[str, Any]) -> str:
@@ -1324,7 +1319,9 @@ async def run_v5_pipeline(
             logger.warning("ensure_initial_commit failed: %s", exc)
 
         root_branch = _v5_root_branch(project_dir, config)
-        root_session_id = _new_session_id()
+        # Pipeline startup is not currently under the project lock; the
+        # canonical allocator still retries existing session-dir collisions.
+        root_session_id = _paths.new_session_id(project_dir)
         root_session_dir = _paths.session_dir(project_dir, root_session_id)
         root_session_dir.mkdir(parents=True, exist_ok=True)
         _emit(on_event, {"event": "session_open", "session_id": root_session_id})

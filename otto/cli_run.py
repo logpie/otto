@@ -13,11 +13,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-import time
 from pathlib import Path
 
 import click
 
+from otto import paths as _paths
 from otto.config import (
     ConfigError,
     load_config,
@@ -29,13 +29,6 @@ from otto.display import CONTEXT_SETTINGS, console
 from otto.theme import error_console
 
 logger = logging.getLogger("otto.cli_run")
-
-
-def _new_session_id() -> str:
-    """Generate a fresh session id of the form `2026-05-09-HHMMSS-xxxxxx`."""
-    import uuid
-
-    return time.strftime("%Y-%m-%d-%H%M%S", time.gmtime()) + "-" + uuid.uuid4().hex[:6]
 
 
 def _color_verdict(verdict: str) -> str:
@@ -287,9 +280,9 @@ def register_run_command(main: click.Group) -> None:
 
 def _run_phase1_only(project_dir: Path, intent: str, config: dict) -> None:
     """Phase 1 single-Lead path (no children processed). For isolation testing."""
-    session_id = _new_session_id()
-    from otto import paths as _paths
-
+    # Phase-1 runs do not currently hold the project lock; the canonical
+    # allocator still retries existing session-dir collisions.
+    session_id = _paths.new_session_id(project_dir)
     session_dir = _paths.session_dir(project_dir, session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
 

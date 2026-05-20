@@ -49,7 +49,7 @@ from pathlib import Path
 from otto.schemas import TaskGraphEntry
 from typing import Any, Literal
 
-from otto.paths import cross_sessions_dir
+from otto.paths import cross_sessions_dir, sidecar_lock_path
 from otto.observability import iso_timestamp
 
 SCHEMA_VERSION = 1
@@ -143,7 +143,7 @@ def _locked_graph(project_dir: Path) -> Iterator[tuple[Path, dict[str, Any]]]:
     """
     path = task_graph_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_suffix(".lock")
+    lock_path = sidecar_lock_path(path)
     lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)

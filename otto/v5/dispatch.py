@@ -1119,7 +1119,9 @@ async def _run_child(
 ) -> LeadResult:
     """Run one child Lead in its own session + worktree, with provider fallback."""
     tid = entry["task_id"]
-    child_session_id = _v5r._new_session_id()
+    # Child dispatch allocates sessions without the project lock; the canonical
+    # allocator still retries existing session-dir collisions.
+    child_session_id = _paths.new_session_id(project_dir)
     child_session_dir = _paths.session_dir(project_dir, child_session_id)
     child_session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1578,7 +1580,9 @@ async def _run_integration(
     on_event: Any = None,
 ) -> LeadResult:
     """Run an integration Lead for ``task_id`` after children have resolved."""
-    integration_session_id = _v5r._new_session_id()
+    # Integration dispatch allocates sessions without the project lock; the
+    # canonical allocator still retries existing session-dir collisions.
+    integration_session_id = _paths.new_session_id(project_dir)
     integration_session_dir = _paths.session_dir(project_dir, integration_session_id)
     integration_session_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2202,4 +2206,3 @@ def _merge_blocked_by_verification(child: dict[str, Any]) -> bool:
         or "runner verification" in reason
         or "verification downgraded" in reason
     )
-

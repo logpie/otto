@@ -54,7 +54,7 @@ def append_event(
         "details": details if isinstance(details, dict) else {},
     }
     line = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str) + "\n"
-    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path = paths.sidecar_lock_path(path)
     with lock_path.open("a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:

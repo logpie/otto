@@ -988,7 +988,7 @@ class AutopilotController:
             "message": message,
             "details": details,
         }
-        lock_path = path.with_suffix(path.suffix + ".lock")
+        lock_path = paths.sidecar_lock_path(path)
         with lock_path.open("a", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:

@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 from otto.observability import iso_timestamp
+from otto.paths import sidecar_lock_path
 
 logger = logging.getLogger("otto.v5_provider_fallback")
 
@@ -112,7 +113,7 @@ def fallback_provider(config: dict[str, Any]) -> str | None:
 
 
 def _summary_lock_path(summary_path: Path) -> Path:
-    return summary_path.with_suffix(summary_path.suffix + ".lock")
+    return sidecar_lock_path(summary_path)
 
 
 def append_attempt(
