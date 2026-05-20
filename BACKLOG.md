@@ -274,72 +274,57 @@ clearest contract).
 
 ---
 
-### 13 more silent-return paths to log
+### ~~13 more silent-return paths to log~~ — DONE (R4 follow-up)
 
-**What:** Round 4 logged 5 of the 18 silent-return swallows
-identified in `archive/audits/round4/audit-brittleness-errors.md`.
-The remaining 13 (mostly in mission_control, web, smaller helpers)
-follow the same pattern: catch broadly, return sentinel, no log.
-
-**Why:** Operators currently get zero signal when these fire. The
-audit named adding one `logger.warning` per catch as the highest-
-leverage fix for debuggability.
-
-**Size:** ~20 min for the full set.
-
-**Risk:** Low; pure additive logging.
+10 done in Round 4 + R4 follow-up across v5_runner, cli_queue, config,
+cli, web/run_view_routes, mission_control/{autopilot,model},
+queue/runtime. Remaining ~8 are in files without an established logger
+(otto/agent/codex.py, mission_control/adapters/queue.py,
+v5_preflight_repair.py); each needs a lightweight logger setup before
+the log line. Low priority.
 
 ---
 
-### Centralize timestamp + JSON-read helpers
+### ~~Centralize timestamp helpers~~ — DONE (R4 follow-up)
 
-**What:** 4 timestamp variants × ~20 sites; 6 JSON-read helpers
-(`_read_json`, `_read_json_object`, `_read_json_artifact`, etc.) with
-different size-limit and error-handling semantics. Round 4 noted these
-but deferred the migration as ~80 sites of mechanical churn for
-cosmetic gain.
+71 raw `time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())` sites
+across 25 modules migrated to `otto.observability.iso_timestamp()`.
 
-**Why:** Single canonical helper would simplify AI edits — there's
-exactly one place to know about. Today an AI picks the wrong helper
-half the time.
+### JSON-read helpers — STILL DEFERRED
 
-**Size:** ~1 hour. Need to pick canonical names + migrate.
-
-**Risk:** Medium. The 6 JSON readers have legitimate semantic
-differences (max_chars, returns-None-vs-{}); consolidation needs a
-unified API that captures the variants as parameters.
+6 helpers (`_read_json`, `_read_json_object`, `_read_json_artifact`,
+etc.) with different size-limit and error-handling semantics. A unified
+API needs to capture max_chars / default-on-error / dict-vs-Any as
+parameters; not a pure rename. **Size:** ~1 hour design + ~30 sites of
+migration. **Risk:** Medium (semantic differences could silently
+change behavior).
 
 ---
 
-### Rename names-that-lie (`_repair_stale_target_and_retry_merge` etc.)
+### ~~Rename names-that-lie~~ — DONE (R4 follow-up, Codex-gated)
 
-**What:** Audit-3 + audit-ai-sloppiness identified 5 functions where
-the name doesn't match the behavior. Most prominent:
-`_repair_stale_target_and_retry_merge` (3 call sites; runs a full Lead
-repair agent, not a cheap stale-target re-fetch). Round 3 added a
-docstring; rename remains.
+Renamed:
+  `_repair_stale_target_and_retry_merge` → `_repair_child_upward_merge_after_failure`
+  `_StaleTargetRetryResult` → `_UpwardMergeRetryResult`
+  `_carry_prior_repair_packets` → `_carry_and_reset_prior_repair_packets`
 
-**Why:** AI editors trust function names. A name-that-lies invites
-wrong edits.
-
-**Size:** ~30 min per rename + Codex-gate per CLAUDE.md (these touch
-merge/repair hot paths).
-
-**Risk:** Medium. Touches well-trodden code paths.
+3 other names-that-lie in `audit-ai-sloppiness.md` are smaller-scope
+and remain (e.g. `_repair_*_once` siblings). Pick up individually if
+they bite again.
 
 ---
 
-### Hardcoded `otto_logs/` path violations
+### ~~Hardcoded `otto_logs/` path violations~~ — DONE (R4 follow-up)
 
-**What:** 5 sites bypass `otto/paths.py` and hardcode the
-`"otto_logs/"` string. Audit (round 4) flagged as a CLAUDE.md rule
-violation. The producer site
-(`v5/repair.py:1226:"otto_logs/sessions/*/integration/repair/*/repair_packet.json"`)
-is a glob; needs a new `paths.repair_packets_glob()` helper.
+6 sites migrated to use `paths.sessions_root()` / `paths.logs_dir()` /
+`paths.cross_sessions_dir()` helpers:
+  v5_runner.py (2 sites), v5_capability_inventory.py, cli_proof.py,
+  v5_spec_cache.py, web/session_resolver.py, v5/dispatch.py (2 sites),
+  v5/repair.py.
 
-**Size:** ~1 hour (add helpers, update sites).
-
-**Risk:** Low.
+Remaining literal `"otto_logs/"` strings are legitimate (gitignore
+file content; display strings in journal.py; the literal "allowed_paths"
+arg sent to a repair agent in v5/repair.py:1352-1353).
 
 ---
 
