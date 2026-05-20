@@ -2,23 +2,23 @@
 
 When `_resume_root_from_checkpoint` re-enters the integration phase of
 a previously-failed run, copy the prior session's
-`integration/repair/<unit>/repair_packet.json` (+ events.jsonl) into
+`integration/repair/<unit>/repair_packet.json` (+ archived events.jsonl) into
 the new session's mirror path AND rewrite the serialized `packet_dir`
 field to the new location. This lets
 `_run_preflight_payload_repair_session`'s load-if-exists fire across
 runs → the repair agent's prior Claude SDK session is resumed
 (option.resume=agent_session_id) instead of starting fresh.
 
-Schema confirmed in research-phase-1.2-b.md: only `packet_dir` needs
+Schema confirmed in research-phase-1.2-b.md: `packet_dir` needs
 path-rewriting; `repair_unit.worktree` is project_dir-scoped (stable),
-`current_state`/`attempt_history`/`agent_session_id` carry verbatim.
+agent_session_id carries, and active budget bookkeeping starts fresh.
 """
 import json
 import tempfile
 import time
 from pathlib import Path
 
-from otto.v5_runner import _carry_prior_repair_packets
+from otto.v5_runner import _build_repair_packet, _carry_prior_repair_packets
 
 
 def _make_prior_session(
@@ -83,11 +83,9 @@ def test_carries_session_id_and_rewrites_packet_dir():
         "to the old path — schema bug fix is the whole point)"
     )
     # Phase 1.2-B v2: attempt_history + current_state are CLEARED on
-    # carry so the new run gets a fresh budget allocation. Without this,
-    # _replay_budget_usage(packet) reads carried history → reports
-    # budget_exhausted → the resumed repair turn never runs and the
-    # agent never gets to use its preserved session_id. Verified live:
-    # the v1 carry produced an 8-second resume with no repair turn.
+    # carry so the new run starts with fresh bookkeeping. Prior events
+    # are archived separately and must not become the active budget
+    # replay file.
     assert loaded["attempt_history"] == [], "attempt_history must reset"
     assert loaded["current_state"] == {}, "current_state must reset"
     # Static context fields still carry verbatim (the agent doesn't read
@@ -104,12 +102,64 @@ def test_copies_events_jsonl_sibling():
     )
     new_session_dir = pdir / "otto_logs" / "sessions" / "s-new"
     _carry_prior_repair_packets(pdir, new_session_dir)
-    new_events = (
+    active_events = (
         new_session_dir / "integration" / "repair"
         / "root-integration_smoke-pre_agent" / "repair_packet.events.jsonl"
     )
-    assert new_events.is_file(), "events.jsonl sibling must be copied"
-    assert "turn_started" in new_events.read_text(encoding="utf-8")
+    archived_events = (
+        new_session_dir / "integration" / "repair"
+        / "root-integration_smoke-pre_agent" / "prior_repair_packet.events.jsonl"
+    )
+    assert not active_events.exists(), "active events must start empty for fresh budget replay"
+    assert archived_events.is_file(), "prior events.jsonl sibling must be archived"
+    assert "turn_started" in archived_events.read_text(encoding="utf-8")
+
+
+def test_build_repair_packet_preserves_existing_agent_session_id():
+    pdir = Path(tempfile.mkdtemp())
+    session_dir = pdir / "otto_logs" / "sessions" / "s-new"
+    packet_dir = session_dir / "repair" / "unit"
+    packet_dir.mkdir(parents=True, exist_ok=True)
+    (packet_dir / "repair_packet.json").write_text(
+        json.dumps(
+            {
+                "repair_unit": {"id": "unit", "worktree": str(pdir)},
+                "acceptance_oracle": {},
+                "latest_oracle_result": {},
+                "product_contract": {},
+                "integration_context": {},
+                "attempt_history": [],
+                "current_state": {},
+                "budget": {"wall_clock_s": 1200.0},
+                "packet_dir": str(packet_dir),
+                "agent_session_id": "SESS-PRIOR",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    packet = _build_repair_packet(
+        session_dir=session_dir,
+        repair_slug="unit",
+        worktree_path=pdir,
+        task_id="task",
+        phase="integration",
+        repair_phase="pre_agent",
+        verify_scope="subtree",
+        config={},
+        budget_prefix="pre_agent_repair",
+        default_agent_turns=1,
+        default_oracle_invocations=1,
+        latest_oracle_result={},
+        product_contract={},
+        integration_context={},
+        success_criteria={},
+        attempt_history_entry={"type": "preflight"},
+    )
+
+    assert packet.agent_session_id == "SESS-PRIOR"
 
 
 def test_most_recent_per_unit_wins():

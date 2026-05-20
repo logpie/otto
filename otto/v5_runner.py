@@ -2898,6 +2898,12 @@ def _build_repair_packet(
     attempt_history.append(attempt)
     current_branch = branch if branch is not None else _git_capture(worktree_path, ["branch", "--show-current"])
     head = _git_capture(worktree_path, ["rev-parse", "HEAD"])
+    prior_agent_session_id = ""
+    if packet_path.exists():
+        try:
+            prior_agent_session_id = RepairPacket.load(packet_path).agent_session_id
+        except (OSError, json.JSONDecodeError, ValueError):
+            prior_agent_session_id = ""
     packet = RepairPacket(
         repair_unit={
             "id": repair_slug,
@@ -2951,6 +2957,7 @@ def _build_repair_packet(
             ),
         ),
         packet_dir=packet_dir,
+        agent_session_id=prior_agent_session_id,
     )
     packet.capture_scope_baseline()
     return packet
@@ -4326,7 +4333,7 @@ def _carry_prior_repair_packets(
     new_root_session_dir: Path,
 ) -> int:
     """Phase 1.2-B (2026-05-19): copy the most recent prior session's
-    ``integration/repair/<unit>/repair_packet.json`` (+ events.jsonl)
+    ``integration/repair/<unit>/repair_packet.json`` (+ archived events.jsonl)
     into the new session's mirror path, rewriting the serialized
     ``packet_dir`` field to the new location. Most-recent-per-unit
     wins. This lets ``_run_preflight_payload_repair_session``'s
@@ -4382,15 +4389,11 @@ def _carry_prior_repair_packets(
         # The schema-bug fix: rewrite packet_dir to the NEW location so
         # subsequent persist() goes there, not the prior session's path.
         payload["packet_dir"] = str(new_packet_dir)
-        # Phase 1.2-B v2 (2026-05-20, live evidence): clear budget-replay
-        # state so a new resume gets FRESH budget allocation. Without
-        # this, _replay_budget_usage(packet) reads carried attempt_history
-        # → reports budget_exhausted → the repair turn never runs → the
-        # agent never gets to use its preserved session_id. Keep the
-        # session_id (the prize) + static context; clear attempt_history
-        # (runner's budget bookkeeping, not agent-visible) and
-        # current_state (scope_baseline is stale against the advanced
-        # worktree; the function will re-capture on demand).
+        # Phase 1.2-B v2 (2026-05-20, live evidence): clear carried
+        # packet bookkeeping so the new resume starts from current run
+        # state. The active events file is intentionally not copied
+        # below; prior events are archived for context without feeding
+        # _replay_budget_usage(packet).
         payload["attempt_history"] = []
         payload["current_state"] = {}
 
@@ -4414,11 +4417,11 @@ def _carry_prior_repair_packets(
             try:
                 shutil.copy2(
                     prior_events,
-                    new_packet_dir / "repair_packet.events.jsonl",
+                    new_packet_dir / "prior_repair_packet.events.jsonl",
                 )
             except OSError as exc:
                 logger.warning(
-                    "Phase 1.2-B: failed to copy events.jsonl from %s: %s",
+                    "Phase 1.2-B: failed to archive events.jsonl from %s: %s",
                     prior_events,
                     exc,
                 )
