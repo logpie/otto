@@ -5692,7 +5692,46 @@ async def _process_children(
             })
             # Wait for in-flight to drain, then exit.
             if in_flight:
-                await asyncio.gather(*in_flight.values(), return_exceptions=True)
+                drained = list(in_flight.items())
+                drain_results = await asyncio.gather(
+                    *(task for _tid, task in drained),
+                    return_exceptions=True,
+                )
+                for leased_tid, drain_result in zip(
+                    (task_id for task_id, _task in drained),
+                    drain_results,
+                ):
+                    if not isinstance(drain_result, BaseException):
+                        continue
+                    reason = (
+                        "budget_cap_drain: "
+                        f"{type(drain_result).__name__}: {drain_result}"
+                    )
+                    logger.error(
+                        "budget cap drain failed for child %s",
+                        leased_tid,
+                        exc_info=(
+                            type(drain_result),
+                            drain_result,
+                            drain_result.__traceback__,
+                        ),
+                    )
+                    set_verdict(project_dir, leased_tid, "merge_blocked", cost_usd=0.0)
+                    update_task_metadata(
+                        project_dir,
+                        leased_tid,
+                        failure_reason=reason,
+                        merge_blocked_origin="budget_cap_drain",
+                        merge_blocked_reason=reason,
+                    )
+                    _emit(on_event, {
+                        "event": "budget_cap_drain_failure",
+                        "task_id": leased_tid,
+                        "error_type": type(drain_result).__name__,
+                        "error": str(drain_result),
+                        "reason": "budget_cap_drain",
+                        "verdict": "merge_blocked",
+                    })
                 for leased_tid in list(in_flight):
                     await dispatch_lease.release(leased_tid)
                 in_flight.clear()
@@ -6401,7 +6440,14 @@ async def _process_children(
             )
             for fut in done:
                 # Find which task this future belongs to.
-                tid = next(t for t, f in in_flight.items() if f is fut)
+                tid = None
+                for candidate_tid, candidate_fut in in_flight.items():
+                    if candidate_fut is fut:
+                        tid = candidate_tid
+                        break
+                if tid is None:
+                    logger.warning("orphaned future in dispatch loop")
+                    continue
                 in_flight.pop(tid, None)
                 released = False
                 try:

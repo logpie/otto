@@ -229,6 +229,71 @@ class TestProcessChildren:
         assert a_entry.get("verdict") == "catastrophic"
 
     @pytest.mark.asyncio
+    async def test_orphaned_done_future_is_ignored(
+        self,
+        project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A done future missing from in_flight should not crash the scheduler."""
+        record_task(project, task_id="root", intent="r")
+        child_id = enqueue_subtask(
+            project_dir=project,
+            parent_task_id="root",
+            parent_session_dir=project / "session",
+            intent="A",
+        )
+        record_task(project, task_id=child_id, intent="A", parent_task_id="root")
+
+        async def fake_run_child(**kwargs: Any) -> LeadResult:
+            tid = kwargs["entry"]["task_id"]
+            await asyncio.sleep(0)
+            return LeadResult(task_id=tid, verdict="pass", decomposition="inline")
+
+        real_wait = asyncio.wait
+        injected_orphan = False
+
+        async def fake_wait(
+            fs: Any,
+            *,
+            timeout: float | None = None,
+            return_when: str = asyncio.ALL_COMPLETED,
+        ) -> Any:
+            nonlocal injected_orphan
+            done, pending = await real_wait(fs, timeout=timeout, return_when=return_when)
+            if not injected_orphan:
+                orphan = asyncio.get_running_loop().create_future()
+                orphan.set_result(
+                    LeadResult(task_id="orphan", verdict="pass", decomposition="inline")
+                )
+                done = set(done)
+                done.add(orphan)
+                injected_orphan = True
+            return done, pending
+
+        monkeypatch.setattr("otto.v5_runner._run_child", fake_run_child)
+        monkeypatch.setattr(asyncio, "wait", fake_wait)
+        caplog.set_level("WARNING", logger="otto.v5_runner")
+
+        child_results: dict[str, LeadResult] = {}
+        integration_results: dict[str, LeadResult] = {}
+        await _process_children(
+            project_dir=project,
+            parent_task_id="root",
+            config={},
+            max_parallel=1,
+            tree_budget_usd=10.0,
+            child_results=child_results,
+            integration_results=integration_results,
+        )
+
+        assert child_results[child_id].verdict == "pass"
+        assert any(
+            "orphaned future in dispatch loop" in record.message
+            for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
     async def test_tree_budget_cap_halts_new_dispatches(self, project: Path) -> None:
         """When cumulative cost exceeds tree_budget_usd, no new tasks dispatch."""
         record_task(project, task_id="root", intent="r")
@@ -264,6 +329,73 @@ class TestProcessChildren:
             )
         # No children dispatched because cap was already hit.
         assert dispatched == []
+
+    @pytest.mark.asyncio
+    async def test_budget_cap_drain_failure_records_verdict(
+        self,
+        project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Drain failures after a budget-cap hit must not leave children orphaned."""
+        record_task(project, task_id="root", intent="r")
+        first = enqueue_subtask(
+            project_dir=project,
+            parent_task_id="root",
+            parent_session_dir=project / "session",
+            intent="first",
+        )
+        second = enqueue_subtask(
+            project_dir=project,
+            parent_task_id="root",
+            parent_session_dir=project / "session",
+            intent="second",
+        )
+        record_task(project, task_id=first, intent="first", parent_task_id="root")
+        record_task(project, task_id=second, intent="second", parent_task_id="root")
+
+        async def fake_run_child(**kwargs: Any) -> LeadResult:
+            tid = kwargs["entry"]["task_id"]
+            if tid == first:
+                await asyncio.sleep(0.01)
+                set_verdict(project, tid, "pass", cost_usd=2.0)
+                return LeadResult(
+                    task_id=tid,
+                    verdict="pass",
+                    cost_usd=2.0,
+                    decomposition="inline",
+                )
+            await asyncio.sleep(0.05)
+            raise RuntimeError("drain boom")
+
+        events: list[dict[str, Any]] = []
+        monkeypatch.setattr("otto.v5_runner._run_child", fake_run_child)
+
+        child_results: dict[str, LeadResult] = {}
+        integration_results: dict[str, LeadResult] = {}
+        await _process_children(
+            project_dir=project,
+            parent_task_id="root",
+            config={},
+            max_parallel=2,
+            tree_budget_usd=1.0,
+            child_results=child_results,
+            integration_results=integration_results,
+            on_event=events.append,
+        )
+
+        second_entry = get_task(project, second) or {}
+        assert second_entry.get("verdict") == "merge_blocked"
+        assert second_entry.get("cost_usd") == 0.0
+        assert second_entry.get("merge_blocked_origin") == "budget_cap_drain"
+        assert "budget_cap_drain" in second_entry.get("failure_reason", "")
+        assert {
+            "event": "budget_cap_drain_failure",
+            "task_id": second,
+            "error_type": "RuntimeError",
+            "error": "drain boom",
+            "reason": "budget_cap_drain",
+            "verdict": "merge_blocked",
+        } in events
 
     @pytest.mark.asyncio
     async def test_shared_dispatch_lease_caps_concurrent_schedulers(
