@@ -53,6 +53,7 @@ def register_v5_command(main: click.Group) -> None:
     _register_status_command(v5_group)
     _register_reset_verdict_command(v5_group)
     _register_retry_children_command(v5_group)
+    _register_plan_resume_command(v5_group)
 
     @v5_group.command("run")
     @click.argument("intent", required=True)
@@ -557,65 +558,41 @@ def _register_status_command(v5_group: click.Group) -> None:
                             )
                             console.print(f"      {key}: {preview}")
 
-        # Resume eligibility — match _resume_root_from_checkpoint guard logic.
-        resumable_verdicts = {"partial", "merge_blocked", "unverified", "pending_children"}
-        terminal_done = {"pass", "catastrophic"}
-        spec_path = project_dir / "otto_logs" / "sessions"
-        latest_session_with_spec: str | None = None
-        if spec_path.exists():
-            for sdir in sorted(spec_path.iterdir(), reverse=True):
-                if (sdir / "spec" / "spec.json").exists():
-                    latest_session_with_spec = sdir.name
-                    break
+        # Resume eligibility — delegate to the canonical planner so this
+        # diagnostic stays in sync with the runner + plan-resume command
+        # (Phase 2 — Codex R2#7 + user "centralize APIs" mandate).
+        from otto.v5_resume_plan import compute_resume_plan
 
+        plan = compute_resume_plan(
+            project_dir=project_dir,
+            intent_for_match=None,  # status doesn't know an intent; skip the match
+            config={},
+        )
         console.print("\n[bold]Resume eligibility:[/bold]")
-        if root_verdict in terminal_done:
+        if plan.status == "RESUMABLE":
             console.print(
-                f"  [yellow]NOT resumable[/yellow] — root verdict is "
-                f"'{root_verdict}' (terminal done state). "
-                f"Use [bold]otto v5 run --fresh[/bold] for a new run."
-            )
-        elif not child_ids:
-            console.print(
-                "  [yellow]NOT resumable[/yellow] — no children emitted "
-                "(decomposition didn't complete)."
-            )
-        elif not latest_session_with_spec:
-            console.print(
-                "  [yellow]NOT resumable[/yellow] — no spec.json checkpoint "
-                "found under otto_logs/sessions/*/spec/."
-            )
-        elif root_verdict in resumable_verdicts:
-            console.print(
-                f"  [green]RESUMABLE[/green] — root verdict '{root_verdict}' "
-                f"+ {len(child_ids)} children + spec at session "
-                f"{latest_session_with_spec}."
+                f"  [green]RESUMABLE[/green] — root verdict "
+                f"'{plan.root_verdict}' + {len(plan.children)} children + "
+                f"spec at session {plan.latest_spec_checkpoint}."
             )
             console.print(
-                "  [dim]Next `otto v5 run` (no --fresh) will skip compile + "
-                "decompose + child rebuild and re-enter at integration phase.[/dim]"
+                "  [dim]Next `otto v5 run` (no --fresh) will skip "
+                f"{', '.join(plan.skipped_phases)} and re-enter at "
+                f"{plan.phase_to_enter} phase.[/dim]"
             )
-            blocked = [
-                cid for cid in child_ids
-                if str(
-                    (tasks.get(cid) if isinstance(tasks, dict) else {}).get("verdict") or ""
-                ) == "merge_blocked"
-            ]
-            if blocked:
-                console.print(
-                    f"  [yellow]Note:[/yellow] {len(blocked)} child(ren) are "
-                    f"merge_blocked. Integration will treat their existing "
-                    f"verdict as final unless you reset them first:"
-                )
-                console.print(
-                    f"    [bold]otto v5 reset-verdict[/bold] "
-                    f"--task {' --task '.join(blocked)}"
-                )
         else:
             console.print(
-                f"  [yellow]Unknown state[/yellow] — root verdict '{root_verdict}' "
-                f"isn't in the resumable set. Inspect graph.json manually."
+                f"  [yellow]{plan.status}[/yellow] — "
+                f"{plan.not_resumable_reason or '(no reason recorded)'}"
             )
+        if plan.suggested_next:
+            console.print("  [bold]Suggested:[/bold]")
+            for s in plan.suggested_next:
+                console.print(f"    $ {s}")
+        if plan.concerns:
+            console.print("  [bold yellow]Concerns:[/bold yellow]")
+            for c in plan.concerns:
+                console.print(f"    • {c}")
 
 
 def _register_reset_verdict_command(v5_group: click.Group) -> None:
@@ -833,3 +810,126 @@ def _register_retry_children_command(v5_group: click.Group) -> None:
             "\n[bold]Next:[/bold] `otto v5 run \"<original intent>\"` "
             "(no --fresh). The scheduler will pick up the reset entries."
         )
+
+
+def _register_plan_resume_command(v5_group: click.Group) -> None:
+    """`otto v5 plan-resume` — read-only resume simulation.
+
+    "Look before you spend $$" — predicts what `otto v5 run` (no
+    --fresh) would do given the project's persisted state, including
+    cost + wall-time ranges and per-child predicted actions. No
+    mutations.
+
+    Plan Phase 2 (plan-checkpoint-resume-v2.md, Codex APPROVED at R5).
+    """
+
+    @v5_group.command("plan-resume")
+    @click.option(
+        "--model", default="sonnet", show_default=True,
+        help="Model to assume for cost estimates (sonnet|opus|other).",
+    )
+    @click.option(
+        "--intent", default=None,
+        help="Predict for THIS intent (matched against persisted root "
+             "intent). If different, refuses (intent-drift guard).",
+    )
+    @click.option("--json", "json_out", is_flag=True,
+                  help="Emit structured JSON for scripts/MC instead of human text.")
+    def plan_resume_cmd(model: str, intent: str | None, json_out: bool) -> None:
+        """Predict what `otto v5 run` (no --fresh) would do for this
+        project right now. Read-only — safe to call any time.
+        """
+        require_git()
+        try:
+            project_dir = resolve_project_dir(Path.cwd())
+        except ConfigError as exc:
+            error_console.print(f"[error]{exc}[/error]")
+            sys.exit(2)
+
+        try:
+            config = load_config(project_dir / "otto.yaml")
+        except ConfigError:
+            config = {}
+
+        from otto.v5_resume_plan import compute_resume_plan, plan_to_json
+
+        plan = compute_resume_plan(
+            project_dir=project_dir,
+            intent_for_match=intent,
+            model=model,
+            config=config if isinstance(config, dict) else {},
+        )
+
+        if json_out:
+            # Raw stdout — bypass Rich wrapping so consumers can pipe the
+            # output through `jq` etc. without control-character noise.
+            click.echo(plan_to_json(plan))
+            return
+
+        # Human render.
+        status_color = {
+            "RESUMABLE": "green",
+            "NOT_RESUMABLE": "yellow",
+            "FRESH_ONLY": "yellow",
+        }.get(plan.status, "white")
+        console.print(f"[bold]Status:[/bold] [{status_color}]{plan.status}[/{status_color}]")
+        if plan.not_resumable_reason:
+            console.print(f"  [dim]{plan.not_resumable_reason}[/dim]")
+        console.print(f"[bold]Root verdict:[/bold] {_color_verdict(plan.root_verdict)}")
+        console.print(f"[bold]Root intent:[/bold] {plan.root_intent_preview}...")
+        if plan.phase_to_enter:
+            console.print(
+                f"[bold]Phase to enter:[/bold] {plan.phase_to_enter} "
+                f"(skipping: {', '.join(plan.skipped_phases)})"
+            )
+        if plan.latest_spec_checkpoint:
+            console.print(
+                f"[bold]Spec checkpoint:[/bold] {plan.latest_spec_checkpoint}"
+            )
+        if plan.repair_packets_carriable:
+            console.print(
+                f"[bold]Repair packets carriable:[/bold] "
+                f"{plan.repair_packets_carriable}"
+            )
+
+        if plan.children:
+            console.print(f"\n[bold]Children ({len(plan.children)}) predictions:[/bold]")
+            for c in plan.children:
+                action_color = {
+                    "skip_pass": "green",
+                    "merge_unmerged": "cyan",
+                    "rebuild_via_retry": "cyan",
+                    "stays_merge_blocked": "red",
+                    "stays_unverified": "yellow",
+                    "pending_children": "dim",
+                    "unknown_state": "magenta",
+                }.get(c.action, "white")
+                console.print(
+                    f"  {c.task_id}  {_color_verdict(c.current_verdict):16s}  "
+                    f"[{action_color}]{c.action}[/{action_color}]  "
+                    f"({c.intent_preview[:50]}...)"
+                )
+                if c.concern:
+                    console.print(f"      [dim]{c.concern}[/dim]")
+
+        if plan.status == "RESUMABLE":
+            lo, p50, hi = plan.estimated_cost_usd_range
+            wl, wp, wh = plan.estimated_wall_minutes_range
+            console.print(
+                f"\n[bold]Cost estimate ({plan.model_assumed}):[/bold] "
+                f"${lo:.0f} – ${p50:.0f} – ${hi:.0f} (low/p50/high)"
+            )
+            console.print(
+                f"[bold]Wall estimate:[/bold] "
+                f"{wl:.0f} – {wp:.0f} – {wh:.0f} min"
+            )
+
+        if plan.concerns:
+            console.print("\n[bold yellow]Concerns:[/bold yellow]")
+            for c in plan.concerns:
+                console.print(f"  • {c}")
+
+        if plan.suggested_next:
+            console.print("\n[bold]Suggested next:[/bold]")
+            for s in plan.suggested_next:
+                console.print(f"  $ {s}")

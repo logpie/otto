@@ -116,8 +116,11 @@ def test_status_renders_resumable_with_blocked_children(tmp_path: Path) -> None:
     assert "merge_blocked" in out
     assert "RESUMABLE" in out
     # When there ARE merge_blocked children, status surfaces the
-    # reset-verdict suggestion (this is the actionable diagnostic).
-    assert "reset-verdict" in out
+    # retry-children suggestion (per Phase 2 refactor that delegates to
+    # the canonical resume planner — retry-children is the actionable
+    # command that makes blocked tasks runnable; reset-verdict alone
+    # would not, per Codex R1 finding in the Phase 1 plan).
+    assert "retry-children" in out
     assert "v5-block1" in out and "v5-block2" in out and "v5-block3" in out
 
 
