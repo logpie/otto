@@ -105,6 +105,16 @@ PORT_CLEANUP_TIMEOUT_S = 2
 # and the journey UI executor to throttle their event-source polling.
 UI_POLL_INTERVAL_S = 0.05
 
+# Repair-agent wall-clock ceiling. Each individual repair-agent invocation
+# (foundation gate, integration smoke, child upward-merge-after-failure)
+# gets at most this many seconds before the runner cancels it and records a
+# timeout. Bumped from 1200 → 3600 (60 min) after the 2026-05-20 linkboard
+# e2e showed two consecutive 1199s timeouts cutting off real fix work
+# mid-flight ("at the 1199s wall, then discarded" comment in v5/repair.py).
+# Set per-run via `repair_wall_clock_s` in otto.yaml or a stage-specific
+# `<stage>_repair_wall_clock_s` (see v5/preflight_oracle._repair_budget_from_config).
+DEFAULT_REPAIR_AGENT_WALL_CLOCK_S = 3600.0
+
 
 @dataclass(frozen=True)
 class _Snapshot:

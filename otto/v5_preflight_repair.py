@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from otto.defaults import DEFAULT_REPAIR_AGENT_WALL_CLOCK_S
 from otto.path_ownership import path_matches_any_ownership_pattern
 from otto.safe_slug import short_hash
 from otto.setup_gitignore import is_common_build_artifact_path, is_otto_owned_path
@@ -34,7 +35,7 @@ logger = logging.getLogger("otto.v5_preflight_repair")
 
 @dataclass(frozen=True)
 class RepairBudget:
-    wall_clock_s: float = 1200.0
+    wall_clock_s: float = DEFAULT_REPAIR_AGENT_WALL_CLOCK_S
     cost_usd: float | None = None
     agent_turns: int = 1
     oracle_invocations: int = 4
@@ -60,7 +61,7 @@ class RepairBudget:
         if not isinstance(raw, dict):
             return cls()
         return cls(
-            wall_clock_s=float(raw.get("wall_clock_s") or 1200.0),
+            wall_clock_s=float(raw.get("wall_clock_s") or DEFAULT_REPAIR_AGENT_WALL_CLOCK_S),
             cost_usd=(
                 float(raw["cost_usd"])
                 if isinstance(raw.get("cost_usd"), (int, float))

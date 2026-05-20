@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, cast
 
 
+from otto.defaults import DEFAULT_REPAIR_AGENT_WALL_CLOCK_S
 from otto.journey_scope_policy import ExecutionScope
 from otto.lead import LeadResult
 from otto.safe_slug import safe_slug
@@ -425,7 +426,7 @@ def _repair_budget_from_config(
     prefix: str,
     default_agent_turns: int,
     default_oracle_invocations: int,
-    default_wall_clock_s: float = 1200.0,
+    default_wall_clock_s: float = DEFAULT_REPAIR_AGENT_WALL_CLOCK_S,
 ) -> RepairBudget:
     def number(key: str, default: float | None) -> float | None:
         raw = config.get(f"{prefix}_{key}", config.get(f"repair_{key}", default))
