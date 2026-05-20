@@ -34,6 +34,10 @@ from otto.agent.events import (
     _truncate_for_agent_log,
 )
 
+
+import logging
+logger = logging.getLogger("otto.agent.codex")
+
 try:
     from agents import Agent as _OpenAIAgent
     from agents import AgentOutputSchema as _OpenAIAgentOutputSchema

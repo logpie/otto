@@ -339,12 +339,8 @@ def _summarize_session(session_dir: Path, session_id: str) -> dict[str, Any]:
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    from otto.observability import read_json_dict
+    return read_json_dict(path, default=None, logger=logger, log_context="run-view")
 
 
 def _session_finished_at(

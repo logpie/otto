@@ -25,7 +25,9 @@ Input:
 ## Read First
 
 Read the scoped context path first when provided. Otherwise read `CHARTER.md`
-and `decisions.md` if they exist. Also read the `intent` field in
+and `decisions.md` if they exist (these should be <5KB combined; if they're
+absent or don't clarify scope, decompose based on intent alone — do not try to
+infer everything from the codebase). Also read the `intent` field in
 `{journeys_path}`. The journeys are representative verification samples; the
 intent is the actual build target.
 
@@ -33,6 +35,7 @@ intent is the actual build target.
 change a shared schema, API shape, storage format, env/port convention, or
 other sibling-facing contract, append one concise entry and list it in
 `verdict.json.decisions_appended`.
+<!-- audit:F-12 applied -->
 
 ## Decide
 
@@ -41,9 +44,14 @@ count. Prefer inline work for a focused feature, a brownfield change, or a
 moderate scope that fits in context. Call `mcp__otto__begin_inline`, then build.
 
 Decompose only when the goal has genuinely independent subsystems or is too
-large to fit in one agent context. For a moderate web app, the usual shape is:
-one concise architect/scaffold task plus 3-5 build leaves. Do not create a
-separate integration child; Otto runs integration automatically after children.
+large to fit in one agent context. Criteria for decomposing: subsystems with
+zero cross-dependencies (each can build, test, and verify alone), or a leaf
+that would not fit in one agent's working context. For a moderate webapp where
+these criteria hold, this typically lands as one concise architect/scaffold
+task plus a handful of vertical-capability build leaves (about 3-5 in
+practice). Do not create a separate integration child; Otto runs integration
+automatically after children.
+<!-- audit:F-01 applied -->
 
 FE waiting on BE is fake parallelism: it lengthens the critical path while
 paying setup cost twice. Prefer vertical capability leaves that can start,
@@ -54,7 +62,11 @@ the capability inline.
 Avoid recursive decomposition. If a child scope seems large, prefer a bigger
 coherent vertical leaf over many tiny horizontal layer leaves unless the work
 truly cannot fit. Every extra session pays setup, prompt, worktree, and test
-overhead.
+overhead. The architect/foundation child is hard-forbidden from decomposing
+(see "Architect task guidance" below); if your architect scope feels too large
+to fit inline, that is a signal that the parent decomposition is wrong —
+re-shape the parent partition rather than recursing.
+<!-- audit:F-13 applied -->
 
 When you decompose:
 - Emit semantic user-visible goals with `mcp__otto__submit_subtask`.
@@ -64,17 +76,32 @@ When you decompose:
   partition from the scaffold it actually builds.
 - Emit the architect/scaffold child with `task_role="foundation"`; ordinary
   build leaves use `task_role="feature"` and `depends_on=[architect_task_id]`
-  when a foundation child exists.
+  when a foundation child exists. These are the ONLY two valid values for
+  `task_role` — any other string (e.g. `"integration"`, `"scaffold"`,
+  `"glue"`) is invalid and the runner will reject the subtask. Integration is
+  not a `task_role`; Otto schedules it automatically after children.
 - The architect, if emitted, must build inline and must not decompose.
+<!-- audit:F-03 applied -->
 
-Architect task guidance:
-- Create the minimal runnable scaffold and concise `CHARTER.md`. The
-  scaffold and every feature build follow the pinned, version-locked
-  framework conventions the build agent is given (Vite/TS-strict, React,
-  zustand, FastAPI, SQLAlchemy single-Base, ports/start.sh, etc.). Decompose
-  consistently with that fixed stack — do not specify or assume a different
-  framework/version, and keep shared scaffold files (manifests, tsconfig,
-  single ORM Base, start.sh) scaffold-owned per those conventions.
+Architect task guidance (this section describes what you, the agent, must do
+if you build the scaffold inline, AND what your architect child must do if you
+emit one):
+- Create the minimal runnable scaffold and concise `CHARTER.md`. The scaffold
+  and every feature build follow the pinned framework conventions the build
+  agent is given in `DECOMP_RUNTIME_CONTEXT.scaffold_seed` (or, if no seed is
+  present, the project's existing stack discovered from manifests). For a
+  typical webapp, this is Vite/TS-strict + React + zustand on the frontend and
+  FastAPI + SQLAlchemy single-Base on the backend, with `ports/` config and a
+  `start.sh` launcher — keep shared scaffold files (manifests, tsconfig,
+  single ORM Base, start.sh) scaffold-owned per those conventions. For other
+  project kinds (CLI, library, backend-only API, Rust/Go/Java service), use
+  the stack the seed or existing repo prescribes — do NOT force a webapp
+  stack onto a CLI or library, and do not assume `start.sh` or `ports/` exist
+  outside webapp shapes. Decompose consistently with that fixed stack; do not
+  specify or assume a different framework/version.
+<!-- audit:F-05 applied -->
+<!-- audit:F-06 applied -->
+<!-- audit:F-19 applied -->
 - If `DECOMP_RUNTIME_CONTEXT.scaffold_seed` is present, Otto has ALREADY
   created and committed the env-critical scaffold (`start.sh`, package/build
   manifests, tsconfig/vite config, backend pyproject — see its `seeded_paths`
@@ -85,11 +112,31 @@ Architect task guidance:
   to the existing manifests); features build against it.
 - CHARTER should contain operational facts, shared contracts, and one
   `## Information Architecture Contract` JSON block when this is a webapp.
-- Webapp scaffolds MUST isolate route/API/screen registration. A feature leaf
-  must add its own backend router/controller/module file or frontend
-  feature-route module; it must not edit a shared central route registry.
-  Use auto-discovery, manifest auto-compose, plugin loading, or the
-  stack-equivalent extension point so new feature registration is file-local.
+  For non-webapp project kinds, still emit an Information Architecture
+  Contract block — the same registration_isolation / foundation_contracts /
+  feature_owned_paths invariants apply, just with different extension
+  points:
+  - CLI tool: the shared registry is the command/subcommand registry
+    (typer/click/cobra/clap loader); features add their own subcommand
+    modules under a `commands/<feature>.py` glob; there is no
+    frontend/backend split.
+  - Library: the shared registry is the public `__init__.py` /
+    `src/lib.rs` / `index.ts` that re-exports per-feature submodules;
+    features add their own submodules under a `lib/<feature>` glob and
+    never edit the root re-export aggregator if it auto-composes.
+  - Backend-only API / microservice: same as the backend half of the
+    webapp guidance — router/models/schemas registry + per-feature
+    extension globs — without any frontend bullets.
+  Use the existing project structure as the template for what paths and
+  extension globs look like.
+- Webapp scaffolds (and any project with a feature-pluggable route or
+  command surface) MUST isolate route/API/screen/command registration. A
+  feature leaf must add its own backend router/controller/module file,
+  frontend feature-route module, or CLI subcommand module; it must not edit
+  a shared central registry. Use auto-discovery, manifest auto-compose,
+  plugin loading, or the stack-equivalent extension point so new feature
+  registration is file-local.
+<!-- audit:F-27 applied -->
 - In the Information Architecture Contract JSON, include
   `registration_isolation`: a machine-readable object with `policy`,
   `shared_registry_files`, and `leaf_extension_globs`. Shared registry files
@@ -97,37 +144,59 @@ Architect task guidance:
   tasks add files matching the extension globs instead of editing those
   registries.
 - Shared TEST/BUILD infrastructure must also be scaffold-owned. Any file every
-  feature would otherwise each create or edit — test config/bootstrap
-  (`conftest.py`, `tests/setup.*`, `jest.config.*`, shared DB/session
-  fixtures, shared mocks/factories), shared lint/type config — MUST be
-  created by the scaffold and declared as a `foundation_contracts` entry
-  owned by the architect/scaffold task (`check: "semantic"` is correct for
-  content that legitimately evolves, e.g. conftest.py; use `"literal"` only
-  for exact-match files). Do NOT list these in
-  `registration_isolation.shared_registry_files` — that field is exclusively
-  for route/API/screen registration registries (which must be `check:
-  "literal"`); putting test/build infra there fails the contract gate.
-  Feature leaves add only their own `test_<feature>.*` modules under the
-  extension globs and import the shared harness; they must never create or
-  edit the shared test bootstrap (the foundation_contract owner makes that an
-  isolation violation). Divergent independent creates of these files are the
-  #1 cause of integration merge conflicts.
-- Shared cross-feature CLIENT RUNTIME STATE is the same hazard as route
-  registration. If multiple features need a shared store/slice, context,
-  provider, or shared hook (e.g. `frontend/src/store/uiStore.ts`,
-  `hooks/useWebSocket.ts`, a notifications/toast/realtime context), the
-  scaffold MUST set up a COMPOSITION/extension point: the scaffold-owned
+  feature would otherwise each create or edit — test config/bootstrap (for
+  pytest: `conftest.py`, shared DB/session fixtures, shared factories; for
+  vitest/jest: `vitest.config.*` / `jest.config.*` / `tests/setup.*`; or the
+  equivalent files for the project's actual test runner, which you must
+  discover from `package.json` / `pyproject.toml` / `Cargo.toml` /
+  `go.mod` / etc.), shared lint/type config — MUST be created by the
+  scaffold and declared as a `foundation_contracts` entry owned by the
+  architect/scaffold task. Choose `check` per these semantics:
+  - `check: "literal"` means byte-exact match enforced — the file's content
+    must not drift across features (use this for route/API registries,
+    plugin loaders, and any file whose registration pattern must not
+    change, e.g. `backend/routers/__init__.py`).
+  - `check: "semantic"` means content may evolve as long as the public
+    behavior is preserved (use this for files like `conftest.py` whose
+    imports legitimately grow, or shared base classes whose body may
+    extend).
+  Do NOT list test/build infra in `registration_isolation.shared_registry_files`
+  — that field is exclusively for route/API/screen registration registries
+  (which must be `check: "literal"`); putting test/build infra there fails
+  the contract gate. Feature leaves add only their own `test_<feature>.*`
+  modules under the extension globs and import the shared harness; they must
+  never create or edit the shared test bootstrap (the foundation_contract
+  owner makes that an isolation violation). Divergent independent creates of
+  these files are the #1 cause of integration merge conflicts.
+<!-- audit:F-04 applied -->
+<!-- audit:F-07 applied -->
+- Shared cross-feature CLIENT RUNTIME STATE (when the project has a client
+  UI at all — skip this bullet for backend-only services, CLIs, and
+  libraries) is the same hazard as route registration. If multiple features
+  need a shared store/slice, context, provider, or shared hook, the scaffold
+  MUST set up a COMPOSITION/extension point: the scaffold-owned
   store/provider auto-composes feature-local slices, and each feature adds
-  ONLY its own `frontend/src/features/<feature>/store.ts` (or `*.slice.ts` /
-  hook) under its leaf-extension glob — features must NEVER edit the central
-  scaffold-owned store/hook (the foundation_contract owner makes that a
-  `foundation_contract_write_blocked` isolation violation, the way run #14's
-  realtime feature was blocked writing the shared uiStore/useWebSocket). If a
-  feature's scope genuinely needs shared client state or a shared transport
-  (websocket/event bus), the scaffold MUST provide that extension point at
-  build time (a slice registry, a context with feature-pluggable reducers, a
-  subscribe API) and declare it in `registration_isolation.leaf_extension_globs`
-  — do not leave a feature with no isolated way to contribute shared state.
+  ONLY its own per-feature slice/hook under its leaf-extension glob —
+  features must NEVER edit the central scaffold-owned store/hook (the
+  foundation_contract owner makes that a `foundation_contract_write_blocked`
+  isolation violation, the way run #14's realtime feature was blocked
+  writing the shared uiStore/useWebSocket). Examples by framework:
+  - React: scaffold owns `frontend/src/store/uiStore.ts` and
+    `frontend/src/hooks/useWebSocket.ts`; features add
+    `frontend/src/features/<feature>/store.ts` (or `*.slice.ts` / hook).
+  - Vue: scaffold owns the root Pinia store / provide-inject root; features
+    add per-feature stores under `src/features/<feature>/store.ts`.
+  - Svelte: scaffold owns the root writable store registry; features add
+    `src/features/<feature>/store.ts`.
+  Use the equivalent extension point for whatever frontend framework the
+  project actually uses. If a feature's scope genuinely needs shared client
+  state or a shared transport (websocket/event bus), the scaffold MUST
+  provide that extension point at build time (a slice registry, a context
+  with feature-pluggable reducers, a subscribe API) and declare it in
+  `registration_isolation.leaf_extension_globs` — do not leave a feature
+  with no isolated way to contribute shared state.
+<!-- audit:F-09 applied -->
+<!-- audit:F-11 applied -->
 - The composition/extension-point rule above is NOT frontend-only: it applies
   to ANY shared module every feature must EXTEND with new definitions —
   notably the BACKEND data-model and schema layer. A shared `models.py` /
@@ -145,11 +214,15 @@ Architect task guidance:
   `backend/models.py`/`backend/schemas.py` it had to extend).
 - A leaf-extensible per-feature model package solves FILE ownership but NOT
   the shared TABLE/ENTITY NAMESPACE inside it. Every DB table / ORM
-  `__tablename__` (or stack equivalent) MUST have EXACTLY ONE definition in
-  the whole codebase, on ONE shared ORM declarative `Base`/`MetaData` the
-  scaffold owns (declare that base module as a `foundation_contract` /
-  `shared_registry_files` entry, `leaf_edit:false`; ALL models register on
-  that single metadata). A domain entity that ≥2 features READ or WRITE is
+  `__tablename__` (or stack equivalent — Django's app+model name, Tortoise's
+  Meta.table, the schema name in raw SQL, etc.) MUST have EXACTLY ONE
+  definition in the whole codebase, on ONE canonical schema registry the
+  scaffold owns: for SQLAlchemy that's a shared declarative `Base`/`MetaData`;
+  for Django that's a shared `models` app; for Tortoise it's the registered
+  models list; for raw SQL it's one canonical migrations directory. Declare
+  that registry module as a `foundation_contract` / `shared_registry_files`
+  entry with `leaf_edit:false`; ALL models register against that single
+  registry. A domain entity that ≥2 features READ or WRITE is
   CROSS-CUTTING, not feature-private (e.g. an audit log, webhooks, users,
   workspace/membership): its model MUST live in a scaffold-owned shared
   models module, defined ONCE, listed in CHARTER with its single owning
@@ -165,24 +238,29 @@ Architect task guidance:
   byte-isolated child-verify passed, collided only at integration). Enumerate
   every cross-cutting/shared entity and its single foundation owner in
   CHARTER so features build against one canonical model.
+<!-- audit:F-08 applied -->
 - Declare shared foundation files in a machine-readable `## Foundation Contracts`
   JSON block or `foundation_contracts` IA field. Each entry has `path`,
   `owner_task_id`, `check` (`literal` or `semantic`), and optional
   `required_exports`/`behavior_probes`; route registries must use `literal`.
 - For any scaffold-owned shared module FEATURES CONSUME (context/hook/store/
   client/util/shared types — e.g. `useToast`, `useAuth`, an api client, a
-  shared store selector), `required_exports` MUST pin the EXACT public API
-  surface, not just export names: for each export give its precise signature —
-  the hook's return-value type with every method name + params (e.g.
-  `useToast(): { showToast(message: string, type?: 'success'|'error'): void }`),
-  exported type/interface fields, function params/return. Features build in
-  isolation and only this declared surface guarantees they agree at
-  integration; an under-specified contract (export name only) makes each
-  feature INVENT method names (run #15: 4/4 features passed alone but the
-  integrated build broke — `showToast` did not exist on `ToastContextValue`
-  because the contract named the export but not its shape). State in CHARTER
-  prose that features MUST import and call exactly this declared API verbatim
-  and never invent or rename methods on a scaffold-owned type.
+  shared store selector, a CLI subcommand registry, an exported library
+  interface), `required_exports` MUST pin the EXACT public API surface, not
+  just export names: for each export give its precise signature — the
+  function's return-value type with every method name + params, exported
+  type/interface fields, function params/return. Example (React hook):
+  `useToast(): { showToast(message: string, type?: 'success'|'error'): void }`.
+  Show the equivalent signature for whatever stack your project uses.
+  Features build in isolation and only this declared surface guarantees they
+  agree at integration; an under-specified contract (export name only)
+  makes each feature INVENT method names (run #15: 4/4 features passed
+  alone but the integrated build broke — `showToast` did not exist on
+  `ToastContextValue` because the contract named the export but not its
+  shape). State in CHARTER prose that features MUST import and call exactly
+  this declared API verbatim and never invent or rename methods on a
+  scaffold-owned type.
+<!-- audit:F-10 applied -->
 - After building the scaffold, author the authoritative ownership partition in
   CHARTER's Information Architecture Contract as `feature_owned_paths`: an
   object keyed by each sibling feature child task_id. Use the EXACT task_ids
@@ -190,8 +268,13 @@ Architect task guidance:
   entry has the real `task_id` and its `title`/scope). You will NOT have an
   `otto_logs/` directory — do not try to read task_graph.json, and never
   invent placeholder keys like `PLACEHOLDER_*`; an unknown task_id fails the
-  contract gate. Provide an entry for every listed target, with exact NEW
-  file paths/globs that feature may add. Feature paths must live under
+  contract gate. If `feature_partition_targets` is empty, missing, or
+  malformed in your runtime context, do NOT fabricate task_ids: write a
+  `feature_owned_paths: {}` (empty object), explain in CHARTER prose that
+  the partition could not be authored because partition targets were
+  unavailable, and STOP rather than guessing. Otherwise, provide an entry
+  for every listed target, with exact NEW file paths/globs that feature
+  may add. Feature paths must live under
   `registration_isolation.leaf_extension_globs`; never assign a
   foundation_contract or shared registry file to a feature. Conversely the
   scaffold/foundation MUST NOT pre-create (seed) any file that is
@@ -199,17 +282,35 @@ Architect task guidance:
   `leaf_extension_globs` entry. Auto-discovery/composition seams MUST tolerate
   an absent feature file: the loader globs, so a missing
   `routers/<x>/router.py` / `models/<x>.py` is simply not registered and the
-  app still boots. Seeding a feature-owned stub makes the foundation a
-  contributor to a feature-owned file, which then fails the integration union
-  guard or merge when the owning feature implements it for real (the iTracker
-  run: foundation-seeded `backend/routers/*/router.py` 501-stubs caused
-  identical `integration union incomplete` / merge-conflict blocks on every
-  feature). The foundation owns ONLY aggregators/loaders/base + true shared
+  app still boots. The "integration union guard" mentioned below is Otto's
+  runtime check that the union of paths each task touched matches the
+  declared partition; seeding a feature-owned stub makes the foundation a
+  contributor to a feature-owned file, which then fails this guard (the
+  runner aborts with an `integration union incomplete` error) or merge when
+  the owning feature implements it for real (the iTracker run:
+  foundation-seeded `backend/routers/*/router.py` 501-stubs caused identical
+  `integration union incomplete` / merge-conflict blocks on every feature).
+  The foundation owns ONLY aggregators/loaders/base + true shared
   scaffolding, never feature-owned per-resource files.
+<!-- audit:F-15 applied -->
+<!-- audit:F-16 applied -->
 - Keep prose short. Do not restate JSON in paragraphs.
 - Create `decisions.md`.
-- Verify the scaffold with the smallest build/typecheck command that proves it
-  is usable. Do not run browser E2E against an empty shell.
+- Verify the scaffold with the smallest build/typecheck command that proves
+  it is usable. Discover that command by reading the project's manifests
+  (`package.json` `scripts`, `pyproject.toml`/`Makefile` targets,
+  `Cargo.toml`, etc.) and pick the cheapest one that exercises compilation:
+  for TypeScript that is typically `tsc --noEmit` or `vite build`; for
+  Python `python -m py_compile` or `mypy` if configured; for Rust
+  `cargo check`; for Go `go build ./...`. Add a webapp boot probe
+  (`start.sh` returns 0 and the server begins listening) if the project is
+  a webapp. Do NOT run Playwright / browser E2E at this stage: an "empty
+  shell" here means a scaffold with no feature code merged in yet — it has
+  loader globs, foundation contracts, and zero feature implementations, so
+  any UI flow would fail trivially. Save E2E for integration once features
+  land.
+<!-- audit:F-17 applied -->
+<!-- audit:F-18 applied -->
 
 ## Build Inline
 
@@ -220,9 +321,16 @@ Leaf verification:
 - Write and run focused unit, component, API, CLI, or subsystem tests for your
   scope.
 - Do not run cross-stack Playwright as a leaf when sibling systems are not
-  integrated. Mock sibling APIs only at the contract boundary if needed.
+  integrated. You MAY mock sibling APIs (other features' endpoints, external
+  services outside your scope) at the contract boundary if needed for leaf
+  isolation. Integration will replace those mocks with real services per
+  `lead-integration.md`, so keep your leaf tests honest about what they
+  prove: a passing leaf test against a mocked sibling does NOT prove the
+  integrated product works, and the integration agent will re-verify
+  end-to-end without the mocks.
 - Fix warnings that indicate real product or test fragility. If test
   infrastructure is missing, say so honestly in `intent_coverage.partial`.
+<!-- audit:F-14 applied -->
 
 Subsystem boundary:
 - Stay inside the subsystem or paths implied by your intent.

@@ -36,13 +36,21 @@ from otto.mission_control.adapters.common import (
 )
 from otto.mission_control.model import ArtifactRef, DetailModel, HistoryRow
 
+import logging
+logger = logging.getLogger("otto.mission_control.adapters.queue")
+
+
 
 class QueueMissionControlAdapter(ActionExecutingAdapter):
     def legacy_records(self, project_dir: Path, now: datetime, live_records: list[RunRecord]):
         try:
             tasks = load_queue(project_dir)
             state = load_state(project_dir)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "queue.legacy_records: queue/state load failed (%s: %s); returning []",
+                type(exc).__name__, exc,
+            )
             return []
 
         task_states = state.get("tasks", {}) if isinstance(state, dict) else {}
@@ -339,7 +347,11 @@ def _queue_worktree(record) -> str | None:
             task_id = str(record.identity.get("queue_task_id") or "")
             if task.id == task_id and task.worktree:
                 return str((Path(record.project_dir) / task.worktree).resolve(strict=False))
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "queue worktree resolution failed for %s (%s: %s)",
+            record.run_id, type(exc).__name__, exc,
+        )
         return None
     return None
 
@@ -349,7 +361,11 @@ def _queue_task_present(project_dir: Path, task_id: str) -> bool:
         return False
     try:
         return any(task.id == task_id for task in load_queue(project_dir))
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "queue task-presence check for %s failed (%s: %s); treating as absent",
+            task_id, type(exc).__name__, exc,
+        )
         return False
 
 

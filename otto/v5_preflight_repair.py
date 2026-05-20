@@ -27,6 +27,10 @@ from otto.v5_clean_verify import (
 )
 from otto.v5_common import git_capture as _git_capture, iso_now as _iso_now
 
+import logging
+logger = logging.getLogger("otto.v5_preflight_repair")
+
+
 
 @dataclass(frozen=True)
 class RepairBudget:

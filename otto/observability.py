@@ -104,6 +104,64 @@ def load_json_file(path: Path) -> Any | None:
         return None
 
 
+def read_json_dict(
+    path: Path,
+    *,
+    default: dict[str, Any] | None = None,
+    logger: "logging.Logger | None" = None,
+    log_context: str = "",
+) -> dict[str, Any] | None:
+    """Best-effort read of a JSON file expected to contain a dict.
+
+    Returns ``default`` on any failure: missing file, OS error, JSON decode
+    error, or payload that isn't a dict. ``default`` is whatever sentinel
+    the caller wants (commonly ``{}`` or ``None``). If ``logger`` is given,
+    a warning is emitted with the path, ``log_context``, and the exception
+    type+message; this is the recommended path for diagnostic visibility.
+
+    Use this for "if it's there, read it; otherwise carry on" patterns
+    (resume checkpoints, cached state, optional artifacts).
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        if logger is not None:
+            logger.warning(
+                "read_json_dict failed for %s%s (%s: %s); returning default",
+                path,
+                f" ({log_context})" if log_context else "",
+                type(exc).__name__,
+                exc,
+            )
+        return default
+    if not isinstance(payload, dict):
+        if logger is not None:
+            logger.warning(
+                "read_json_dict: %s%s is not a JSON object (got %s); returning default",
+                path,
+                f" ({log_context})" if log_context else "",
+                type(payload).__name__,
+            )
+        return default
+    return payload
+
+
+def require_json_dict(path: Path) -> dict[str, Any]:
+    """Strict read of a JSON file expected to contain a dict.
+
+    Raises ``ValueError`` if the file is missing, unreadable, has invalid
+    JSON, or contains a non-dict payload. Use this when the file is a
+    contract that MUST be present and well-formed; failure is a real bug.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"{path} is unreadable: {type(exc).__name__}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a JSON object, got {type(payload).__name__}")
+    return payload
+
+
 def dirty_worktree_files(project_dir: Path, *, limit: int = 20) -> list[str]:
     """Return the first N paths from `git status --porcelain`."""
     try:
