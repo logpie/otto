@@ -696,6 +696,111 @@ def add_cost(project_dir: Path, task_id: str, cost_usd: float) -> None:
             graph["tasks"][task_id]["cost_usd"] = cur + float(cost_usd)
 
 
+def entry_is_satisfactory_terminal(entry: dict[str, Any]) -> bool:
+    """Single source of truth: is this task entry in a satisfactory
+    terminal state for downstream consumers (upward-merge AND
+    dependency-satisfaction)?
+
+    Locked invariant from [[project_v5_one_hard_gate_redesign]]:
+    annotated partials (set via chokepoint LAND path, where
+    `landed_with_annotation=True`) count as satisfactory — they have
+    been deemed safe enough to land by the chokepoint's cause analysis
+    (anything not INFRA_CORRUPT). Without this widening, the chokepoint's
+    "always LAND" outcome doesn't actually result in merged work,
+    because the upward-merge + dependency-satisfaction predicates
+    historically only accepted `pass` or `partial + reviewed_partial`.
+
+    History: pre-2026-05-20, three predicate sites had separate strict
+    implementations of "is this satisfactory":
+      - _child_result_allows_upward_merge (v5_runner)
+      - _task_entry_allows_upward_merge   (v5_runner)
+      - _verdict_satisfies_dependency     (subtask.py)
+    The iTracker Opus run wasted ~$120 partly because of the
+    cumulative effect of these strict + duplicated predicates.
+    Centralizing them here, with the wider semantics, is part of
+    plan-checkpoint-resume-v2.md Phase 0 (Codex Plan Gate APPROVED).
+    """
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("blocked_pending_contract_amendment"):
+        return False
+    if entry.get("blocked_on_task_id"):
+        return False
+    verdict = str(entry.get("verdict") or "")
+    if verdict == "merge_blocked":
+        return False
+    # Stale merge_blocked metadata is also disqualifying (a previous
+    # terminal that hasn't been cleared). retry helpers clear these.
+    if entry.get("merge_blocked_structured_reason"):
+        return False
+    if entry.get("merge_blocked_reason"):
+        return False
+    if verdict == "pass":
+        return True
+    if verdict != "partial":
+        return False
+    # `partial` is satisfactory if EITHER human-reviewed-partial OR
+    # otto-annotated-partial via the chokepoint's LAND path.
+    return bool(
+        entry.get("review_state") == "reviewed_partial"
+        or entry.get("landed_with_annotation")
+    )
+
+
+def clear_task_for_retry(
+    project_dir: Path,
+    task_id: str,
+    retry_reason: str,
+) -> int:
+    """Strictly-more-thorough sibling of `clear_verdict_for_retry`:
+    clears the terminal verdict AND all stale-blocker metadata so the
+    task is genuinely re-runnable.
+
+    Beyond `clear_verdict_for_retry`'s `verdict + completed_at + retry_*`
+    reset, this also clears:
+      - merge_blocked_reason / merge_blocked_structured_reason /
+        merge_blocked_origin
+      - failure_reason
+      - annotation_origin / annotation_detail / annotation_cause /
+        annotation_structured_reason / landed_with_annotation
+      - review_state (set to None)
+
+    Without this thoroughness, `entry_is_satisfactory_terminal` would
+    refuse to advance the retried task post-retry because stale
+    merge_blocked_reason / merge_blocked_structured_reason metadata
+    would still indicate a blocked terminal. (Codex Plan Gate R2#2.)
+
+    Returns the new retry_count.
+    """
+    blocker_keys = (
+        "merge_blocked_reason",
+        "merge_blocked_structured_reason",
+        "merge_blocked_origin",
+        "failure_reason",
+        "annotation_origin",
+        "annotation_detail",
+        "annotation_cause",
+        "annotation_structured_reason",
+        "landed_with_annotation",
+    )
+    with _locked_graph(project_dir) as (_path, graph):
+        t = graph["tasks"].get(task_id)
+        if t is None:
+            return 0
+        t["verdict"] = None
+        t["completed_at"] = None
+        t["retry_reason"] = retry_reason
+        t["retry_count"] = int(t.get("retry_count", 0)) + 1
+        t["review_state"] = None
+        for key in blocker_keys:
+            if key in t:
+                # Use None for nullable fields; bools become None too —
+                # the satisfactory-terminal helper treats falsy as
+                # "blocker not present."
+                t[key] = None
+        return int(t["retry_count"])
+
+
 def clear_verdict_for_retry(
     project_dir: Path,
     task_id: str,

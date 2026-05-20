@@ -941,6 +941,857 @@ def _foundation_contract_findings(contracts: list[dict[str, Any]]) -> list[dict[
 
 
 
+def _blocking_payload_issues(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for issue in payload.get("issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        if issue.get("severity") not in ("error", "block"):
+            continue
+        issues.append(issue)
+    if issues:
+        return issues
+    if payload.get("passed") is False:
+        return [
+            {
+                "kind": str(payload.get("error") or payload.get("check") or "preflight_failed"),
+                "severity": "block",
+                "message": str(payload.get("error") or "preflight failed without issue detail"),
+            }
+        ]
+    return []
+
+
+def _clean_oracle_payload_from_preflight_payload(
+    *,
+    payload: dict[str, Any],
+    worktree: Path,
+    scope: Scope,
+    oracle_command: Any,
+    step_id: str,
+) -> dict[str, Any]:
+    clean_oracle = payload.get("clean_oracle_result")
+    if isinstance(clean_oracle, dict) and isinstance(clean_oracle.get("issues"), list):
+        return clean_oracle
+
+    issues: list[CleanOracleIssue] = []
+    issue_payloads = _blocking_payload_issues(payload)
+    for raw_issue in issue_payloads:
+        raw_severity = str(raw_issue.get("severity") or "block")
+        severity = raw_severity if raw_severity in {"warn", "error", "block"} else "block"
+        ports: list[int] = []
+        for raw_port in raw_issue.get("ports") or []:
+            try:
+                ports.append(int(raw_port))
+            except (TypeError, ValueError):
+                continue
+        issues.append(
+            CleanOracleIssue(
+                kind=str(raw_issue.get("kind") or payload.get("check") or "preflight_failed"),
+                severity=cast(Any, severity),
+                message=str(raw_issue.get("message") or payload.get("error") or ""),
+                step_id=str(raw_issue.get("step_id") or step_id),
+                paths=[str(path) for path in (raw_issue.get("paths") or [])],
+                ports=ports,
+                command_identity=getattr(oracle_command, "command_identity", "clean-verify"),
+                return_code=(
+                    int(raw_issue["return_code"])
+                    if isinstance(raw_issue.get("return_code"), int)
+                    else 1
+                ),
+            )
+        )
+
+    message = "; ".join(issue.message for issue in issues) or str(
+        payload.get("error") or "preflight failed"
+    )
+    step = CleanOracleStepResult(
+        id=step_id,
+        status="failed",
+        return_code=1,
+        command_identity=getattr(oracle_command, "command_identity", "clean-verify"),
+        command=list(getattr(oracle_command, "command", []) or []),
+        cwd=str(worktree),
+        env=dict(getattr(oracle_command, "env", {}) or {}),
+        reason=message,
+    )
+    result = CleanOracleResult.from_parts(
+        passed=False,
+        scope=scope,
+        issues=issues,
+        steps=[step],
+        artifact_path_refs=[],
+        command=step.command,
+        env=step.env,
+        project_dir=worktree,
+        temp_dir=None,
+    )
+    return result.to_jsonable()
+
+
+def _repair_result_payload(
+    *,
+    repair_phase: str,
+    repair: Any,
+    terminal_state: str,
+    final_payload: dict[str, Any],
+) -> dict[str, Any]:
+    repaired = terminal_state == "continued"
+    attempt_outcome = "repaired" if repaired else "escalated"
+    return {
+        "terminal_state": terminal_state,
+        "repaired": repaired,
+        "repair_phase": repair_phase,
+        "oracle_verdict": getattr(repair, "verdict", ""),
+        "summary": getattr(repair, "summary", ""),
+        "cost_usd": float(getattr(repair, "cost_usd", 0.0) or 0.0),
+        "agent_turns_used": int(getattr(repair, "agent_turns_used", 0) or 0),
+        "oracle_invocations": int(getattr(repair, "oracle_invocations", 0) or 0),
+        "packet_path": str(getattr(repair, "packet_path", "") or ""),
+        "composite_gate": getattr(repair, "composite_gate", None),
+        "escalation": getattr(repair, "escalation", None),
+        "final_preflight_passed": not _integration_smoke_blocks(final_payload),
+        "attempts": [
+            {
+                "action": "agent",
+                "outcome": attempt_outcome,
+                "repair_phase": repair_phase,
+                "repair_packet": str(getattr(repair, "packet_path", "") or ""),
+                "summary": getattr(repair, "summary", ""),
+                "cost_usd": float(getattr(repair, "cost_usd", 0.0) or 0.0),
+            }
+        ],
+    }
+
+
+async def _run_preflight_payload_repair_session(
+    *,
+    initial_payload: dict[str, Any],
+    run_once: Any,
+    project_dir: Path,
+    worktree_path: Path,
+    session_dir: Path,
+    config: dict[str, Any],
+    task_id: str,
+    repair_phase: str,
+    event_prefix: str,
+    integration_branch: str | None,
+    verify_scope: Scope = "subtree",
+    on_event: Any = None,
+    integration_context: dict[str, Any] | None = None,
+    allowed_paths: list[str] | None = None,
+    scope_policy: str = "unrestricted",
+    journey_scope: ExecutionScope = "subtree_integration",
+) -> dict[str, Any]:
+    action, classified = _handle_mechanical_preflight_blocker(
+        payload=initial_payload,
+        project_dir=project_dir,
+        on_event=on_event,
+    )
+    if action == "terminal":
+        return classified
+    if action == "retry":
+        retried = run_once()
+        if not _integration_smoke_blocks(retried):
+            return retried
+        initial_payload = retried
+
+    repair_slug = safe_slug(
+        f"{task_id}-{repair_phase}-{initial_payload.get('phase') or initial_payload.get('check') or 'repair'}",
+        max_len=64,
+    )
+    branch = _git_capture(worktree_path, ["branch", "--show-current"])
+    packet = _build_repair_packet(
+        session_dir=session_dir,
+        repair_slug=repair_slug,
+        worktree_path=worktree_path,
+        task_id=task_id,
+        phase="preflight",
+        repair_phase=repair_phase,
+        verify_scope=verify_scope,
+        config=config,
+        budget_prefix=f"{repair_phase}_repair",
+        default_agent_turns=1,
+        default_oracle_invocations=3,
+        latest_oracle_result=lambda oracle_command: _clean_oracle_payload_from_preflight_payload(
+            payload=initial_payload,
+            worktree=worktree_path,
+            scope=verify_scope,
+            oracle_command=oracle_command,
+            step_id=str(initial_payload.get("check") or repair_phase),
+        ),
+        product_contract=_worktree_product_contract(worktree=worktree_path),
+        integration_context={
+            "integration_branch": integration_branch,
+            "project_dir": str(project_dir),
+            "initial_preflight": initial_payload,
+            **dict(integration_context or {}),
+        },
+        success_criteria={
+            "preflight_operation": initial_payload.get("check") or repair_phase,
+        },
+        attempt_history_entry={
+            "type": "preflight_blocking_payload",
+            "repair_phase": repair_phase,
+            "payload": initial_payload,
+            "git_status": _git_status_short(worktree_path),
+        },
+        allowed_paths=list(allowed_paths or []),
+        scope_policy=scope_policy,
+        branch=branch or integration_branch or "",
+        oracle_spec_path=session_dir / "spec" / "spec.json",
+        oracle_journey_scope=journey_scope,
+        oracle_journey_artifact_dir=session_dir / "journeys" / safe_slug(repair_phase, max_len=48),
+    )
+    _emit(on_event, {
+        "event": f"{event_prefix}_repair_start",
+        "task_id": task_id,
+        "repair_phase": repair_phase,
+        "repair_packet": str(packet.packet_path),
+    })
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
+        from otto.v5_branching import commit_integration_worktree
+
+        changed_paths = _git_diff_name_only(worktree_path)
+        scope_feedback = _allowed_paths_write_feedback(
+            acting_task_id=task_id,
+            changed_paths=changed_paths,
+            allowed_paths=allowed_paths,
+            scope_policy=scope_policy,
+            operation=f"{repair_phase}_repair_commit",
+        )
+        if scope_feedback is not None:
+            detail = _foundation_contract_write_block_detail(scope_feedback)
+            _emit(on_event, {
+                "event": f"{event_prefix}_repair_commit_failed",
+                "task_id": task_id,
+                "repair_phase": repair_phase,
+                "worktree": str(worktree_path),
+                "detail": detail,
+                "structured_reason": scope_feedback,
+            })
+            return False, detail
+        feedback = _foundation_contract_write_feedback(
+            project_dir=project_dir,
+            acting_task_id=task_id,
+            parent_integration_branch=integration_branch or _branch_checked_out(worktree_path) or "main",
+            changed_paths=changed_paths,
+            operation=f"{repair_phase}_repair_commit",
+        )
+        if feedback is not None:
+            detail = _foundation_contract_write_block_detail(feedback)
+            _emit(on_event, {
+                "event": f"{event_prefix}_repair_commit_failed",
+                "task_id": task_id,
+                "repair_phase": repair_phase,
+                "worktree": str(worktree_path),
+                "detail": detail,
+                "structured_reason": feedback,
+            })
+            return False, detail
+        commit_ok, commit_detail = commit_integration_worktree(
+            worktree_path=worktree_path,
+            task_id=f"{task_id}-{repair_phase}",
+        )
+        _emit(on_event, {
+            "event": (
+                f"{event_prefix}_repair_commit"
+                if commit_ok
+                else f"{event_prefix}_repair_commit_failed"
+            ),
+            "task_id": task_id,
+            "repair_phase": repair_phase,
+            "worktree": str(worktree_path),
+            "detail": commit_detail,
+        })
+        return commit_ok, commit_detail
+
+    repair = await run_oracle_repair_agent(
+        packet,
+        config=config,
+        commit_hook=commit_hook,
+    )
+    if repair.verdict == "pass":
+        final_payload = run_once()
+    else:
+        final_payload = dict(initial_payload)
+    terminal_state = (
+        "continued"
+        if repair.verdict == "pass" and not _integration_smoke_blocks(final_payload)
+        else "escalated"
+    )
+    final_payload["repair"] = _repair_result_payload(
+        repair_phase=repair_phase,
+        repair=repair,
+        terminal_state=terminal_state,
+        final_payload=final_payload,
+    )
+    _emit(on_event, {
+        "event": f"{event_prefix}_repair_done",
+        "task_id": task_id,
+        "terminal_state": terminal_state,
+        "repair_phase": repair_phase,
+        "repair_packet": getattr(repair, "packet_path", str(packet.packet_path)),
+    })
+    return final_payload
+
+
+async def _checkout_v5_branch_clean_with_repair(
+    *,
+    project_dir: Path,
+    branch: str,
+    context: str,
+    session_dir: Path,
+    config: dict[str, Any],
+    integration_branch: str | None,
+    task_id: str,
+    on_event: Any = None,
+) -> dict[str, Any]:
+    """Checkout a branch, repairing dirty/failed checkout states via agent."""
+
+    def passed_payload() -> dict[str, Any]:
+        return {
+            "check": "git_checkout_clean",
+            "phase": context,
+            "cwd": str(project_dir),
+            "passed": True,
+            "issues": [],
+            "error": None,
+        }
+
+    def run_once() -> dict[str, Any]:
+        payload = _checkout_v5_branch_clean(
+            project_dir=project_dir,
+            branch=branch,
+            context=context,
+            on_event=on_event,
+        )
+        return payload or passed_payload()
+
+    first = run_once()
+    if not _integration_smoke_blocks(first):
+        return first
+    action, classified = _handle_mechanical_preflight_blocker(
+        payload=first,
+        project_dir=project_dir,
+        on_event=on_event,
+    )
+    if action == "terminal":
+        return classified
+    if action == "retry":
+        second = run_once()
+        if not _integration_smoke_blocks(second):
+            return second
+        first = second
+    return await _run_preflight_payload_repair_session(
+        initial_payload=first,
+        run_once=run_once,
+        project_dir=project_dir,
+        worktree_path=project_dir,
+        session_dir=session_dir,
+        config=config,
+        task_id=task_id,
+        repair_phase="checkout_clean",
+        event_prefix="checkout",
+        integration_branch=integration_branch,
+        verify_scope="subtree",
+        on_event=on_event,
+        integration_context={
+            "checkout": {
+                "branch": branch,
+                "context": context,
+            }
+        },
+    )
+
+
+def _integration_restore_branch(
+    project_dir: Path,
+    task_id: str,
+    config: dict[str, Any],
+) -> str:
+    """Where ``project_dir`` should be restored after a task integration."""
+    task = get_task(project_dir, task_id) or {}
+    branch = str(task.get("integration_branch") or "").strip()
+    return branch or _v5_root_branch(project_dir, config)
+
+
+def _commit_integration_agent_changes(
+    *,
+    project_dir: Path,
+    task_id: str,
+    worktree_path: Path,
+    result: LeadResult,
+    on_event: Any = None,
+) -> None:
+    """Runner-owned commit for integration-agent edits."""
+    if result.verdict == "catastrophic":
+        return
+    from otto.v5_branching import commit_integration_worktree
+
+    feedback = _foundation_contract_write_feedback(
+        project_dir=project_dir,
+        acting_task_id=task_id,
+        parent_integration_branch=_integration_restore_branch(project_dir, task_id, {}),
+        changed_paths=_git_diff_name_only(worktree_path),
+        operation="integration_agent_commit",
+    )
+    if feedback is not None:
+        detail = _foundation_contract_write_block_detail(feedback)
+        _emit(on_event, {
+            "event": "integration_commit_failed",
+            "task_id": task_id,
+            "worktree": str(worktree_path),
+            "detail": detail,
+            "structured_reason": feedback,
+        })
+        _record_task_merge_blocked_reason(
+            project_dir=project_dir,
+            task_id=task_id,
+            result=result,
+            reason=detail,
+            origin="foundation_contract_write_gate",
+            structured_reason=feedback,
+        )
+        return
+    ok, detail = commit_integration_worktree(
+        worktree_path=worktree_path,
+        task_id=task_id,
+    )
+    _emit(on_event, {
+        "event": "integration_commit" if ok else "integration_commit_failed",
+        "task_id": task_id,
+        "worktree": str(worktree_path),
+        "detail": detail,
+    })
+    if not ok:
+        logger.warning("integration commit failed for %s: %s", task_id, detail)
+        set_verdict(project_dir, task_id, "merge_blocked", cost_usd=result.cost_usd)
+        result.verdict = "merge_blocked"
+
+
+def _commit_root_inline_changes(
+    *,
+    project_dir: Path,
+    root_branch: str,
+    result: LeadResult,
+    on_event: Any = None,
+) -> None:
+    """Runner-owned commit for root inline builds."""
+    if result.decomposition != "inline" or result.verdict == "catastrophic":
+        return
+
+    from otto.v5_branching import commit_worktree, git_current_branch
+
+    current_branch = git_current_branch(project_dir)
+    if current_branch != root_branch:
+        detail = (
+            f"root inline finished on {current_branch!r}, expected {root_branch!r}; "
+            "refusing runner commit"
+        )
+        _emit(on_event, {
+            "event": "inline_commit_failed",
+            "task_id": ROOT_TASK_ID,
+            "worktree": str(project_dir),
+            "detail": detail,
+        })
+        logger.warning(detail)
+        set_verdict(project_dir, ROOT_TASK_ID, "merge_blocked", cost_usd=result.cost_usd)
+        result.verdict = "merge_blocked"
+        return
+
+    feedback = _foundation_contract_write_feedback(
+        project_dir=project_dir,
+        acting_task_id=ROOT_TASK_ID,
+        parent_integration_branch=root_branch,
+        changed_paths=_git_diff_name_only(project_dir),
+        operation="root_inline_commit",
+    )
+    if feedback is not None:
+        detail = _foundation_contract_write_block_detail(feedback)
+        _emit(on_event, {
+            "event": "inline_commit_failed",
+            "task_id": ROOT_TASK_ID,
+            "worktree": str(project_dir),
+            "detail": detail,
+            "structured_reason": feedback,
+        })
+        _record_task_merge_blocked_reason(
+            project_dir=project_dir,
+            task_id=ROOT_TASK_ID,
+            result=result,
+            reason=detail,
+            origin="foundation_contract_write_gate",
+            structured_reason=feedback,
+        )
+        return
+    ok, detail = commit_worktree(worktree_path=project_dir, message="v5 inline build")
+    _emit(on_event, {
+        "event": "inline_commit" if ok else "inline_commit_failed",
+        "task_id": ROOT_TASK_ID,
+        "worktree": str(project_dir),
+        "detail": detail,
+    })
+    if not ok:
+        logger.warning("root inline commit failed: %s", detail)
+        set_verdict(project_dir, ROOT_TASK_ID, "merge_blocked", cost_usd=result.cost_usd)
+        result.verdict = "merge_blocked"
+
+
+def _propagate_subtree_integration(
+    *,
+    project_dir: Path,
+    task_id: str,
+) -> tuple[bool, str, str, str]:
+    """Merge a decomposed child's integration branch into its parent target."""
+    from otto.v5_branching import integration_branch_name, merge_branch_into
+
+    child_entry = get_task(project_dir, task_id) or {}
+    parent_id = child_entry.get("parent_task_id") or ROOT_TASK_ID
+    target = "main" if parent_id == ROOT_TASK_ID else integration_branch_name(parent_id)
+    source = integration_branch_name(task_id)
+    if source == target:
+        detail = (
+            "refusing subtree integration self-merge: source and target are both "
+            f"{source!r} for task {task_id!r} with parent_task_id={parent_id!r}; "
+            "propagation would otherwise be a silent no-op"
+        )
+        set_verdict(project_dir, task_id, "merge_blocked")
+        return False, detail, source, target
+
+    try:
+        ok, detail = merge_branch_into(
+            project_dir=project_dir,
+            source_branch=source,
+            target_branch=target,
+        )
+    except MergeWorktreeDirtyError as exc:
+        detail = str(exc)
+        set_verdict(project_dir, task_id, "merge_blocked")
+        return False, detail, source, target
+    if not ok:
+        set_verdict(project_dir, task_id, "merge_blocked")
+    return ok, detail, source, target
+
+
+def _worktree_for_branch(project_dir: Path, branch: str) -> Path:
+    listing = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if listing.returncode != 0:
+        return project_dir
+    current_path: Path | None = None
+    for line in listing.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = Path(line[len("worktree "):].strip())
+            continue
+        if line.startswith("branch ") and current_path is not None:
+            ref = line[len("branch "):].strip()
+            if ref == branch or ref.endswith(f"/{branch}"):
+                return current_path
+    return project_dir
+
+
+def _conflict_packet_for_refusal(
+    *,
+    project_dir: Path,
+    source: str,
+    target: str,
+) -> dict[str, Any]:
+    packet = _read_latest_conflict_packet(project_dir)
+    if not packet:
+        return {}
+    if packet.get("source_branch") != source or packet.get("target_branch") != target:
+        return {}
+    return packet
+
+
+async def _repair_subtree_propagation_once(
+    *,
+    project_dir: Path,
+    task_id: str,
+    result: LeadResult,
+    source: str,
+    target: str,
+    detail: str,
+    config: dict[str, Any],
+    on_event: Any = None,
+) -> tuple[bool, str]:
+    target_worktree = _worktree_for_branch(project_dir, target)
+    conflict_packet = _conflict_packet_for_refusal(
+        project_dir=project_dir,
+        source=source,
+        target=target,
+    )
+    paths = [
+        str(path)
+        for path in (conflict_packet.get("unmerged_paths") or _git_diff_name_only(target_worktree))
+        if str(path)
+    ]
+    session_dir = _paths.cross_sessions_dir(project_dir)
+    repair_slug = safe_slug(f"{task_id}-subtree-propagation", max_len=64)
+    packet = _build_repair_packet(
+        session_dir=session_dir,
+        repair_slug=repair_slug,
+        worktree_path=target_worktree,
+        task_id=task_id,
+        phase="subtree_propagation",
+        repair_phase="subtree_propagation",
+        verify_scope="subtree",
+        config=config,
+        budget_prefix="subtree_propagation_repair",
+        default_agent_turns=1,
+        default_oracle_invocations=3,
+        latest_oracle_result=lambda oracle_command: _merge_refusal_oracle_payload(
+            worktree=target_worktree,
+            scope="subtree",
+            oracle_command=oracle_command,
+            issue_kind="subtree_propagation_blocked",
+            issue_message=detail,
+            step_id="subtree_propagation_gate",
+            paths=paths,
+        ),
+        product_contract={
+            **_worktree_product_contract(worktree=target_worktree),
+            "propagation": {
+                "task_id": task_id,
+                "source": source,
+                "target": target,
+                "detail": detail,
+                "conflict_packet": conflict_packet,
+            },
+        },
+        integration_context={
+            "project_dir": str(project_dir),
+            "task_id": task_id,
+            "source": source,
+            "target": target,
+            "detail": detail,
+            "conflict_packet": conflict_packet,
+            "target_worktree": str(target_worktree),
+            "integration_result": {
+                "verdict": result.verdict,
+                "verify_called": result.verify_called,
+                "verify_result": result.verify_result,
+                "failure_reason": result.failure_reason,
+            },
+            "propagation_safety": {
+                "analyze_base_ours_theirs_per_path": True,
+                "forbid_whole_side_checkout": True,
+                "forbidden_commands": [
+                    "git checkout --ours -- <whole-file>",
+                    "git checkout --theirs -- <whole-file>",
+                ],
+            },
+        },
+        success_criteria={
+            "subtree_propagation_retry": True,
+            "source_reaches_target": True,
+            "no_uncommitted_state": True,
+            "no_conflict_markers": True,
+        },
+        attempt_history_entry={
+            "type": "subtree_propagation_refusal",
+            "detail": detail,
+            "source": source,
+            "target": target,
+            "paths": paths,
+            "conflict_packet": conflict_packet,
+        },
+        expected_artifact_paths=[],
+        allowed_paths=paths,
+        scope_policy="allowed_paths" if paths else "unrestricted",
+        branch=target,
+        repair_unit_extra={
+            "source_branch": source,
+            "target_branch": target,
+            "conflicted_paths": paths,
+        },
+    )
+    if packet.packet_path.exists():
+        try:
+            packet.agent_session_id = RepairPacket.load(packet.packet_path).agent_session_id
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+    packet.persist()
+    _emit(on_event, {
+        "event": "subtree_propagation_repair_start",
+        "task_id": task_id,
+        "source": source,
+        "target": target,
+        "detail": detail,
+        "repair_packet": str(packet.packet_path),
+    })
+
+    async def commit_hook(_packet: RepairPacket, _oracle_result: Any) -> tuple[bool, str]:
+        from otto.v5_branching import commit_worktree
+
+        feedback = _foundation_contract_write_feedback(
+            project_dir=project_dir,
+            acting_task_id=task_id,
+            parent_integration_branch=target,
+            changed_paths=_git_diff_name_only(target_worktree),
+            operation="subtree_propagation_repair_commit",
+        )
+        if feedback is not None:
+            return False, _foundation_contract_write_block_detail(feedback)
+        return commit_worktree(
+            worktree_path=target_worktree,
+            message=f"v5 subtree propagation repair: {task_id}",
+        )
+
+    repair = await run_oracle_repair_agent(
+        packet,
+        config=config,
+        commit_hook=commit_hook,
+    )
+    _emit(on_event, {
+        "event": "subtree_propagation_repair_done",
+        "task_id": task_id,
+        "ok": repair.verdict == "pass",
+        "summary": repair.summary,
+        "repair_packet": repair.packet_path,
+        "escalation": repair.escalation,
+    })
+    if repair.verdict != "pass":
+        reason = (
+            "subtree propagation repair did not pass: "
+            f"{repair.summary}; original refusal: {detail}"
+        )
+        _record_task_merge_blocked_reason(
+            project_dir=project_dir,
+            task_id=task_id,
+            result=result,
+            reason=reason,
+            origin="subtree_propagation",
+        )
+        return False, reason
+    return True, repair.summary
+
+
+def _verify_child_branches_reached_parent(
+    *,
+    project_dir: Path,
+    parent_task_id: str,
+    on_event: Any = None,
+) -> None:
+    """Verify terminal child branch tips are reachable from their parent target."""
+    from otto.v5_branching import child_branch_name, integration_branch_name
+
+    target = "main" if parent_task_id == ROOT_TASK_ID else integration_branch_name(parent_task_id)
+    for child_id in children_of(project_dir, parent_task_id):
+        child = get_task(project_dir, child_id) or {}
+        if not _task_entry_allows_upward_merge(child):
+            continue
+
+        branches = [child_branch_name(child_id)]
+        if child.get("child_task_ids") or child.get("decomposition") == "emit":
+            branches.append(integration_branch_name(child_id))
+
+        for branch in dict.fromkeys(branches):
+            ok, detail = _branch_is_ancestor(project_dir, branch, target)
+            _emit(on_event, {
+                "event": "child_branch_ancestry_ok" if ok else "child_branch_ancestry_failed",
+                "task_id": child_id,
+                "branch": branch,
+                "target": target,
+                "detail": detail,
+            })
+            if ok:
+                continue
+            # The child built and PASSED (guarded by _task_entry_allows_
+            # upward_merge above) but its branch never reached the parent
+            # integration branch — almost always because a prior run's
+            # children_and_subtree_integration was interrupted/budget-killed
+            # AFTER the child passed but BEFORE its upward merge, or this is a
+            # resumed run that skipped the already-passed child (its merge
+            # only ever ran inside _run_child for freshly-built children).
+            # The work is done and on the branch; it just needs merging.
+            # Re-attempt the canonical upward merge before demoting — only a
+            # GENUINE conflict (merge fails / still unreachable) becomes
+            # merge_blocked. Demoting-without-merging silently drops a
+            # completed, passing feature and ships an incomplete product.
+            recovered = False
+            if branch == child_branch_name(child_id):
+                try:
+                    from otto.v5_branching import merge_child_into_integration
+
+                    m_ok, m_detail = merge_child_into_integration(
+                        project_dir=project_dir,
+                        child_task_id=child_id,
+                        parent_integration_branch=target,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    m_ok, m_detail = False, f"{type(exc).__name__}: {exc}"
+                recheck_ok, recheck_detail = _branch_is_ancestor(
+                    project_dir, branch, target
+                )
+                recovered = bool(m_ok) and recheck_ok
+                _emit(on_event, {
+                    "event": (
+                        "child_branch_remerged"
+                        if recovered
+                        else "child_branch_remerge_failed"
+                    ),
+                    "task_id": child_id,
+                    "branch": branch,
+                    "target": target,
+                    "detail": (
+                        m_detail
+                        if recovered
+                        else f"{m_detail} | recheck: {recheck_detail}"
+                    ),
+                })
+            if recovered:
+                logger.info(
+                    "recovered unmerged passed child %s: re-merged %s into %s",
+                    child_id,
+                    branch,
+                    target,
+                )
+                continue
+            logger.warning(
+                "child branch ancestry verification failed for %s: %s",
+                child_id,
+                detail,
+            )
+            set_verdict(project_dir, child_id, "merge_blocked")
+
+
+def _branch_is_ancestor(project_dir: Path, branch: str, target: str) -> tuple[bool, str]:
+    exists = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=str(project_dir),
+        capture_output=True,
+    )
+    if exists.returncode != 0:
+        return False, f"branch {branch!r} is missing"
+
+    target_exists = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target}"],
+        cwd=str(project_dir),
+        capture_output=True,
+    )
+    if target_exists.returncode != 0:
+        return False, f"target branch {target!r} is missing"
+
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", branch, target],
+        cwd=str(project_dir),
+        capture_output=True,
+        text=True,
+    )
+    if ancestor.returncode == 0:
+        return True, f"{branch} reaches {target}"
+    detail = (ancestor.stderr or ancestor.stdout or "").strip()
+    suffix = f": {detail}" if detail else ""
+    return False, f"{branch} is not an ancestor of {target}{suffix}"
+
 
 def _foundation_clean_boot_probe_targets(
     *,
@@ -1175,9 +2026,6 @@ def _seed_scaffold_profile(
         "seeded_paths": list(mat.written_paths),
     })
     return "seed", plan.reason
-
-
-
 
 
 
@@ -2230,7 +3078,10 @@ def _build_decomp_runtime_context(
     dependency_satisfied = {
         tid for tid, task in tasks.items()
         if isinstance(task, dict)
-        and _verdict_satisfies_dependency(task.get("verdict"), task.get("review_state"))
+        # Pass the full task entry so the predicate sees
+        # `landed_with_annotation` + blocker metadata. Plan Phase 0
+        # widening; Codex Plan Gate R5#2.
+        and _verdict_satisfies_dependency(task)
     }
     non_runnable = {
         tid for tid, task in tasks.items()
@@ -2769,6 +3620,7 @@ async def _wait_for_review(
 # ``otto.v5_runner.X`` visible from submodule code paths.
 
 from otto.v5.preflight_oracle import (  # noqa: E402, F401
+    _branch_checked_out,
     _build_repair_packet,
     _checkout_issue_payload,
     _checkout_v5_branch_clean_with_repair,
@@ -2795,6 +3647,7 @@ from otto.v5.preflight_oracle import (  # noqa: E402, F401
 
 from otto.v5.repair import (  # noqa: E402, F401
     _carry_and_reset_prior_repair_packets,
+    _read_latest_conflict_packet,
     _child_repair_helper_crashed_feedback,
     _contract_amendment_attempt_count,
     _contract_amendment_exhausted_feedback,

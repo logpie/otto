@@ -845,25 +845,33 @@ def _branch_is_ancestor(project_dir: Path, branch: str, target: str) -> tuple[bo
     return False, f"{branch} is not an ancestor of {target}{suffix}"
 
 def _task_entry_allows_upward_merge(entry: dict[str, Any]) -> bool:
-    if entry.get("blocked_pending_contract_amendment") or entry.get("blocked_on_task_id"):
-        return False
-    if str(entry.get("verdict") or "") == VERDICT_MERGE_BLOCKED:
-        return False
-    if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
-        return False
-    verdict = str(entry.get("verdict") or "")
-    if verdict == VERDICT_PASS:
-        return True
-    return verdict == VERDICT_PARTIAL and entry.get("review_state") == "reviewed_partial"
+    # Delegates to the canonical predicate `entry_is_satisfactory_terminal`
+    # so this stays in sync with `_child_result_allows_upward_merge` and
+    # `subtask._verdict_satisfies_dependency`. Annotated partials
+    # (chokepoint LAND path; `landed_with_annotation=True`) are
+    # accepted as satisfactory — see [[project_v5_one_hard_gate_redesign]]
+    # + plan-checkpoint-resume-v2.md Phase 0.
+    from otto.queue.task_graph import entry_is_satisfactory_terminal
+    return entry_is_satisfactory_terminal(entry)
 
 def _child_result_allows_upward_merge(
     project_dir: Path,
     task_id: str,
     result: LeadResult,
 ) -> bool:
+    # Phase 0 / Codex Plan Gate R2#4: the chokepoint writes
+    # `landed_with_annotation=True` to the task entry (not to the result
+    # payload), so the canonical check reads the entry. To handle the
+    # not-yet-persisted case (mid-flight result before its annotation
+    # has been written to the graph), we ALSO accept the result's own
+    # in-memory reviewed_partial signal as a fallback.
+    from otto.queue.task_graph import entry_is_satisfactory_terminal
     entry = get_task(project_dir, task_id) or {}
-    if entry.get("blocked_pending_contract_amendment") or entry.get("blocked_on_task_id"):
-        return False
+    if entry_is_satisfactory_terminal(entry):
+        return True
+    # Fallback for the not-yet-persisted case: a result that explicitly
+    # carries a reviewed_partial signal and matches a non-merge_blocked
+    # entry should still merge.
     if str(entry.get("verdict") or "") == VERDICT_MERGE_BLOCKED:
         return False
     if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
@@ -872,7 +880,7 @@ def _child_result_allows_upward_merge(
         return True
     if result.verdict != VERDICT_PARTIAL:
         return False
-    return _result_has_reviewed_partial(result) or entry.get("review_state") == "reviewed_partial"
+    return _result_has_reviewed_partial(result)
 
 def _result_has_reviewed_partial(result: LeadResult) -> bool:
     if result.verdict != VERDICT_PARTIAL or not isinstance(result.verify_result, dict):
