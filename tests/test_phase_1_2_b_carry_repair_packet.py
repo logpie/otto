@@ -82,9 +82,18 @@ def test_carries_session_id_and_rewrites_packet_dir():
         "packet_dir MUST be rewritten to new location (else persist() goes "
         "to the old path — schema bug fix is the whole point)"
     )
-    # Non-path fields carry verbatim.
-    assert loaded["attempt_history"][0]["summary"] == "prior attempt"
-    assert loaded["current_state"]["pre_repair_head"] == "cafef00d"
+    # Phase 1.2-B v2: attempt_history + current_state are CLEARED on
+    # carry so the new run gets a fresh budget allocation. Without this,
+    # _replay_budget_usage(packet) reads carried history → reports
+    # budget_exhausted → the resumed repair turn never runs and the
+    # agent never gets to use its preserved session_id. Verified live:
+    # the v1 carry produced an 8-second resume with no repair turn.
+    assert loaded["attempt_history"] == [], "attempt_history must reset"
+    assert loaded["current_state"] == {}, "current_state must reset"
+    # Static context fields still carry verbatim (the agent doesn't read
+    # attempt_history — the runner uses it; static context is the
+    # agent-visible setup that doesn't change across runs).
+    assert loaded["repair_unit"]["id"] == "root-integration_smoke-pre_agent"
 
 
 def test_copies_events_jsonl_sibling():

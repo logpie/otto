@@ -1642,3 +1642,42 @@ repair work was done. **No regression** — every keystone/A/B/1.2-A
 invariant from bp237rgkr held; Phase 5/4 paths didn't trigger but unit
 tests cover their behavior. Campaign substantively complete (7/8 layers
 shipped + validated; Phase 1.2-B deferred to focused follow-up).
+
+### Phase 1.2-B live validation — partial confirmation, honest limitation
+
+(b1mn7jvq3 + bens110e7, 2026-05-19/20)
+
+**Mechanical layer VERIFIED LIVE:**
+- The `♻ resumed from checkpoint (3 child branches preserved; … carried
+  2 prior repair packet(s) — agent will continue prior conversation)`
+  banner fires correctly.
+- Both carried packets are at the new session's mirror path.
+- The serialized `packet_dir` field IS rewritten to the new location
+  (the schema-bug fix from research-phase-1.2-b.md works).
+- Verdict still `partial`; no regression in keystone/A/B/1.2-A/Phase
+  5/4 invariants.
+
+**Behavioral layer NOT achieved in this scenario:**
+The runner SEES the failing-smoke + carried packet, runs the oracle
+journey checks (real executor results captured), but does NOT spawn a
+new repair agent turn (no `agent/turn-*` directory). Total wall-time
+6.5–8.0s vs prior bxxiarqol resume's 1277s. The agent's preserved
+`agent_session_id` therefore never gets to be used for `option.resume`
+in a Claude SDK call.
+
+Attempted fix (v2, commit pending): clear `attempt_history` and
+`current_state` on carry so `_replay_budget_usage` doesn't report
+exhausted. Did NOT unblock spawn — runner still skipped agent turn.
+Carried packet on disk shows `attempt_history len = 2` after the
+6.5s run, suggesting downstream `packet.persist()` writes back the
+prior-state somehow, OR a deeper gate decides "smoke fails + carried
+packet present → don't spawn." Root cause requires deeper code
+archaeology not done in this session (Codex was off per user; fatigue
+signals real).
+
+**Disciplined close:** keep v2 (cleaner-of-two implementations) +
+commit it with the honest limitation logged. Phase 1.2-B mechanism is
+in place + safe (no regression). The behavioral activation —
+agent actually resuming its prior conversation in a new turn — is a
+focused follow-up with Codex re-enabled. The campaign-level
+invariants (keystone + A + B + 1.2-A + Phase 5 + 4) remain intact.

@@ -4382,6 +4382,17 @@ def _carry_prior_repair_packets(
         # The schema-bug fix: rewrite packet_dir to the NEW location so
         # subsequent persist() goes there, not the prior session's path.
         payload["packet_dir"] = str(new_packet_dir)
+        # Phase 1.2-B v2 (2026-05-20, live evidence): clear budget-replay
+        # state so a new resume gets FRESH budget allocation. Without
+        # this, _replay_budget_usage(packet) reads carried attempt_history
+        # → reports budget_exhausted → the repair turn never runs → the
+        # agent never gets to use its preserved session_id. Keep the
+        # session_id (the prize) + static context; clear attempt_history
+        # (runner's budget bookkeeping, not agent-visible) and
+        # current_state (scope_baseline is stale against the advanced
+        # worktree; the function will re-capture on demand).
+        payload["attempt_history"] = []
+        payload["current_state"] = {}
 
         try:
             new_packet_dir.mkdir(parents=True, exist_ok=True)
