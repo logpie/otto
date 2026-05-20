@@ -1,11 +1,64 @@
 # Backlog
 
-Forward-looking items captured during the Part 1–3 + CLI-promotion
-simplification campaign. Not blockers; not in flight. Listed here so the
-gaps stay visible.
+Forward-looking items captured during the Part 1–4 simplification
+campaign + the v5→run rename. Not blockers; not in flight. Listed here
+so the gaps stay visible.
 
 Format: each entry has **what** / **why** / **rough size** so future
 sessions can pick one up without context-loading the whole campaign.
+
+Audit reports backing these items live in `archive/audits/{,round3,round4}/`.
+
+---
+
+## Prompt content — 27 findings (Round 4)
+
+`otto/prompts/{lead.md,lead-integration.md,setup-claude.md}` were
+deep-audited for brittleness, magic numbers, contradictions, and
+project-kind assumptions. 2 HIGH-severity, 15 MEDIUM, 10 LOW. Full
+catalog at `archive/audits/round4/audit-prompt-content.md`.
+
+### HIGH severity
+
+**F-05 — Framework/stack pinned without fallback** (lead.md:73-74). Prompt
+hard-codes "Vite/TS-strict, React, zustand, FastAPI, SQLAlchemy single-Base,
+ports/start.sh" as the assumed stack. A CLI / library / Vue project gets
+misled. Fix: reframe as "use the stack from DECOMP_RUNTIME_CONTEXT or
+the project's existing stack; do NOT assume React/FastAPI/SQLAlchemy."
+
+**F-25 — Integration agent path whitelist excludes non-JS/Python**
+(lead-integration.md:95-99). Whitelist includes `package.json`,
+`pyproject.toml`, `uv.lock` but not `Cargo.toml`, `go.mod`,
+`CMakeLists.txt`. Fix: replace fixed list with categories
+("source dirs, manifests, lock files, config files").
+
+### MEDIUM severity (15) — categorical
+
+- **Magic numbers without justification**: "3-5 build leaves" (lead.md:45),
+  `dec-...` decision_id format unspecified (lead.md:254), `check: literal vs semantic`
+  with no examples (lead.md:104).
+- **Project-kind brittleness**: 7 separate sections assume webapp+React+
+  SQLAlchemy (lead.md:73-74, 87-92, 101-102, 117-130, 138-145, 149, 150-167).
+  Each leaves CLI / library projects without guidance.
+- **Contradictions**: "avoid recursive decomposition" vs "architect MUST
+  NOT decompose" (lead.md:54 vs 68). "Mock at boundary" (lead.md:223) vs
+  "no mocks allowed" (lead-integration.md:46).
+- **Undebuggable instructions**: "do not run E2E on empty shell" but never
+  defines "empty shell" (lead.md:212). "Verify with smallest build command"
+  but doesn't say how to discover it (lead.md:211).
+- **Format coupling without enforcement**: Verdict schema described in
+  prompt (lead.md:237-256) but lead.py accepts any dict with "verdict"
+  and silently fills defaults. Same for `decisions_appended` and
+  `intent_coverage` shape.
+
+### LOW severity (10)
+
+Mixed voice ("you" vs "the architect"), undefined terms ("empty shell",
+"smallest command"), unused input vars (`IS_ROOT`). All clarity issues.
+
+**Recommendation:** prompt rewrites need real-LLM testing to validate that
+the fixes don't regress current passing runs. Defer until there's a
+session dedicated to prompt engineering with budget for live-run validation.
 
 ---
 
@@ -196,6 +249,106 @@ The committed bundle in `otto/web/static/` is rebuilt by
 `scripts/check_bundle_committed.py`. Probably has its own cruft.
 
 **Size:** 1 audit session.
+
+---
+
+## Round 4 carry-overs (brittleness audit, May 2026)
+
+### Migrate specific call sites to use `otto/schemas.py` TypedDicts
+
+**What:** Round 4 added `otto/schemas.py` with `TaskGraphEntry`,
+`PipelineEvent`, `RepairPacket` as documentation TypedDicts (total=False;
+zero-runtime cost). The producer signatures (e.g.,
+`otto.queue.task_graph.record_task`, `v5_runner._emit`,
+`v5_preflight_repair.RepairPacket`) can opt in to enforced typing one
+at a time.
+
+**Why:** Schemas as docs help AI editors grep for shapes. Enforcing
+them at producer sites catches typos at the source. Today
+schemas.py is read-only documentation; nothing references it.
+
+**Size:** ~30 min per producer site. Start with `record_task` (smallest,
+clearest contract).
+
+**Risk:** Low — TypedDicts with total=False are forward-compatible.
+
+---
+
+### 13 more silent-return paths to log
+
+**What:** Round 4 logged 5 of the 18 silent-return swallows
+identified in `archive/audits/round4/audit-brittleness-errors.md`.
+The remaining 13 (mostly in mission_control, web, smaller helpers)
+follow the same pattern: catch broadly, return sentinel, no log.
+
+**Why:** Operators currently get zero signal when these fire. The
+audit named adding one `logger.warning` per catch as the highest-
+leverage fix for debuggability.
+
+**Size:** ~20 min for the full set.
+
+**Risk:** Low; pure additive logging.
+
+---
+
+### Centralize timestamp + JSON-read helpers
+
+**What:** 4 timestamp variants × ~20 sites; 6 JSON-read helpers
+(`_read_json`, `_read_json_object`, `_read_json_artifact`, etc.) with
+different size-limit and error-handling semantics. Round 4 noted these
+but deferred the migration as ~80 sites of mechanical churn for
+cosmetic gain.
+
+**Why:** Single canonical helper would simplify AI edits — there's
+exactly one place to know about. Today an AI picks the wrong helper
+half the time.
+
+**Size:** ~1 hour. Need to pick canonical names + migrate.
+
+**Risk:** Medium. The 6 JSON readers have legitimate semantic
+differences (max_chars, returns-None-vs-{}); consolidation needs a
+unified API that captures the variants as parameters.
+
+---
+
+### Rename names-that-lie (`_repair_stale_target_and_retry_merge` etc.)
+
+**What:** Audit-3 + audit-ai-sloppiness identified 5 functions where
+the name doesn't match the behavior. Most prominent:
+`_repair_stale_target_and_retry_merge` (3 call sites; runs a full Lead
+repair agent, not a cheap stale-target re-fetch). Round 3 added a
+docstring; rename remains.
+
+**Why:** AI editors trust function names. A name-that-lies invites
+wrong edits.
+
+**Size:** ~30 min per rename + Codex-gate per CLAUDE.md (these touch
+merge/repair hot paths).
+
+**Risk:** Medium. Touches well-trodden code paths.
+
+---
+
+### Hardcoded `otto_logs/` path violations
+
+**What:** 5 sites bypass `otto/paths.py` and hardcode the
+`"otto_logs/"` string. Audit (round 4) flagged as a CLAUDE.md rule
+violation. The producer site
+(`v5/repair.py:1226:"otto_logs/sessions/*/integration/repair/*/repair_packet.json"`)
+is a glob; needs a new `paths.repair_packets_glob()` helper.
+
+**Size:** ~1 hour (add helpers, update sites).
+
+**Risk:** Low.
+
+---
+
+### Prompt content fixes — 27 findings
+
+See the **Prompt content** section at the top of this file. 2 HIGH +
+15 MEDIUM + 10 LOW findings catalogued in
+`archive/audits/round4/audit-prompt-content.md`. Defer until a
+prompt-engineering session with real-LLM validation budget.
 
 ---
 
