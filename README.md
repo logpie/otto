@@ -101,6 +101,13 @@ otto v5 run "multi-feature SPA" --review-first-decomp
 otto v5 list-pending
 otto v5 review approve <task-id>
 
+# Broken-state recovery (saves $100+ vs fresh re-run when bugs cascade)
+otto v5 status                                # diagnostic: per-task verdicts + resume eligibility
+otto v5 plan-resume                           # read-only: what would `otto v5 run` do? + cost/wall estimate
+otto v5 reset-verdict --task <id>             # clear a verdict (correction)
+otto v5 retry-children --task <id> --dry-run  # atomic targeted retry — validate plan
+otto v5 retry-children --task <id>            # execute the validated plan
+
 # Existing-product workflows
 otto improve bugs "find broken recovery and data isolation paths"
 otto improve feature "make the review workflow clearer"
