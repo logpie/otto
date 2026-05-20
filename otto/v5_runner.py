@@ -4030,21 +4030,20 @@ def _block_child_before_upward_merge(
     on_event: Any = None,
 ) -> LeadResult:
     logger.error("child %s blocked before upward merge: %s", child_task_id, reason)
-    set_verdict(project_dir, child_task_id, "merge_blocked", cost_usd=result.cost_usd)
-    update_task_metadata(
-        project_dir,
-        child_task_id,
-        failure_reason=reason,
-        merge_blocked_origin="verification",
-        merge_blocked_reason=reason,
+    # Route through the central chokepoint: origin="verification" maps to
+    # TerminalCause.VERIFICATION, which for the locked one-hard-gate design
+    # is LAND-with-annotation (partial), NOT a refusal. Pre-2026-05-20 this
+    # function set verdict="merge_blocked" directly, bypassing the routing
+    # and causing 3 Opus children on the iTracker run to be refused (with
+    # ~$120 of work orphaned on side branches that never reached main).
+    # See [[project_v5_one_hard_gate_redesign]] + the dup-drift audit.
+    _record_task_merge_blocked_reason(
+        project_dir=project_dir,
+        task_id=child_task_id,
+        result=result,
+        reason=reason,
+        origin="verification",
     )
-    result.verdict = "merge_blocked"
-    result.failure_reason = reason
-    if result.verify_result is None:
-        result.verify_result = {}
-    if isinstance(result.verify_result, dict):
-        result.verify_result["verdict"] = "merge_blocked"
-        result.verify_result["summary"] = reason
     _emit(on_event, {
         "event": "child_merge_blocked",
         "task_id": child_task_id,
