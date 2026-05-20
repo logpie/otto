@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from otto.defaults import DEFAULT_PORT_WAIT_S, PORT_CLEANUP_TIMEOUT_S
+from otto.schemas import VERDICT_PASS
 from typing import Any, Literal
 
 
@@ -99,7 +100,7 @@ def _detect_missing_charter(
     for tid, task in tasks.items():
         if not _is_architect(task):
             continue
-        if task.get("verdict") == "pass":
+        if task.get("verdict") == VERDICT_PASS:
             issues.append(
                 PreflightIssue(
                     kind="charter_missing",

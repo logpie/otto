@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from otto.schemas import VERDICT_PARTIAL
+
 
 @dataclass(frozen=True)
 class RepairEvidence:
@@ -44,7 +46,7 @@ class RepairEvidence:
 
     @property
     def is_explicit_failing_verdict(self) -> bool:
-        return self.raw_verdict in {"failed", "partial"}
+        return self.raw_verdict in {"failed", VERDICT_PARTIAL}
 
     @property
     def is_actionable_for_repair(self) -> bool:

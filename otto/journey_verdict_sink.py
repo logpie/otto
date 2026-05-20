@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from otto.journey_scope_policy import ExecutionScope, VerificationLevel, applicability_for
+from otto.schemas import VERDICT_UNVERIFIED
 
 PASSING_STATUSES = frozenset({"pass", "passed"})
 NON_PASS_STATUSES = frozenset({"fail", "failed", "unverified", "skip", "skipped", "defer", "deferred"})
@@ -77,7 +78,7 @@ def failed_journey_ids(verdicts: list[dict[str, Any]]) -> list[str]:
         for item in verdicts
         if item.get("id")
         and (
-            str(item.get("status") or "").strip().lower() in {"fail", "failed", "unverified"}
+            str(item.get("status") or "").strip().lower() in {"fail", "failed", VERDICT_UNVERIFIED}
             or (
                 "status" not in item
                 and item.get("passed") is not True

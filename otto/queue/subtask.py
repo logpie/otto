@@ -31,6 +31,7 @@ from typing import Any
 
 from otto.paths import cross_sessions_dir, sidecar_lock_path
 from otto.observability import iso_timestamp
+from otto.schemas import VERDICT_PARTIAL, VERDICT_PASS
 
 V5_PENDING_FILENAME = "v5_pending.jsonl"
 
@@ -206,9 +207,9 @@ def _verdict_satisfies_dependency(verdict: Any, review_state: Any = None) -> boo
     must not be redispatched, but they also must not satisfy dependents. Raw
     partials are not enough either; only the P0 reviewed-partial gate is.
     """
-    if verdict == "pass":
+    if verdict == VERDICT_PASS:
         return True
-    return verdict == "partial" and review_state == "reviewed_partial"
+    return verdict == VERDICT_PARTIAL and review_state == "reviewed_partial"
 
 
 def _globally_dependency_satisfied_task_ids(project_dir: Path) -> set[str]:

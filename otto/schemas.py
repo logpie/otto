@@ -46,6 +46,18 @@ TaskVerdict = Literal[
     "pending_children", "catastrophic",
 ]
 
+# Bare-string constants for the verdict tokens above. Use these in
+# equality comparisons (`if verdict == VERDICT_PASS:`) instead of
+# string literals so a typo becomes a NameError instead of a silent
+# always-false comparison. Single source of truth: if a new verdict is
+# added to TaskVerdict, add a matching VERDICT_* here.
+VERDICT_PASS: TaskVerdict = "pass"
+VERDICT_PARTIAL: TaskVerdict = "partial"
+VERDICT_UNVERIFIED: TaskVerdict = "unverified"
+VERDICT_MERGE_BLOCKED: TaskVerdict = "merge_blocked"
+VERDICT_PENDING_CHILDREN: TaskVerdict = "pending_children"
+VERDICT_CATASTROPHIC: TaskVerdict = "catastrophic"
+
 
 class TaskGraphEntry(TypedDict, total=False):
     """Shape of one entry in `.otto/task-graph.json :: tasks[<task_id>]`.

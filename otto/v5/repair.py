@@ -19,6 +19,13 @@ from typing import Any, cast
 from otto import paths as _paths
 from otto.lead import LeadResult
 from otto.safe_slug import safe_slug
+from otto.schemas import (
+    VERDICT_CATASTROPHIC,
+    VERDICT_MERGE_BLOCKED,
+    VERDICT_PARTIAL,
+    VERDICT_PASS,
+    VERDICT_UNVERIFIED,
+)
 from otto.v5_branching import MergeWorktreeDirtyError
 from otto.v5_clean_verify import CleanOracleResult
 from otto.v5_preflight_repair import RepairPacket
@@ -673,7 +680,7 @@ def _settle_contract_amendment_dependents(
     if str(amendment.get("task_role") or "") != "contract_amendment":
         return
     graph_verdict = str(amendment.get("verdict") or amendment_result.verdict or "")
-    if graph_verdict == "pass":
+    if graph_verdict == VERDICT_PASS:
         unblocked = clear_contract_amendment_blocked_tasks(project_dir, amendment_id)
         for leaf_id in unblocked:
             leaf = get_task(project_dir, leaf_id) or {}
@@ -705,7 +712,12 @@ def _settle_contract_amendment_dependents(
         })
         return
 
-    if graph_verdict not in {"merge_blocked", "catastrophic", "partial", "unverified"}:
+    if graph_verdict not in {
+        VERDICT_MERGE_BLOCKED,
+        VERDICT_CATASTROPHIC,
+        VERDICT_PARTIAL,
+        VERDICT_UNVERIFIED,
+    }:
         return
     blocked = _tasks_blocked_on_amendment(project_dir, amendment_id)
     if not blocked:
@@ -760,11 +772,11 @@ def _persist_successful_contract_amendment_retry(
         return False
     if not latest.get("contract_amendment_retry_in_progress"):
         return False
-    if str(latest.get("verdict") or "") in {"merge_blocked", "catastrophic"}:
+    if str(latest.get("verdict") or "") in {VERDICT_MERGE_BLOCKED, VERDICT_CATASTROPHIC}:
         return False
     if latest.get("merge_blocked_structured_reason") or latest.get("merge_blocked_reason"):
         return False
-    terminal_verdict = verdict if verdict in {"pass", "partial", "unverified"} else "pass"
+    terminal_verdict = verdict if verdict in {VERDICT_PASS, VERDICT_PARTIAL, VERDICT_UNVERIFIED} else "pass"
     if not persist_contract_amendment_retry_success(
         project_dir,
         task_id,
@@ -1005,12 +1017,12 @@ async def _repair_subtree_propagation_once(
     _v5r._emit(on_event, {
         "event": "subtree_propagation_repair_done",
         "task_id": task_id,
-        "ok": repair.verdict == "pass",
+        "ok": repair.verdict == VERDICT_PASS,
         "summary": repair.summary,
         "repair_packet": repair.packet_path,
         "escalation": repair.escalation,
     })
-    if repair.verdict != "pass":
+    if repair.verdict != VERDICT_PASS:
         reason = (
             "subtree propagation repair did not pass: "
             f"{repair.summary}; original refusal: {detail}"
@@ -1191,13 +1203,25 @@ def _refresh_child_result_from_verdict_file(
     if not verify_called or not isinstance(payload, dict):
         return result
     verdict = str(payload.get("verdict") or "unverified")
-    if verdict not in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}:
+    if verdict not in {
+        VERDICT_PASS,
+        VERDICT_PARTIAL,
+        VERDICT_UNVERIFIED,
+        VERDICT_MERGE_BLOCKED,
+        VERDICT_CATASTROPHIC,
+    }:
         verdict = "unverified"
     result.verify_called = True
     result.verify_result = payload
     result.verify_result["repair_packet"] = repair.packet_path
     result.verdict = cast(Any, verdict)
-    if verdict in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}:
+    if verdict in {
+        VERDICT_PASS,
+        VERDICT_PARTIAL,
+        VERDICT_UNVERIFIED,
+        VERDICT_MERGE_BLOCKED,
+        VERDICT_CATASTROPHIC,
+    }:
         set_verdict(
             project_dir,
             child_task_id,
@@ -1459,7 +1483,7 @@ async def _reenter_or_block_architect_contract(
             config=config,
             on_event=on_event,
         )
-        if repair.verdict == "pass" and parent_id:
+        if repair.verdict == VERDICT_PASS and parent_id:
             contracts = _v5r._foundation_contracts_for_parent(
                 project_dir,
                 parent_id,
@@ -1713,12 +1737,12 @@ async def _repair_child_upward_merge_gate_once(
     _v5r._emit(on_event, {
         "event": "upward_merge_gate_repair_done",
         "task_id": child_task_id,
-        "ok": repair.verdict == "pass",
+        "ok": repair.verdict == VERDICT_PASS,
         "summary": repair.summary,
         "repair_packet": repair.packet_path,
         "escalation": repair.escalation,
     })
-    if repair.verdict != "pass":
+    if repair.verdict != VERDICT_PASS:
         reason = (
             f"{origin} repair did not pass: "
             f"{repair.summary}; original refusal: {original_detail}"
@@ -2228,8 +2252,8 @@ async def _repair_child_merge_conflict_once(
     _v5r._emit(on_event, {
         "event": "merge_conflict_repair_agent_done",
         "task_id": child_task_id,
-        "ok": repair.verdict == "pass",
+        "ok": repair.verdict == VERDICT_PASS,
         "summary": repair.summary,
         "repair_packet": repair.packet_path,
     })
-    return repair.verdict == "pass", repair.summary
+    return repair.verdict == VERDICT_PASS, repair.summary

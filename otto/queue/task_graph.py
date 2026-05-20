@@ -46,7 +46,15 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from otto.schemas import TaskGraphEntry
+from otto.schemas import (
+    VERDICT_CATASTROPHIC,
+    VERDICT_MERGE_BLOCKED,
+    VERDICT_PARTIAL,
+    VERDICT_PASS,
+    VERDICT_PENDING_CHILDREN,
+    VERDICT_UNVERIFIED,
+    TaskGraphEntry,
+)
 from typing import Any, Literal
 
 from otto.paths import cross_sessions_dir, sidecar_lock_path
@@ -460,7 +468,13 @@ def mark_contract_amendment_retry_in_progress(
             return False
         if task.get("blocked_pending_contract_amendment") or task.get("blocked_on_task_id"):
             return False
-        if task.get("verdict") in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}:
+        if task.get("verdict") in {
+            VERDICT_PASS,
+            VERDICT_PARTIAL,
+            VERDICT_UNVERIFIED,
+            VERDICT_MERGE_BLOCKED,
+            VERDICT_CATASTROPHIC,
+        }:
             return False
         if not task.get("contract_amendment_retry_merge"):
             return False
@@ -527,7 +541,13 @@ def refresh_contract_amendment_retry_heartbeat(
             return False
         if task.get("blocked_pending_contract_amendment") or task.get("blocked_on_task_id"):
             return False
-        if task.get("verdict") in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}:
+        if task.get("verdict") in {
+            VERDICT_PASS,
+            VERDICT_PARTIAL,
+            VERDICT_UNVERIFIED,
+            VERDICT_MERGE_BLOCKED,
+            VERDICT_CATASTROPHIC,
+        }:
             return False
         task["contract_amendment_retry_heartbeat_at"] = _now_iso()
         return True
@@ -547,7 +567,13 @@ def terminalize_stale_contract_amendment_retry_if_exhausted(
             return False
         if task.get("blocked_pending_contract_amendment") or task.get("blocked_on_task_id"):
             return False
-        if task.get("verdict") in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}:
+        if task.get("verdict") in {
+            VERDICT_PASS,
+            VERDICT_PARTIAL,
+            VERDICT_UNVERIFIED,
+            VERDICT_MERGE_BLOCKED,
+            VERDICT_CATASTROPHIC,
+        }:
             return False
         if not task.get("contract_amendment_retry_merge"):
             return False
@@ -594,7 +620,7 @@ def persist_contract_amendment_retry_success(
             return False
         if task.get("blocked_pending_contract_amendment") or task.get("blocked_on_task_id"):
             return False
-        if str(task.get("verdict") or "") in {"merge_blocked", "catastrophic"}:
+        if str(task.get("verdict") or "") in {VERDICT_MERGE_BLOCKED, VERDICT_CATASTROPHIC}:
             return False
         if task.get("merge_blocked_structured_reason") or task.get("merge_blocked_reason"):
             return False
@@ -731,7 +757,7 @@ def all_children_resolved(project_dir: Path, task_id: str) -> bool:
     for kid in kids:
         kid_entry = graph["tasks"].get(kid) or {}
         v = kid_entry.get("verdict")
-        if v is None or v == "pending_children":
+        if v is None or v == VERDICT_PENDING_CHILDREN:
             return False
     return True
 

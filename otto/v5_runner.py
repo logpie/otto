@@ -97,6 +97,11 @@ from otto.queue.task_graph import (
     tree_total_cost,
     update_task_metadata,
 )
+from otto.schemas import (
+    VERDICT_CATASTROPHIC,
+    VERDICT_MERGE_BLOCKED,
+    VERDICT_PASS,
+)
 from otto.spec_compile_flat import (
     SPEC_COMPILE_PER_ATTEMPT_BUDGET_S,
     FlatSpec,
@@ -1235,7 +1240,7 @@ def _resume_root_from_checkpoint(
         return None
     # Phase 1.2-A: only "done" terminals block resume. `partial` /
     # `merge_blocked` are iteration targets (fix → resume → re-run integration).
-    if root_t.get("verdict") in {"pass", "catastrophic"}:
+    if root_t.get("verdict") in {VERDICT_PASS, VERDICT_CATASTROPHIC}:
         return None
     persisted_intent = str(root_t.get("intent") or "").strip()
     if persisted_intent and persisted_intent != str(intent).strip():
@@ -1671,7 +1676,7 @@ async def run_v5_pipeline(
                 integration_result.verify_result["pre_integration_preflight"] = preflight_result
                 integration_result.verify_result["post_integration_preflight"] = post_preflight_result
             if (
-                integration_result.verdict != "catastrophic"
+                integration_result.verdict != VERDICT_CATASTROPHIC
                 and _integration_smoke_blocks(post_preflight_result)
             ):
                 _it_reason = (
@@ -1695,7 +1700,7 @@ async def run_v5_pipeline(
                 if isinstance(integration_result.verify_result, dict):
                     integration_result.verify_result["verdict"] = _it_verdict
                     integration_result.verify_result["summary"] = _it_reason
-                    if _it_verdict != "merge_blocked":
+                    if _it_verdict != VERDICT_MERGE_BLOCKED:
                         integration_result.verify_result["landed_with_annotation"] = True
                         integration_result.verify_result.setdefault(
                             "annotations", []
@@ -1938,7 +1943,7 @@ def _foundation_scheduler_feedback(
         for task_id, task in sibling_items
         if str((task or {}).get("task_role") or "feature") == "feature"
         and not _task_entry_allows_upward_merge(task or {})
-        and str((task or {}).get("verdict") or "") != "merge_blocked"
+        and str((task or {}).get("verdict") or "") != VERDICT_MERGE_BLOCKED
     ]
     terminal_blocked_foundations = [
         task_id
@@ -2020,7 +2025,11 @@ def _foundation_scheduler_feedback(
 def _foundation_entry_is_terminal_blocked(entry: dict[str, Any]) -> bool:
     if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
         return True
-    return str(entry.get("verdict") or "") in {"merge_blocked", "catastrophic", "failed"}
+    return str(entry.get("verdict") or "") in {
+        VERDICT_MERGE_BLOCKED,
+        VERDICT_CATASTROPHIC,
+        "failed",
+    }
 
 
 def _foundation_isolation_feedback(
@@ -2061,7 +2070,7 @@ def _foundation_isolation_feedback(
             continue
         if task.get("task_role", "feature") != "feature":
             continue
-        if _task_entry_allows_upward_merge(task) or task.get("verdict") == "merge_blocked":
+        if _task_entry_allows_upward_merge(task) or task.get("verdict") == VERDICT_MERGE_BLOCKED:
             continue
         owned_paths = _task_owned_paths(task)
         feature_owners.append((str(task_id), owned_paths))

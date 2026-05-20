@@ -23,6 +23,7 @@ from otto.spec_compile_flat import SCHEMA_VERSION as FLAT_SPEC_SCHEMA_VERSION
 from otto.v5_capability_inventory import parse_information_architecture_contract
 from otto.v5_common import coerce_spec as _coerce_spec, read_text as _read_text
 from otto.observability import iso_timestamp
+from otto.schemas import VERDICT_PASS
 
 CHECK_KINDS = (
     "structured_contract_present",
@@ -187,10 +188,10 @@ def validate_lead_verdict(
 
     final_verdict = initial_verdict
     if verification_contract_failures:
-        final_verdict = "partial" if final_verdict == "pass" else final_verdict
-    if final_verdict == "pass" and failed_required:
+        final_verdict = "partial" if final_verdict == VERDICT_PASS else final_verdict
+    if final_verdict == VERDICT_PASS and failed_required:
         final_verdict = "partial"
-    if final_verdict == "pass" and journey_failures:
+    if final_verdict == VERDICT_PASS and journey_failures:
         final_verdict = "partial"
 
     plan = {

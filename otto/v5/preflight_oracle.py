@@ -33,6 +33,7 @@ from otto.defaults import (
 from otto.journey_scope_policy import ExecutionScope
 from otto.lead import LeadResult
 from otto.safe_slug import safe_slug
+from otto.schemas import VERDICT_PASS
 from otto.v5_branching import (
     commit_integration_worktree,
     ensure_branch_exists,
@@ -953,13 +954,13 @@ async def _run_preflight_payload_repair_session(
         config=config,
         commit_hook=commit_hook,
     )
-    if repair.verdict == "pass":
+    if repair.verdict == VERDICT_PASS:
         final_payload = run_once()
     else:
         final_payload = dict(initial_payload)
     terminal_state = (
         "continued"
-        if repair.verdict == "pass" and not _integration_smoke_blocks(final_payload)
+        if repair.verdict == VERDICT_PASS and not _integration_smoke_blocks(final_payload)
         else "escalated"
     )
     final_payload["repair"] = _repair_result_payload(
@@ -1436,5 +1437,4 @@ async def _prepare_integration_worktree_with_repair(
         },
     )
     return prepared_path, payload
-
 

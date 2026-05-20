@@ -26,6 +26,7 @@ from otto.config import (
 )
 from otto.defaults import DEFAULT_RUN_BUDGET_S, DEFAULT_TREE_BUDGET_USD
 from otto.display import CONTEXT_SETTINGS, console
+from otto.schemas import VERDICT_CATASTROPHIC
 from otto.theme import error_console
 
 logger = logging.getLogger("otto.cli_run")
@@ -274,7 +275,7 @@ def register_run_command(main: click.Group) -> None:
                 "toolchain on this host — not a product defect"
             )
             sys.exit(3)
-        if result.verdict == "catastrophic":
+        if result.verdict == VERDICT_CATASTROPHIC:
             sys.exit(1)
 
 
@@ -320,7 +321,7 @@ def _run_phase1_only(project_dir: Path, intent: str, config: dict) -> None:
     console.print(f"  decomposition: {result.decomposition}")
     console.print(f"  verify called: {result.verify_called}")
     console.print(f"  [bold]Verdict:[/bold] {_color_verdict(result.verdict)}")
-    if result.verdict == "catastrophic":
+    if result.verdict == VERDICT_CATASTROPHIC:
         sys.exit(1)
 
 

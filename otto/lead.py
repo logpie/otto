@@ -46,6 +46,12 @@ from otto.queue.task_graph import (
     record_task,
     set_verdict,
 )
+from otto.schemas import (
+    VERDICT_MERGE_BLOCKED,
+    VERDICT_PARTIAL,
+    VERDICT_PASS,
+    VERDICT_UNVERIFIED,
+)
 
 logger = logging.getLogger("otto.lead")
 
@@ -307,7 +313,7 @@ async def run_lead(
             result.verdict = "pending_children"
         elif result.verify_called and result.verify_result:
             v = result.verify_result.get("verdict") or "unverified"
-            if v in ("pass", "partial", "unverified", "merge_blocked"):
+            if v in (VERDICT_PASS, VERDICT_PARTIAL, VERDICT_UNVERIFIED, VERDICT_MERGE_BLOCKED):
                 result.verdict = v
             else:
                 result.verdict = "unverified"
@@ -324,7 +330,12 @@ async def run_lead(
         if (
             result.verify_called
             and isinstance(result.verify_result, dict)
-            and result.verdict in ("pass", "partial", "unverified", "merge_blocked")
+            and result.verdict in (
+                VERDICT_PASS,
+                VERDICT_PARTIAL,
+                VERDICT_UNVERIFIED,
+                VERDICT_MERGE_BLOCKED,
+            )
         ):
             try:
                 from otto.v5_verification_plan import validate_lead_verdict
@@ -341,10 +352,10 @@ async def run_lead(
                 )
                 previous_verdict = result.verdict
                 if runner_outcome.final_verdict in (
-                    "pass",
-                    "partial",
-                    "unverified",
-                    "merge_blocked",
+                    VERDICT_PASS,
+                    VERDICT_PARTIAL,
+                    VERDICT_UNVERIFIED,
+                    VERDICT_MERGE_BLOCKED,
                 ):
                     result.verdict = runner_outcome.final_verdict  # type: ignore[assignment]
                 if result.verdict != previous_verdict:
@@ -372,7 +383,7 @@ async def run_lead(
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("runner verification plan failed: %s", exc)
-                if result.verdict == "pass":
+                if result.verdict == VERDICT_PASS:
                     result.verdict = "unverified"
                     if isinstance(result.verify_result, dict):
                         result.verify_result["verdict"] = "unverified"
@@ -682,7 +693,7 @@ def _render_prompt(
             # integration Lead can re-attempt `git merge <branch>` per
             # Step 0b instead of treating the missing work as missing
             # feature.
-            if verdict == "merge_blocked":
+            if verdict == VERDICT_MERGE_BLOCKED:
                 branch = s.get("build_branch")
                 if branch:
                     line += f"\n      build_branch=`{branch}`"
@@ -1056,7 +1067,7 @@ def _canonicalize_verdict_payload(payload: Any) -> dict[str, Any] | None:
     verdict = _verdict_token_to_canonical(payload.get("verdict"))
     if verdict in _CANONICAL_VERDICTS:
         canonical = dict(payload)
-        if verdict == "pass" and not _pass_payload_has_evidence(canonical):
+        if verdict == VERDICT_PASS and not _pass_payload_has_evidence(canonical):
             verdict = "unverified"
         canonical["verdict"] = verdict
         canonical.setdefault("journeys", [])
@@ -1066,16 +1077,16 @@ def _canonicalize_verdict_payload(payload: Any) -> dict[str, Any] | None:
     for key in ("status", "result", "outcome", "terminal_outcome", "state"):
         verdict = _verdict_token_to_canonical(payload.get(key))
         if verdict is not None:
-            if verdict == "pass" and _tests_explicitly_fail(payload):
+            if verdict == VERDICT_PASS and _tests_explicitly_fail(payload):
                 verdict = "partial"
-            elif verdict == "pass" and not _pass_payload_has_evidence(payload):
+            elif verdict == VERDICT_PASS and not _pass_payload_has_evidence(payload):
                 verdict = "unverified"
             return _noncanonical_verdict(payload, verdict, source={key: payload.get(key)})
 
     for key in ("passed", "success", "ok"):
         if isinstance(payload.get(key), bool):
             verdict = "pass" if payload.get(key) else "partial"
-            if verdict == "pass" and not _pass_payload_has_evidence(payload):
+            if verdict == VERDICT_PASS and not _pass_payload_has_evidence(payload):
                 verdict = "unverified"
             return _noncanonical_verdict(payload, verdict, source={key: payload.get(key)})
     return None
@@ -1114,13 +1125,13 @@ def _verdict_token_to_canonical(value: Any) -> str | None:
     if isinstance(value, bool):
         return "pass" if value else "partial"
     token = str(value or "").strip().lower().replace("-", "_")
-    if token in {"pass", "passed", "success", "succeeded", "ok", "done"}:
+    if token in {VERDICT_PASS, "passed", "success", "succeeded", "ok", "done"}:
         return "pass"
-    if token in {"partial", "warning", "warn", "fail", "failed", "failure", "error", "errored"}:
+    if token in {VERDICT_PARTIAL, "warning", "warn", "fail", "failed", "failure", "error", "errored"}:
         return "partial"
-    if token in {"unverified", "unknown", "unclear", "skipped"}:
+    if token in {VERDICT_UNVERIFIED, "unknown", "unclear", "skipped"}:
         return "unverified"
-    if token in {"merge_blocked", "blocked"}:
+    if token in {VERDICT_MERGE_BLOCKED, "blocked"}:
         return "merge_blocked"
     return None
 

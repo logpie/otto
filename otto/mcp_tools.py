@@ -37,6 +37,13 @@ from typing import Any, cast
 
 from otto.journey_scope_policy import ExecutionScope
 from otto.queue.task_graph import TASK_ROLES
+from otto.schemas import (
+    VERDICT_CATASTROPHIC,
+    VERDICT_MERGE_BLOCKED,
+    VERDICT_PARTIAL,
+    VERDICT_PASS,
+    VERDICT_UNVERIFIED,
+)
 
 logger = logging.getLogger("otto.mcp_tools")
 
@@ -203,7 +210,13 @@ def _coerce_foundation_contracts(raw: Any) -> list[dict[str, Any]]:
 
 
 def _terminal_verdict(value: Any) -> bool:
-    return value in {"pass", "partial", "unverified", "merge_blocked", "catastrophic"}
+    return value in {
+        VERDICT_PASS,
+        VERDICT_PARTIAL,
+        VERDICT_UNVERIFIED,
+        VERDICT_MERGE_BLOCKED,
+        VERDICT_CATASTROPHIC,
+    }
 
 
 def _structured_err(payload: dict[str, Any]) -> dict[str, Any]:

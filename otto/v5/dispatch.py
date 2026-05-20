@@ -24,6 +24,14 @@ from otto import paths as _paths
 from otto.journey_scope_policy import ExecutionScope
 from otto.lead import LeadKind, LeadResult
 from otto.safe_slug import safe_slug
+from otto.schemas import (
+    VERDICT_CATASTROPHIC,
+    VERDICT_MERGE_BLOCKED,
+    VERDICT_PARTIAL,
+    VERDICT_PASS,
+    VERDICT_PENDING_CHILDREN,
+    VERDICT_UNVERIFIED,
+)
 from otto.v5_preflight import filter_blocked_descendants, run_preflight
 from otto.queue.subtask import (
     append_pending_entry,
@@ -249,7 +257,7 @@ async def _process_children(
         for architect_tid, architect_task in tasks.items():
             if not (
                 (architect_task.get("intent") or "").lstrip().lower().startswith("architect")
-                and architect_task.get("verdict") == "pass"
+                and architect_task.get("verdict") == VERDICT_PASS
                 and not (architect_task.get("depends_on") or [])
             ):
                 continue
@@ -316,7 +324,7 @@ async def _process_children(
                     config=config,
                     on_event=on_event,
                 )
-                if repair.verdict != "pass":
+                if repair.verdict != VERDICT_PASS:
                     reason = (
                         "Scaffold oracle repair did not pass: "
                         f"{repair.summary}"
@@ -657,7 +665,7 @@ async def _process_children(
                         on_event=on_event,
                     )
                     foundation_after_reenter = get_task(project_dir, reenter_foundation_id) or {}
-                    if str(foundation_after_reenter.get("verdict") or "") != "merge_blocked":
+                    if str(foundation_after_reenter.get("verdict") or "") != VERDICT_MERGE_BLOCKED:
                         continue
                 block_reason = dict(scheduler_feedback)
                 for feature_id in affected_feature_ids:
@@ -1070,7 +1078,7 @@ async def _process_children(
                                     "subtree propagation crashed for %s: %s",
                                     tid, exc,
                                 )
-                        elif integ_result.verdict in ("partial", "unverified"):
+                        elif integ_result.verdict in (VERDICT_PARTIAL, VERDICT_UNVERIFIED):
                             _v5r._block_child_before_upward_merge(
                                 project_dir=project_dir,
                                 child_task_id=tid,
@@ -1518,7 +1526,7 @@ async def _run_lead_with_fallback(
         started_at=attempt_started,
     )
 
-    if result_a.verdict != "catastrophic":
+    if result_a.verdict != VERDICT_CATASTROPHIC:
         return result_a
 
     do_fallback, reason = should_fallback(result_a.failure_reason, config)
@@ -1715,7 +1723,7 @@ async def _run_integration(
     if isinstance(result.verify_result, dict):
         result.verify_result["pre_integration_preflight"] = preflight_result
         result.verify_result["post_integration_preflight"] = post_preflight_result
-    if result.verdict != "catastrophic" and _v5r._integration_smoke_blocks(post_preflight_result):
+    if result.verdict != VERDICT_CATASTROPHIC and _v5r._integration_smoke_blocks(post_preflight_result):
         result.verdict = "merge_blocked"
         result.failure_reason = (
             "Post-agent smoke_clean_deploy still has blocking issues: "
@@ -1906,7 +1914,7 @@ def _build_child_summaries(
         # Step 0b recovery. Prefer the graph verdict when it's terminal-
         # for-the-merge-path; fall back to result.verdict otherwise.
         graph_verdict = entry.get("verdict")
-        if graph_verdict == "merge_blocked":
+        if graph_verdict == VERDICT_MERGE_BLOCKED:
             verdict = "merge_blocked"
         elif result is not None:
             verdict = result.verdict
@@ -1919,7 +1927,7 @@ def _build_child_summaries(
             "summary": (result.final_text if result else "")[:200],
             "cost_usd": result.cost_usd if result else float(entry.get("cost_usd", 0.0)),
         }
-        if verdict == "pending_children":
+        if verdict == VERDICT_PENDING_CHILDREN:
             reconstructed = _reconstruct_decomposed_child_summary(
                 project_dir=project_dir,
                 task_id=cid,
@@ -1931,7 +1939,7 @@ def _build_child_summaries(
         # Surface the build branch for merge_blocked children so the
         # integration Lead can recover their work via git rather than
         # dispatching the build agent to rewrite it.
-        if verdict == "merge_blocked":
+        if verdict == VERDICT_MERGE_BLOCKED:
             record["build_branch"] = child_branch_name(cid)
             record["recovery_hint"] = (
                 f"Work passed verify but failed to merge. Try "
@@ -2012,7 +2020,7 @@ def _reconstruct_decomposed_child_summary(
             if child_result is not None
             else child_entry.get("verdict")
         )
-        if child_verdict == "pending_children":
+        if child_verdict == VERDICT_PENDING_CHILDREN:
             nested = _reconstruct_decomposed_child_summary(
                 project_dir=project_dir,
                 task_id=child_id,
@@ -2145,7 +2153,7 @@ def _reconcile_recovered_children(
     reconciled = 0
     for cid in children_of(project_dir, parent_task_id):
         child = get_task(project_dir, cid) or {}
-        if child.get("verdict") != "merge_blocked":
+        if child.get("verdict") != VERDICT_MERGE_BLOCKED:
             continue
         if _merge_blocked_by_verification(child):
             logger.info(

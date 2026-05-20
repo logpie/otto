@@ -44,6 +44,7 @@ from otto.manifest import queue_index_path_for
 from otto import paths
 from otto.observability import write_json_atomic
 from otto.queue.artifacts import preserve_queue_session_artifacts, queue_primary_log_path
+from otto.schemas import VERDICT_PASS
 from otto.token_usage import (
     TOKEN_USAGE_KEYS,
     add_token_usage,
@@ -130,7 +131,7 @@ def _summary_indicates_product_success(summary: dict[str, Any]) -> bool:
     verdict = str(summary.get("verdict") or "").strip().lower()
     if verdict:
         # v4 uses "passed"; v5 uses "pass". Both mean success.
-        return verdict in {"passed", "pass"}
+        return verdict in {"passed", VERDICT_PASS}
     status = str(summary.get("status") or "").strip().lower()
     return status in {"success", "done", "passed", "pass"}
 

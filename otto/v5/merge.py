@@ -21,6 +21,13 @@ from typing import Any
 
 from otto.lead import LeadResult
 from otto.safe_slug import safe_slug
+from otto.schemas import (
+    VERDICT_CATASTROPHIC,
+    VERDICT_MERGE_BLOCKED,
+    VERDICT_PARTIAL,
+    VERDICT_PASS,
+    VERDICT_UNVERIFIED,
+)
 from otto.v5_branching import MergeWorktreeDirtyError
 from otto.observability import iso_timestamp
 from otto.queue.task_graph import (
@@ -552,7 +559,7 @@ def _commit_integration_agent_changes(
     on_event: Any = None,
 ) -> None:
     """Runner-owned commit for integration-agent edits."""
-    if result.verdict == "catastrophic":
+    if result.verdict == VERDICT_CATASTROPHIC:
         return
     from otto.v5_branching import commit_integration_worktree
 
@@ -605,7 +612,7 @@ def _commit_root_inline_changes(
     on_event: Any = None,
 ) -> None:
     """Runner-owned commit for root inline builds."""
-    if result.decomposition != "inline" or result.verdict == "catastrophic":
+    if result.decomposition != "inline" or result.verdict == VERDICT_CATASTROPHIC:
         return
 
     from otto.v5_branching import commit_worktree, git_current_branch
@@ -840,14 +847,14 @@ def _branch_is_ancestor(project_dir: Path, branch: str, target: str) -> tuple[bo
 def _task_entry_allows_upward_merge(entry: dict[str, Any]) -> bool:
     if entry.get("blocked_pending_contract_amendment") or entry.get("blocked_on_task_id"):
         return False
-    if str(entry.get("verdict") or "") == "merge_blocked":
+    if str(entry.get("verdict") or "") == VERDICT_MERGE_BLOCKED:
         return False
     if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
         return False
     verdict = str(entry.get("verdict") or "")
-    if verdict == "pass":
+    if verdict == VERDICT_PASS:
         return True
-    return verdict == "partial" and entry.get("review_state") == "reviewed_partial"
+    return verdict == VERDICT_PARTIAL and entry.get("review_state") == "reviewed_partial"
 
 def _child_result_allows_upward_merge(
     project_dir: Path,
@@ -857,18 +864,18 @@ def _child_result_allows_upward_merge(
     entry = get_task(project_dir, task_id) or {}
     if entry.get("blocked_pending_contract_amendment") or entry.get("blocked_on_task_id"):
         return False
-    if str(entry.get("verdict") or "") == "merge_blocked":
+    if str(entry.get("verdict") or "") == VERDICT_MERGE_BLOCKED:
         return False
     if entry.get("merge_blocked_structured_reason") or entry.get("merge_blocked_reason"):
         return False
-    if result.verdict == "pass":
+    if result.verdict == VERDICT_PASS:
         return True
-    if result.verdict != "partial":
+    if result.verdict != VERDICT_PARTIAL:
         return False
     return _result_has_reviewed_partial(result) or entry.get("review_state") == "reviewed_partial"
 
 def _result_has_reviewed_partial(result: LeadResult) -> bool:
-    if result.verdict != "partial" or not isinstance(result.verify_result, dict):
+    if result.verdict != VERDICT_PARTIAL or not isinstance(result.verify_result, dict):
         return False
     payload = result.verify_result
     return (
@@ -945,7 +952,7 @@ async def _ensure_child_merge_ready(
     _record_reviewed_partial_if_present(project_dir, child_task_id, result)
     if _child_result_allows_upward_merge(project_dir, child_task_id, result):
         return result
-    if result.verdict not in ("partial", "unverified"):
+    if result.verdict not in (VERDICT_PARTIAL, VERDICT_UNVERIFIED):
         return result
 
     current = result
@@ -977,7 +984,7 @@ async def _ensure_child_merge_ready(
             "escalation": repair.escalation,
         }
         current.verify_result["repair_packet"] = repair.packet_path
-    if repair.verdict != "pass":
+    if repair.verdict != VERDICT_PASS:
         return _block_child_before_upward_merge(
             project_dir=project_dir,
             child_task_id=child_task_id,
@@ -1085,7 +1092,7 @@ def _integration_terminal_verdict(
     smoke block is a VERIFICATION cause → LAND (`partial`) + annotation,
     never `merge_blocked`. `catastrophic` preserved; non-blocking passes
     through."""
-    if current_verdict == "catastrophic" or not blocks:
+    if current_verdict == VERDICT_CATASTROPHIC or not blocks:
         return current_verdict, (reason if blocks else "")
     if (
         resolve_terminal_outcome(cause=TerminalCause.VERIFICATION)
