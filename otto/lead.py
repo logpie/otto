@@ -393,28 +393,46 @@ async def run_lead(
                         f"{existing_summary}\n\n{suffix}" if existing_summary else suffix
                     )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("runner verification plan failed: %s", exc)
-                if result.verdict == VERDICT_PASS:
-                    result.verdict = "unverified"
-                    if isinstance(result.verify_result, dict):
-                        result.verify_result["verdict"] = "unverified"
-                        existing_summary = str(result.verify_result.get("summary") or "").strip()
-                        failure_summary = (
-                            "Runner verification plan failed; invalidating "
-                            f"self-reported pass: {type(exc).__name__}: {exc}"
-                        )
-                        result.verify_result["summary"] = (
-                            f"{existing_summary}\n\n{failure_summary}"
-                            if existing_summary
-                            else failure_summary
-                        )
-                        result.verify_result["runner_verification_error"] = {
-                            "type": type(exc).__name__,
-                            "message": str(exc),
-                        }
-                    failure_reason = (
-                        f"runner verification plan failed: {type(exc).__name__}: {exc}"
+                # P0c (audit-deterministic-overrides-agent.md, finding #5):
+                # the prior behavior silently flipped the agent's `pass` to
+                # `unverified` when validate_lead_verdict() crashed. But that
+                # crash is an OTTO-INTERNAL bug — the agent did real work and
+                # produced an honest verdict; our validator threw on the
+                # output. Discarding the agent's verdict for our own bug
+                # violates the chokepoint invariant ("bugs are acceptable
+                # output; discarded work is not") that the rest of the
+                # pipeline already respects via landed_with_annotation.
+                # Keep the agent's verdict, ANNOTATE that our internal
+                # validation crashed (so the operator sees something is
+                # wrong with otto, not with the build), and log loud.
+                logger.error(
+                    "runner verification plan crashed (otto-internal bug, "
+                    "NOT a build defect): %s: %s — preserving agent's verdict %r",
+                    type(exc).__name__, exc, result.verdict,
+                )
+                if isinstance(result.verify_result, dict):
+                    existing_summary = str(result.verify_result.get("summary") or "").strip()
+                    annotation = (
+                        "[otto-internal] runner verification plan crashed "
+                        f"({type(exc).__name__}: {exc}); agent's verdict preserved "
+                        "but contract checks could not complete. This is an Otto "
+                        "bug, not a build defect — file an issue."
                     )
+                    result.verify_result["summary"] = (
+                        f"{existing_summary}\n\n{annotation}"
+                        if existing_summary
+                        else annotation
+                    )
+                    result.verify_result["runner_verification_error"] = {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                        "annotation": "otto-internal validator crash; agent verdict preserved",
+                    }
+                    result.verify_result.setdefault("annotations", []).append({
+                        "origin": "otto_internal",
+                        "cause": "runner_verification_plan_crashed",
+                        "detail": f"{type(exc).__name__}: {exc}",
+                    })
 
     except Exception as exc:  # noqa: BLE001 — best-effort
         logger.exception("Lead session crashed for task %s", task_id)
