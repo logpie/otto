@@ -1,38 +1,121 @@
-# Repository Guidelines
+# Repository Guidelines — Otto
 
-## Project Structure & Module Organization
+**Otto's project-wide development instructions live in `CLAUDE.md`. Read it
+first.** That file contains the Hard Rules, architectural invariants,
+anti-patterns, debugging protocols, and workflows that bind on every agent
+working on Otto, regardless of provider. Maintained as the single source
+of truth so Claude and Codex stay aligned.
 
-Otto is a Python project with a React/TypeScript web client. Core Python code lives in `otto/`; queue, merge, mission-control, provider, and certifier behavior are split by module. The web client source is in `otto/web/client/src/` and builds into `otto/web/static/`. Tests live in `tests/`. Operational notes live in `docs/`; historical debug logs are archived under `archive/debug/`.
+This file (`AGENTS.md`) is Codex-specific addenda only. If a rule appears
+in both files, `CLAUDE.md` wins.
 
-## Build, Test, and Development Commands
+## Codex-specific addenda
 
-- `uv run python scripts/test_tiers.py smoke`: smallest fast confidence gate.
-- `uv run python scripts/test_tiers.py fast`: day-to-day non-browser gate, excluding slow/process/integration/heavy system tests.
-- `uv run python scripts/test_tiers.py web`: TypeScript plus Mission Control backend/model tests.
-- `uv run pytest -q --maxfail=10`: full default non-browser Python suite; use before broad merges.
-- `uv run ruff check otto scripts tests`: lint Python code.
-- `npm run web:typecheck`: type-check the web client.
-- `npm run web:build`: build the static web bundle.
-- `.venv/bin/python3 -m otto.cli web --host 0.0.0.0 --port 9000 --allow-remote --project-launcher --projects-root /Users/yuxuan/otto-projects --no-open`: launch Mission Control locally.
+Codex has different sandbox semantics, model behavior, and tooling than
+Claude. The notes below cover gotchas that are particular to Codex
+sessions on Otto.
 
-## Coding Style & Naming Conventions
+### Repeated mistakes to avoid
 
-Follow existing module patterns before adding abstractions. Keep Python typed where surrounding code is typed. Use clear queue/run/status names, and preserve immutable queue task definitions. Web code should stay TypeScript-first, with UI state represented in typed API shapes from `types.ts`.
+See `/Users/yuxuan/work/cc-autonomous/codex-learnings.md` for the
+persistent Codex memory file. Highlights:
 
-## Testing Guidelines
+- **Stay in the user-requested worktree.** Inspect `pwd`,
+  `git branch --show-current`, `git status --short --branch`, and
+  `git worktree list` before acting. Do not assume a specific I2P worktree.
+- **Don't assume the browser shows the latest code.** After web client or
+  backend changes, rebuild + restart + verify the served bundle/API
+  reflects the new commit. Stale servers caused multiple false "fixed"
+  claims.
+- **Don't race `npm run web:build` with web backend tests.** Build first,
+  then test — the bundle stamp can race the tests under freshness checks.
+- **Use the repo Python env.** `.venv/bin/pytest` or `uv run pytest`.
+  System `python3 -m pytest` may not have pytest installed.
+- **Verify host binding** for cross-device testing. For
+  MacBook/iPhone over Tailscale, server must listen on `0.0.0.0` (not
+  just `127.0.0.1`).
+- **For UI bugs, exercise the live browser flow.** Don't rely only on
+  screenshots or happy-path API checks. Modal submission, queue
+  start/stop, run detail, landing, logs, proof/evidence views.
+- **Don't open new long-lived exec sessions casually.** Poll existing
+  sessions instead of stacking duplicates.
 
-Add focused regression tests for every behavioral fix. Use the smallest test tier while iterating, then escalate before merge: smoke for low-risk Python edits, `test_tiers.py fast` for ordinary changes, `test_tiers.py web` for Mission Control backend/client changes, full pytest for broad infra changes, and browser-level user flows for interactive UI behavior. Do not rely only on screenshots or API checks for interactive UI bugs.
+Full version with token-accounting rules and per-area gotchas is in
+`codex-learnings.md`.
 
-## Debugging Policy
+### When Claude is the caller
 
-Use direct fixes for obvious compiler, lint, typo, or simple UI polish issues. Use lightweight reproduce-inspect-fix-test for ordinary bugs. Use the full `debug-hypothesis` workflow only for ambiguous, stateful, flaky, process/runtime, queue/resume/merge, browser, persistence, performance, or repeated-failure bugs.
+When this Codex session was dispatched by Claude (the typical case
+during Otto development), expect:
 
-## Commit & Pull Request Guidelines
+- **`approval-policy: "never"`** is always set by the caller. Don't ask
+  for confirmation; do the work or escalate via the structured
+  escalation record.
+- **`sandbox: "workspace-write"`** when editing; `"read-only"` when
+  consulting. Don't widen the sandbox.
+- **Don't create branches or PRs** — `git checkout -b` can hang in the
+  Codex sandbox. The caller (Claude) does branch/PR work itself.
+- **Use `mcp__codex__codex-reply`** with a `threadId` to continue a
+  conversation, not a fresh `mcp__codex__codex` call.
 
-Keep commits scoped and describe the user-visible behavior fixed or added. Include tests run in PR notes. Do not merge or push `main` unless explicitly requested. Work in the active worktree and preserve unrelated user changes.
+### Build / test / dev commands
 
-## Agent-Specific Instructions
+| Command | Purpose |
+|---|---|
+| `uv run python scripts/test_tiers.py smoke` | Smallest fast confidence gate |
+| `uv run python scripts/test_tiers.py fast` | Day-to-day non-browser gate (excludes slow/process/integration/heavy) |
+| `uv run python scripts/test_tiers.py web` | TypeScript + Mission Control backend/model tests |
+| `uv run pytest -q --maxfail=10` | Full default non-browser Python suite |
+| `uv run ruff check otto scripts tests` | Lint Python |
+| `npm run web:typecheck` | Type-check the web client |
+| `npm run web:build` | Build the static web bundle |
+| `.venv/bin/python3 -m otto.cli web --host 0.0.0.0 --port 9000 --allow-remote --project-launcher --projects-root /Users/yuxuan/otto-projects --no-open` | Launch Mission Control locally |
 
-Web Mission Control is the primary product surface. Do not revive deprecated TUI work except where needed to keep existing CLI/queue behavior correct. For `$code-health`, use parallel subagents and multiple rounds unless explicitly told otherwise.
-Before non-trivial Otto work, read `/Users/yuxuan/work/cc-autonomous/codex-learnings.md` for project-specific Codex pitfalls and token-accounting rules.
-When dogfooding Otto, use Otto's core autonomous path: queue a real task, let the queue runner execute build/certify/fix or proof-repair, then review/land through Mission Control. Standalone `otto certify` is diagnostics only unless the user explicitly asks for it.
+### Testing posture
+
+Add focused regression tests for every behavioral fix. Tier discipline:
+- Smoke for low-risk Python edits.
+- `test_tiers.py fast` for ordinary changes.
+- `test_tiers.py web` for Mission Control backend/client changes.
+- Full pytest for broad infra changes.
+- Browser-level user flows for interactive UI behavior.
+
+Do not rely only on screenshots or API checks for interactive UI bugs.
+
+### Debugging policy
+
+Use direct fixes for obvious compiler/lint/typo/UI-polish. Use
+lightweight reproduce-inspect-fix-test for ordinary bugs. Escalate to
+the full `debug-hypothesis` workflow only for:
+- ambiguous / stateful / flaky bugs
+- process/runtime / queue/resume/merge / browser / persistence /
+  performance / repeated-failure bugs
+
+### Mission Control as the primary surface
+
+Web Mission Control is the primary product surface. Do not revive
+deprecated TUI work except where needed to keep existing CLI/queue
+behavior correct.
+
+When dogfooding Otto, use the core autonomous path: queue a real task,
+let the queue runner execute build/certify/fix or proof-repair, then
+review/land through Mission Control. Standalone `otto certify` is
+diagnostics only unless the user explicitly asks for it.
+
+### Commit & PR guidelines
+
+Keep commits scoped and describe the user-visible behavior fixed or
+added. Include tests run in PR notes. Do not merge or push `main`
+unless explicitly requested. Work in the active worktree and preserve
+unrelated user changes.
+
+For `$code-health`: use parallel subagents and multiple rounds unless
+explicitly told otherwise.
+
+---
+
+**Single-source-of-truth note**: when an Otto-dev practice needs to
+change, update `CLAUDE.md`. The two files MUST stay aligned on rules
+that apply to both agents. `AGENTS.md` (this file) holds Codex-only
+addenda; if you're tempted to edit a section here that has a Claude
+equivalent in `CLAUDE.md`, move the shared rule to `CLAUDE.md` instead.
