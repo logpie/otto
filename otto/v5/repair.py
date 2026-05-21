@@ -1002,12 +1002,19 @@ async def _repair_subtree_propagation_once(
             changed_paths=_v5r._git_diff_name_only(target_worktree),
             operation="subtree_propagation_repair_commit",
         )
-        if feedback is not None:
-            return False, _v5r._foundation_contract_write_block_detail(feedback)
-        return commit_worktree(
+        ok, commit_detail = commit_worktree(
             worktree_path=target_worktree,
             message=f"v5 subtree propagation repair: {task_id}",
         )
+        if ok and feedback is not None:
+            _v5r._record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=task_id,
+                result=result,
+                feedback=feedback,
+                on_event=on_event,
+            )
+        return ok, commit_detail
 
     repair = await _v5r.run_oracle_repair_agent(
         packet,
@@ -1176,12 +1183,19 @@ async def _run_child_verify_repair_packet(
             changed_paths=_v5r._git_diff_name_only(child_worktree),
             operation="child_verify_repair_commit",
         )
-        if feedback is not None:
-            return False, _v5r._foundation_contract_write_block_detail(feedback)
-        return commit_worktree(
+        ok, commit_detail = commit_worktree(
             worktree_path=child_worktree,
             message=f"v5 child verify repair: {child_task_id}",
         )
+        if ok and feedback is not None:
+            _v5r._record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                feedback=feedback,
+                on_event=on_event,
+            )
+        return ok, commit_detail
 
     return await _v5r.run_oracle_repair_agent(
         packet,
@@ -1553,6 +1567,7 @@ async def _run_scaffold_repair_packet(
     architect_tid: str,
     architect_task: dict[str, Any],
     latest_result: CleanOracleResult,
+    result: LeadResult,
     config: dict[str, Any],
     on_event: Any = None,
 ) -> Any:
@@ -1615,12 +1630,19 @@ async def _run_scaffold_repair_packet(
             changed_paths=_v5r._git_diff_name_only(project_dir),
             operation="scaffold_repair_commit",
         )
-        if feedback is not None:
-            return False, _v5r._foundation_contract_write_block_detail(feedback)
-        return commit_integration_worktree(
+        ok, commit_detail = commit_integration_worktree(
             worktree_path=project_dir,
             task_id=f"{architect_tid}-scaffold-repair",
         )
+        if ok and feedback is not None:
+            _v5r._record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=architect_tid,
+                result=result,
+                feedback=feedback,
+                on_event=on_event,
+            )
+        return ok, commit_detail
 
     repair = await _v5r.run_oracle_repair_agent(
         packet,
@@ -1961,16 +1983,13 @@ async def _repair_child_upward_merge_after_failure(
             stale_feedback=stale_feedback,
         )
         return record_terminal(reason=reason, structured_reason=feedback)
-    feedback = _v5r._foundation_contract_write_feedback(
+    stale_target_contract_violation = _v5r._foundation_contract_write_feedback(
         project_dir=project_dir,
         acting_task_id=child_task_id,
         parent_integration_branch=parent_integration_branch,
         changed_paths=_v5r._git_changed_paths_between_refs(project_dir, pre_merge_ref, source_branch),
         operation="stale_target_retry_merge_delta",
     )
-    if feedback is not None:
-        reason = _v5r._foundation_contract_write_block_detail(feedback)
-        return record_terminal(reason=reason, structured_reason=feedback)
     try:
         ok, merge_detail = merge_child_into_integration(
             project_dir=project_dir,
@@ -1983,6 +2002,16 @@ async def _repair_child_upward_merge_after_failure(
     except Exception as exc:  # noqa: BLE001 - retry merge failure must stay terminal-structured
         ok = False
         merge_detail = f"stale target retry merge crashed: {type(exc).__name__}: {exc}"
+
+    if ok and stale_target_contract_violation is not None:
+        _v5r._record_foundation_contract_write_annotation(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            feedback=stale_target_contract_violation,
+            phase="stale_target_retry_annotation",
+            on_event=on_event,
+        )
 
     if ok and run_smoke_preflight:
         try:
@@ -2122,6 +2151,7 @@ async def _repair_child_merge_conflict_once(
     child_worktree: Path,
     child_session_dir: Path,
     parent_integration_branch: str,
+    result: LeadResult,
     config: dict[str, Any],
     original_detail: str,
     on_event: Any = None,
@@ -2237,12 +2267,19 @@ async def _repair_child_merge_conflict_once(
             changed_paths=_v5r._git_diff_name_only(child_worktree),
             operation="merge_conflict_repair_commit",
         )
-        if feedback is not None:
-            return False, _v5r._foundation_contract_write_block_detail(feedback)
-        return commit_worktree(
+        ok, commit_detail = commit_worktree(
             worktree_path=child_worktree,
             message=f"v5 merge conflict repair: {child_task_id}",
         )
+        if ok and feedback is not None:
+            _v5r._record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=child_task_id,
+                result=result,
+                feedback=feedback,
+                on_event=on_event,
+            )
+        return ok, commit_detail
 
     repair = await _v5r.run_oracle_repair_agent(
         packet,

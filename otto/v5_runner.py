@@ -100,6 +100,7 @@ from otto.queue.task_graph import (
 from otto.schemas import (
     VERDICT_CATASTROPHIC,
     VERDICT_MERGE_BLOCKED,
+    VERDICT_PARTIAL,
     VERDICT_PASS,
 )
 from otto.spec_compile_flat import (
@@ -1179,17 +1180,6 @@ async def _run_preflight_payload_repair_session(
             changed_paths=changed_paths,
             operation=f"{repair_phase}_repair_commit",
         )
-        if feedback is not None:
-            detail = _foundation_contract_write_block_detail(feedback)
-            _emit(on_event, {
-                "event": f"{event_prefix}_repair_commit_failed",
-                "task_id": task_id,
-                "repair_phase": repair_phase,
-                "worktree": str(worktree_path),
-                "detail": detail,
-                "structured_reason": feedback,
-            })
-            return False, detail
         commit_ok, commit_detail = commit_integration_worktree(
             worktree_path=worktree_path,
             task_id=f"{task_id}-{repair_phase}",
@@ -1205,6 +1195,14 @@ async def _run_preflight_payload_repair_session(
             "worktree": str(worktree_path),
             "detail": commit_detail,
         })
+        if commit_ok and feedback is not None:
+            _record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=task_id,
+                result=LeadResult(task_id=task_id, verdict=VERDICT_PARTIAL),
+                feedback=feedback,
+                on_event=on_event,
+            )
         return commit_ok, commit_detail
 
     repair = await run_oracle_repair_agent(
@@ -1326,7 +1324,7 @@ def _commit_integration_agent_changes(
     on_event: Any = None,
 ) -> None:
     """Runner-owned commit for integration-agent edits."""
-    if result.verdict == "catastrophic":
+    if result.verdict == VERDICT_CATASTROPHIC:
         return
     from otto.v5_branching import commit_integration_worktree
 
@@ -1337,24 +1335,6 @@ def _commit_integration_agent_changes(
         changed_paths=_git_diff_name_only(worktree_path),
         operation="integration_agent_commit",
     )
-    if feedback is not None:
-        detail = _foundation_contract_write_block_detail(feedback)
-        _emit(on_event, {
-            "event": "integration_commit_failed",
-            "task_id": task_id,
-            "worktree": str(worktree_path),
-            "detail": detail,
-            "structured_reason": feedback,
-        })
-        _record_task_merge_blocked_reason(
-            project_dir=project_dir,
-            task_id=task_id,
-            result=result,
-            reason=detail,
-            origin="foundation_contract_write_gate",
-            structured_reason=feedback,
-        )
-        return
     ok, detail = commit_integration_worktree(
         worktree_path=worktree_path,
         task_id=task_id,
@@ -1367,8 +1347,17 @@ def _commit_integration_agent_changes(
     })
     if not ok:
         logger.warning("integration commit failed for %s: %s", task_id, detail)
-        set_verdict(project_dir, task_id, "merge_blocked", cost_usd=result.cost_usd)
-        result.verdict = "merge_blocked"
+        set_verdict(project_dir, task_id, VERDICT_MERGE_BLOCKED, cost_usd=result.cost_usd)
+        result.verdict = VERDICT_MERGE_BLOCKED
+        return
+    if feedback is not None:
+        _record_foundation_contract_write_annotation(
+            project_dir=project_dir,
+            task_id=task_id,
+            result=result,
+            feedback=feedback,
+            on_event=on_event,
+        )
 
 
 def _commit_root_inline_changes(
@@ -1379,7 +1368,7 @@ def _commit_root_inline_changes(
     on_event: Any = None,
 ) -> None:
     """Runner-owned commit for root inline builds."""
-    if result.decomposition != "inline" or result.verdict == "catastrophic":
+    if result.decomposition != "inline" or result.verdict == VERDICT_CATASTROPHIC:
         return
 
     from otto.v5_branching import commit_worktree, git_current_branch
@@ -1397,8 +1386,8 @@ def _commit_root_inline_changes(
             "detail": detail,
         })
         logger.warning(detail)
-        set_verdict(project_dir, ROOT_TASK_ID, "merge_blocked", cost_usd=result.cost_usd)
-        result.verdict = "merge_blocked"
+        set_verdict(project_dir, ROOT_TASK_ID, VERDICT_MERGE_BLOCKED, cost_usd=result.cost_usd)
+        result.verdict = VERDICT_MERGE_BLOCKED
         return
 
     feedback = _foundation_contract_write_feedback(
@@ -1408,24 +1397,6 @@ def _commit_root_inline_changes(
         changed_paths=_git_diff_name_only(project_dir),
         operation="root_inline_commit",
     )
-    if feedback is not None:
-        detail = _foundation_contract_write_block_detail(feedback)
-        _emit(on_event, {
-            "event": "inline_commit_failed",
-            "task_id": ROOT_TASK_ID,
-            "worktree": str(project_dir),
-            "detail": detail,
-            "structured_reason": feedback,
-        })
-        _record_task_merge_blocked_reason(
-            project_dir=project_dir,
-            task_id=ROOT_TASK_ID,
-            result=result,
-            reason=detail,
-            origin="foundation_contract_write_gate",
-            structured_reason=feedback,
-        )
-        return
     ok, detail = commit_worktree(worktree_path=project_dir, message="v5 inline build")
     _emit(on_event, {
         "event": "inline_commit" if ok else "inline_commit_failed",
@@ -1435,8 +1406,17 @@ def _commit_root_inline_changes(
     })
     if not ok:
         logger.warning("root inline commit failed: %s", detail)
-        set_verdict(project_dir, ROOT_TASK_ID, "merge_blocked", cost_usd=result.cost_usd)
-        result.verdict = "merge_blocked"
+        set_verdict(project_dir, ROOT_TASK_ID, VERDICT_MERGE_BLOCKED, cost_usd=result.cost_usd)
+        result.verdict = VERDICT_MERGE_BLOCKED
+        return
+    if feedback is not None:
+        _record_foundation_contract_write_annotation(
+            project_dir=project_dir,
+            task_id=ROOT_TASK_ID,
+            result=result,
+            feedback=feedback,
+            on_event=on_event,
+        )
 
 
 def _propagate_subtree_integration(
@@ -1638,12 +1618,19 @@ async def _repair_subtree_propagation_once(
             changed_paths=_git_diff_name_only(target_worktree),
             operation="subtree_propagation_repair_commit",
         )
-        if feedback is not None:
-            return False, _foundation_contract_write_block_detail(feedback)
-        return commit_worktree(
+        ok, commit_detail = commit_worktree(
             worktree_path=target_worktree,
             message=f"v5 subtree propagation repair: {task_id}",
         )
+        if ok and feedback is not None:
+            _record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=task_id,
+                result=result,
+                feedback=feedback,
+                on_event=on_event,
+            )
+        return ok, commit_detail
 
     repair = await run_oracle_repair_agent(
         packet,
@@ -3694,6 +3681,7 @@ from otto.v5.merge import (  # noqa: E402, F401
     _pre_merge_ref_unresolved_feedback,
     _propagate_subtree_integration,
     _record_and_check_integration_union,
+    _record_foundation_contract_write_annotation,
     _record_reviewed_partial_if_present,
     _record_structured_merge_failed,
     _record_task_merge_blocked_reason,

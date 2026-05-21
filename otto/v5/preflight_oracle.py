@@ -33,7 +33,7 @@ from otto.defaults import (
 from otto.journey_scope_policy import ExecutionScope
 from otto.lead import LeadResult
 from otto.safe_slug import safe_slug
-from otto.schemas import VERDICT_PASS
+from otto.schemas import VERDICT_PARTIAL, VERDICT_PASS
 from otto.v5_branching import (
     commit_integration_worktree,
     ensure_branch_exists,
@@ -921,17 +921,6 @@ async def _run_preflight_payload_repair_session(
             changed_paths=changed_paths,
             operation=f"{repair_phase}_repair_commit",
         )
-        if feedback is not None:
-            detail = _v5r._foundation_contract_write_block_detail(feedback)
-            _v5r._emit(on_event, {
-                "event": f"{event_prefix}_repair_commit_failed",
-                "task_id": task_id,
-                "repair_phase": repair_phase,
-                "worktree": str(worktree_path),
-                "detail": detail,
-                "structured_reason": feedback,
-            })
-            return False, detail
         commit_ok, commit_detail = commit_integration_worktree(
             worktree_path=worktree_path,
             task_id=f"{task_id}-{repair_phase}",
@@ -947,6 +936,14 @@ async def _run_preflight_payload_repair_session(
             "worktree": str(worktree_path),
             "detail": commit_detail,
         })
+        if commit_ok and feedback is not None:
+            _v5r._record_foundation_contract_write_annotation(
+                project_dir=project_dir,
+                task_id=task_id,
+                result=LeadResult(task_id=task_id, verdict=VERDICT_PARTIAL),
+                feedback=feedback,
+                on_event=on_event,
+            )
         return commit_ok, commit_detail
 
     repair = await _v5r.run_oracle_repair_agent(
@@ -1437,4 +1434,3 @@ async def _prepare_integration_worktree_with_repair(
         },
     )
     return prepared_path, payload
-

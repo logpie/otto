@@ -316,14 +316,20 @@ async def _process_children(
                 continue
 
             if blocking_messages:
+                architect_result = child_results.get(architect_tid) or LeadResult(
+                    task_id=architect_tid,
+                    verdict=str(architect_task.get("verdict") or VERDICT_PARTIAL),
+                )
                 repair = await _v5r._run_scaffold_repair_packet(
                     project_dir=project_dir,
                     architect_tid=architect_tid,
                     architect_task=architect_task,
                     latest_result=scaffold_result,
+                    result=architect_result,
                     config=config,
                     on_event=on_event,
                 )
+                child_results[architect_tid] = architect_result
                 if repair.verdict != VERDICT_PASS:
                     reason = (
                         "Scaffold oracle repair did not pass: "
