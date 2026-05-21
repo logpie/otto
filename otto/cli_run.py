@@ -258,11 +258,53 @@ def register_run_command(main: click.Group) -> None:
         ))
 
         console.print()
-        console.print(f"  [bold]Verdict:[/bold] {_color_verdict(result.verdict)}")
+        # Pull advisory findings from the integration verification_plan.json
+        # so operators see doc-coherence / quality flags even on a `pass`.
+        # The verifier-gate demote is now advisory (P0a fix); surfacing them
+        # here closes the "operator reads pass and skips the json" gap.
+        findings: dict[str, list[dict[str, str]]] = {
+            "advisories": [], "gate_failures": [], "journey_failures": [],
+        }
+        try:
+            if result.root_session_dir is not None:
+                from otto.v5_verification_plan import load_advisory_findings
+                findings = load_advisory_findings(result.root_session_dir)
+        except Exception:  # noqa: BLE001 — never block the summary on a side-channel read
+            pass
+        advisory_count = len(findings["advisories"])
+        gate_count = len(findings["gate_failures"])
+        journey_count = len(findings["journey_failures"])
+        bits: list[str] = []
+        if advisory_count:
+            bits.append(f"{advisory_count} advisory")
+        if gate_count:
+            bits.append(f"[red]{gate_count} gate failure[/red]")
+        if journey_count:
+            bits.append(f"[red]{journey_count} journey failure[/red]")
+        verdict_suffix = f" ({', '.join(bits)} — see proof-packet.html)" if bits else ""
+        console.print(
+            f"  [bold]Verdict:[/bold] {_color_verdict(result.verdict)}{verdict_suffix}"
+        )
         console.print(f"  cost: ${result.total_cost_usd:.4f}")
         console.print(f"  duration: {result.duration_s:.1f}s")
         if result.failure_reason:
             console.print(f"  [yellow]reason:[/yellow] {result.failure_reason}")
+        # If there are findings, print them inline so the operator sees the
+        # detail without having to open the proof-packet.html file.
+        if advisory_count or gate_count or journey_count:
+            console.print()
+            if gate_count or journey_count:
+                console.print("  [bold red]Gate / journey failures (verdict demoted):[/bold red]")
+                for f in findings["gate_failures"] + findings["journey_failures"]:
+                    console.print(
+                        f"    [red]✗[/red] {f['kind']}/{f['id']}: {f['detail'][:140]}"
+                    )
+            if advisory_count:
+                console.print("  [bold yellow]Advisories (real findings, verdict NOT demoted):[/bold yellow]")
+                for f in findings["advisories"]:
+                    console.print(
+                        f"    [yellow]·[/yellow] {f['kind']}/{f['id']}: {f['detail'][:140]}"
+                    )
 
         # Exit code: 0 unless catastrophic (1). A `missing_toolchain` block is
         # an ENVIRONMENT failure, not a product defect or an Otto crash — give

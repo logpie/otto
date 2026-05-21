@@ -54,6 +54,77 @@ from otto.schemas import VERDICT_PASS
 # anti-pattern Phase 1 just fixed for journey verification.
 # Advisories still write to verification_plan.json for the audit trail;
 # operators can act on them; the verdict respects the agent.
+def load_advisory_findings(session_dir: Path) -> dict[str, Any]:
+    """Return advisory + gate findings from a session's verification_plan.json
+    artifacts so operator-facing surfaces (CLI verdict line, proof packet,
+    recover status) can show them without re-running the verifier.
+
+    Looks for verification_plan.json in two places:
+      1. `<session_dir>/verification_plan.json` (root-Lead or inline-mode case)
+      2. `<session_dir>/integration/verification_plan.json` (subtree/root
+         integration case)
+
+    Returns a dict with three lists:
+      - `advisories`: failed ADVISORY_KINDS entries (don't block; need
+        operator visibility — the whole point of the demote-to-advisory
+        is to surface these without overriding the verdict)
+      - `gate_failures`: failed CHECK_KINDS entries (these DO block; rare
+        post-Phase-1 but possible — local_scope_check / verdict_consistency
+        catching agent dishonesty)
+      - `journey_failures`: journey ids the agent claimed but evidence
+        didn't support
+
+    Each entry is a dict with at minimum `kind`, `id`, `detail`. Returns
+    empty lists if no plan file exists (e.g. inline-mode runs that skip
+    validate_lead_verdict).
+    """
+    findings: dict[str, Any] = {
+        "advisories": [],
+        "gate_failures": [],
+        "journey_failures": [],
+    }
+    candidates = [
+        session_dir / "verification_plan.json",
+        session_dir / "integration" / "verification_plan.json",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for check in payload.get("checks") or []:
+            if not isinstance(check, dict):
+                continue
+            if check.get("status") != "fail":
+                continue
+            kind = str(check.get("kind") or "")
+            slim = {
+                "kind": kind,
+                "id": str(check.get("id") or ""),
+                "detail": str(check.get("detail") or ""),
+                "source": path.name,
+            }
+            if kind in ADVISORY_KINDS:
+                findings["advisories"].append(slim)
+            elif kind in CHECK_KINDS:
+                findings["gate_failures"].append(slim)
+            else:
+                # Unknown kind — surface as advisory so it's visible
+                findings["advisories"].append(slim)
+        for journey_id in payload.get("journey_failures") or []:
+            findings["journey_failures"].append({
+                "kind": "journey_failure",
+                "id": str(journey_id or ""),
+                "detail": "agent claimed pass but evidence did not satisfy",
+                "source": path.name,
+            })
+    return findings
+
+
 CHECK_KINDS = (
     "local_scope_check",
     "verdict_consistency",

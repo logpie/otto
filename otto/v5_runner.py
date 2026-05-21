@@ -140,6 +140,10 @@ class V5RunResult:
     total_cost_usd: float = 0.0
     duration_s: float = 0.0
     failure_reason: str = ""
+    # Surfaced so CLI / proof packet / recover-status can locate
+    # verification_plan.json + checkpoint events without re-deriving
+    # the "latest session" via path pointers.
+    root_session_dir: Path | None = None
 
 
 class _V5RunDeadlineExceeded(TimeoutError):
@@ -2164,6 +2168,10 @@ async def run_v5_pipeline(
         root_session_id = _paths.new_session_id(project_dir)
         root_session_dir = _paths.session_dir(project_dir, root_session_id)
         root_session_dir.mkdir(parents=True, exist_ok=True)
+        # Surface the session dir on the result so the CLI / proof
+        # packet / recover-status can load verification_plan.json
+        # advisories without having to re-derive "latest" via pointers.
+        result.root_session_dir = root_session_dir
         _emit(on_event, {"event": "session_open", "session_id": root_session_id})
 
         checkout_result = await _checkout_v5_branch_clean_with_repair(
