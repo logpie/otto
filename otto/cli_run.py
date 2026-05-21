@@ -274,14 +274,31 @@ def register_run_command(main: click.Group) -> None:
         advisory_count = len(findings["advisories"])
         gate_count = len(findings["gate_failures"])
         journey_count = len(findings["journey_failures"])
+        # Audit F-5: text-search-derived advisories (page_has_ia_route,
+        # entity_has_empty_state, action_has_test, page_resolves, etc.)
+        # are doc-coherence quibbles, not behavior failures. With the
+        # integration Lead's behavioral journey self-verify proven, these
+        # don't deserve front-page CLI real estate on a passing run — the
+        # detail is preserved in proof-packet.html / verification_plan.json
+        # for operators who want it.
         bits: list[str] = []
-        if advisory_count:
+        # ONLY surface advisories in the verdict suffix when something else
+        # went wrong (so the operator knows to look). On a clean pass,
+        # they're suppressed entirely.
+        show_advisories_inline = result.verdict != "pass" or gate_count or journey_count
+        if advisory_count and show_advisories_inline:
             bits.append(f"{advisory_count} advisory")
         if gate_count:
             bits.append(f"[red]{gate_count} gate failure[/red]")
         if journey_count:
             bits.append(f"[red]{journey_count} journey failure[/red]")
-        verdict_suffix = f" ({', '.join(bits)} — see proof-packet.html)" if bits else ""
+        if advisory_count and not show_advisories_inline:
+            verdict_suffix = (
+                f" ({advisory_count} advisory finding"
+                f"{'s' if advisory_count != 1 else ''} in proof-packet.html)"
+            )
+        else:
+            verdict_suffix = f" ({', '.join(bits)} — see proof-packet.html)" if bits else ""
         console.print(
             f"  [bold]Verdict:[/bold] {_color_verdict(result.verdict)}{verdict_suffix}"
         )
@@ -289,18 +306,19 @@ def register_run_command(main: click.Group) -> None:
         console.print(f"  duration: {result.duration_s:.1f}s")
         if result.failure_reason:
             console.print(f"  [yellow]reason:[/yellow] {result.failure_reason}")
-        # If there are findings, print them inline so the operator sees the
-        # detail without having to open the proof-packet.html file.
-        if advisory_count or gate_count or journey_count:
+        # If verdict was demoted, print the offending findings inline so the
+        # operator can act without opening proof-packet.html. On a clean
+        # pass, advisories live in proof-packet only.
+        if gate_count or journey_count:
             console.print()
-            if gate_count or journey_count:
-                console.print("  [bold red]Gate / journey failures (verdict demoted):[/bold red]")
-                for f in findings["gate_failures"] + findings["journey_failures"]:
-                    console.print(
-                        f"    [red]✗[/red] {f['kind']}/{f['id']}: {f['detail'][:140]}"
-                    )
+            console.print("  [bold red]Gate / journey failures (verdict demoted):[/bold red]")
+            for f in findings["gate_failures"] + findings["journey_failures"]:
+                console.print(
+                    f"    [red]✗[/red] {f['kind']}/{f['id']}: {f['detail'][:140]}"
+                )
             if advisory_count:
-                console.print("  [bold yellow]Advisories (real findings, verdict NOT demoted):[/bold yellow]")
+                console.print()
+                console.print("  [bold yellow]Advisories (recorded, verdict NOT demoted):[/bold yellow]")
                 for f in findings["advisories"]:
                     console.print(
                         f"    [yellow]·[/yellow] {f['kind']}/{f['id']}: {f['detail'][:140]}"
