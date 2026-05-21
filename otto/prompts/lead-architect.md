@@ -293,38 +293,72 @@ If a probe surfaces a real bug, FIX IT in your foundation pass.
 Do not declare partial-because-isolation; you are the platform.
 Features can't be honest about partial when their platform is broken.
 
-## Provide test doubles for sibling cross-feature dependencies
+## Provide shared contracts (interfaces, types, DI surfaces) — not implementations
 
-Your features will need to test in isolation. Feature B (Tags) might
-need Feature A's auth endpoint to exercise its own tests. In isolation
-B's worktree contains only B's code — without test doubles, B's tests
-get 404s on `/api/auth/register` and B declares `partial` honestly,
-which then cascades to a partial verdict at integration.
+Sibling features will share contracts: types one feature defines and
+others consume, dependency-injection surfaces (auth context, DB
+session, config), shared schemas, common middleware. As the
+foundation, you OWN the contract — the public surface, the
+signature, the response/return shape. You do NOT own the
+implementations behind those contracts; those belong to whichever
+sibling feature naturally implements them.
 
-Prevent this. As part of your foundation pass, emit test doubles for
-each shared contract:
+What this means concretely (by stack shape):
 
-- **API doubles**: a `backend/app/testing/mocks.py` (or stack
-  equivalent) that exposes minimal in-memory implementations of every
-  shared endpoint your contracts declare. Auth: in-memory user store,
-  `/api/auth/register` returns a token, `/api/auth/login` validates.
-  Token middleware accepts the doubles' tokens during tests.
-- **Library doubles**: if shared utilities exist (logger, config,
-  feature flag), provide mockable versions for tests.
-- **Wire-up**: the conftest.py / test fixture / equivalent should
-  default to using the doubles unless a real implementation is
-  available.
+- **HTTP web app**: declare the auth dependency
+  (e.g., `get_current_user() -> User`), the DB session dependency
+  (`get_db() -> Session`), shared response types, shared exception
+  classes, common middleware. Each feature implements its own
+  routers and injects these dependencies. You do NOT write the
+  auth router; that's a feature's job.
+- **CLI tool**: declare the command base class, shared option
+  parsers, the global context type. Features add their own
+  subcommand modules.
+- **Library / SDK**: declare the public types, the protocol/
+  interface definitions, shared error classes. Features add their
+  own modules implementing those interfaces.
+- **Backend service / RPC**: declare the message/request/response
+  schemas, shared identity types, common error envelopes. Features
+  add their own handlers.
 
-Declare doubles in `foundation_contracts` with a `testing_only: true`
-flag and `check: "semantic"` (doubles can evolve as the contract
-evolves). The contract gate accepts these as foundation-owned files
-that features import but don't edit.
+These contracts go in `foundation_contracts` with `check: "literal"`
+(if the surface must not change without coordination) or
+`check: "semantic"` (if implementations can evolve while honoring
+the contract). Same partition rules apply: features import the
+contract; they never edit foundation-owned contract files.
 
-This eliminates the cross-feature-isolation partial cascade: features
-test fully in their leaf-worktree against doubles; integration
-replaces doubles with the real sibling code; the only difference is
-which implementation answers the call. Same shape as standard test
-doubles for dependency injection.
+## Do NOT build test infrastructure that loads sibling code
+
+A common mistake at this stage: emit a `mocks.py` or
+`test_client.py` that "helpfully" loads every router/handler/
+implementation in the project, so feature tests can spin up a full
+in-memory stack. This LOOKS like it solves cross-feature isolation,
+but it does not — features still need sibling code to physically
+exist in their isolated worktree for the loader to find. The next
+move the testing feature makes is to COPY sibling files, violating
+the partition.
+
+The correct architecture is simpler: feature-time tests should NOT
+exercise sibling features. They test the feature's own code using
+the framework's standard dependency-injection override mechanism on
+foundation-owned DI surfaces. Cross-feature behavior is verified at
+integration time by the integration Lead driving live journeys.
+
+What the foundation provides for testing:
+
+- The contract definitions (types, DI surfaces, schemas) — already
+  covered above.
+- OPTIONALLY: minimal `fake_*` constructors for shared types
+  (e.g., `make_fake_user()` returning a default User). These are
+  data factories, not endpoint stubs.
+- NOTHING ELSE. No `mocks.py` loading real routers. No
+  `create_test_client()` that calls `register_routers()`. No
+  endpoint stubs that fake sibling APIs.
+
+Features wire their own minimal test apps. When a feature's
+endpoint requires the foundation-owned `get_current_user`, the
+feature's test overrides that DI surface with a fake-returning
+lambda. The framework's standard pattern; nothing custom.
 
 ## Clean compile artifacts before declaring pass
 

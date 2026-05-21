@@ -49,6 +49,15 @@ These are non-negotiable. Most failures come from rationalizing past one of thes
 6. **Stay in scope.** If you find a bug outside your subsystem, record it in
    `decisions.md` or your verdict's `partial`/`skipped`. Do not silently take
    ownership of another leaf's surface.
+7. **Feature-time tests test the FEATURE; cross-feature behavior is integration's
+   truth.** If a test you're about to write would require a sibling feature's
+   code to be in your worktree, that test belongs at integration time, not at
+   feature time. The integration Lead already drives every cross-feature
+   journey live; that is the cross-feature test. For preconditions
+   (authentication, DB session, shared context) that your feature's tests
+   need but a sibling provides, use the framework's standard DI override
+   mechanism on foundation-owned contracts — NEVER copy sibling code into
+   your worktree to satisfy a test.
 
 The rest of this document explains the rationale and provides
 role-specific guidance. The rules above bind regardless.
@@ -123,10 +132,20 @@ When you decompose:
   files it may create/edit under `leaf_extension_globs`);
   (3) which foundation contracts / shared modules it imports BY NAME;
   (4) which paths are forbidden to it (anything foundation-owned, anything
-  in another sibling's owned set). Vague intents like "build Feature A"
+  in another sibling's owned set);
+  (5) the testing policy: feature tests test only the feature's own code;
+  cross-feature scenarios belong in the integration journey, NOT in
+  feature-time tests. For preconditions like authentication or database
+  session the feature's tests need, use the framework's standard DI
+  override on foundation-owned contracts (e.g., override
+  `get_current_user` to return a fake User). Do NOT instruct the child
+  to write tests that would require sibling-feature code to be present
+  in its isolated worktree.
+  Vague intents like "build Feature A"
   produce children that pattern-match to a generic shape and silently
   violate the partition. Concrete intents — "create these files only,
-  import this module verbatim, do not edit anything outside this glob" —
+  import this module verbatim, do not edit anything outside this glob,
+  test only your own code" —
   produce children that stay in their lane.
 <!-- audit:F-03 applied -->
 
@@ -140,18 +159,28 @@ Use the repo's existing stack, helpers, and test commands. Build the full
 intent surface that belongs to your scope, not only the journey samples.
 
 Leaf verification:
-- Write and run focused unit, component, API, CLI, or subsystem tests for your
-  scope.
-- Do not run cross-stack Playwright as a leaf when sibling systems are not
-  integrated. You MAY mock sibling APIs (other features' endpoints, external
-  services outside your scope) at the contract boundary if needed for leaf
-  isolation. Integration will replace those mocks with real services per
-  `lead-integration.md`, so keep your leaf tests honest about what they
-  prove: a passing leaf test against a mocked sibling does NOT prove the
-  integrated product works, and the integration agent will re-verify
-  end-to-end without the mocks.
-- Fix warnings that indicate real product or test fragility. If test
-  infrastructure is missing, say so honestly in `intent_coverage.partial`.
+- Write and run focused unit, component, API, CLI, or subsystem tests for
+  YOUR OWN code only.
+- Do NOT write tests that exercise sibling features. If a test you're about
+  to write requires sibling-owned code (routers, handlers, modules)
+  to be present in your worktree, that test belongs in the integration
+  journey, not at leaf time. The integration Lead drives cross-feature
+  scenarios live as the behavioral truth. Re-doing them at leaf time
+  via stubs or mocks is redundant and introduces drift.
+- For preconditions your feature's tests need (auth context, DB session,
+  shared user, current request, etc.), use the framework's standard
+  dependency-injection override on foundation-owned contracts.
+  Example (HTTP/FastAPI shape): `app.dependency_overrides[get_current_user]
+  = lambda: fake_user()`. Stack-equivalent for CLI, library, or
+  RPC projects — every modern framework supports DI overrides for tests.
+- Do NOT copy sibling code into your worktree, ever, for any reason.
+  If you're tempted ("I just need this one function from Feature A to
+  make my test pass"), that's the rule above: the test belongs at
+  integration time. Stop, drop the test, move on.
+- Fix warnings that indicate real product or test fragility. If
+  framework test infrastructure is missing (e.g., the project doesn't
+  have a test-client primitive yet), say so honestly in
+  `intent_coverage.partial`.
 <!-- audit:F-14 applied -->
 
 Subsystem boundary:
