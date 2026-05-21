@@ -58,6 +58,37 @@ def test_semantic_contract_owner_accepts_compatible_behavioral_superset() -> Non
     assert v5_runner._integration_union_missing_contributions(state, final_text_by_path) == []
 
 
+def test_semantic_no_probes_trusts_owner_audit_F4() -> None:
+    """Audit F-4: a `check: semantic` contract with NO probes is the explicit
+    'trust the owner' mode. Previously this fell back to literal
+    line-preservation, contradicting the documented semantics. Now: when the
+    owner contributes a line that doesn't survive in the union but the contract
+    declares no probes, the union guard exempts (operator-visible advisory
+    surfaces this elsewhere)."""
+    path = "backend/tests/conftest.py"
+    state = _state(
+        contract={
+            "path": path,
+            "owner_task_id": "foundation",
+            "check": "semantic",
+            # No required_exports, no behavior_probes — under-specified.
+        }
+    )
+    # The owner's original `connect()` line is gone from the final text:
+    final_text_by_path = {
+        path: (
+            "# conftest.py — evolved fixtures\n"
+            "import pytest\n"
+            "@pytest.fixture\n"
+            "def db_session(): ...\n"
+        )
+    }
+
+    # Pre-audit-F-4: this would flag the missing 'connect' line as a
+    # union-incomplete violation. Post-F-4: trust the owner; exempt.
+    assert v5_runner._integration_union_missing_contributions(state, final_text_by_path) == []
+
+
 def test_semantic_contract_blocks_when_behavior_probe_missing() -> None:
     path = "frontend/src/lib/ws.ts"
     state = _state(

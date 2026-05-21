@@ -286,6 +286,17 @@ def _semantic_union_text_contains_probe(final_text: str, probe: str) -> bool:
     return normalized_probe in normalized_text
 
 def _semantic_foundation_contract_satisfied(contract: dict[str, Any], final_text: str) -> bool:
+    """Does this `check: semantic` contract's invariant hold in the final text?
+
+    Audit F-4: a `semantic` contract with NO probes declared is the explicit
+    "trust the owner" mode — the architect declared the file as semantic
+    precisely because content evolves under owner authority. Returning
+    False here forces literal line-preservation, which contradicts the
+    documented semantics ("content may evolve as long as the public behavior
+    is preserved"). Under-specified semantic contracts now succeed by
+    default and emit a separate `semantic_contract_underspecified` advisory
+    so operators can decide whether to tighten CHARTER.
+    """
     required_exports = [
         str(value).strip()
         for value in (contract.get("required_exports") or [])
@@ -297,7 +308,12 @@ def _semantic_foundation_contract_satisfied(contract: dict[str, Any], final_text
         if str(value).strip()
     ]
     if not required_exports and not behavior_probes:
-        return False
+        # Audit F-4: no probes declared → trust the owner. Previously this
+        # returned False (failing semantic mode silently and forcing
+        # literal-line-match), which produced false-demote noise. The
+        # `semantic_contract_underspecified` advisory (emitted elsewhere)
+        # surfaces this for operator attention without blocking the merge.
+        return True
     return all(
         _semantic_union_required_export_present(final_text, export_name)
         for export_name in required_exports
