@@ -1,6 +1,6 @@
 # Broken-State Recovery Workflow
 
-When an `otto v5 run` ends in a degraded state — `merge_blocked` children,
+When an `otto run` ends in a degraded state — `merge_blocked` children,
 discarded child work, integration timed out mid-repair — you don't have to
 start over. The recovery workflow lets you fix the underlying bug, retry only
 the affected children, and resume the run for ~30% of the cost of a fresh
@@ -13,37 +13,37 @@ across Phases 0/1/2/3.
 
 | Command | Mutates? | When to use |
 |---|---|---|
-| `otto v5 status` | No | "What state is this project in?" |
-| `otto v5 plan-resume` | No | "What would `otto v5 run` do next?" |
-| `otto v5 reset-verdict` | Graph only | Verdict-correction (rare; usually you want `retry-children`) |
-| `otto v5 retry-children` | Atomic transaction | Re-execute specific children with the current otto code |
+| `otto recover status` | No | "What state is this project in?" |
+| `otto recover plan-resume` | No | "What would `otto run` do next?" |
+| `otto recover reset-verdict` | Graph only | Verdict-correction (rare; usually you want `retry-children`) |
+| `otto recover retry-children` | Atomic transaction | Re-execute specific children with the current otto code |
 
 ## The typical loop
 
 ```bash
 # 1. See the broken state
-otto v5 status
+otto recover status
 
 # 2. Predict what resume would do (cost + per-child action)
-otto v5 plan-resume
+otto recover plan-resume
 # Use --json for scripting / MC integration:
-otto v5 plan-resume --json | jq
+otto recover plan-resume --json | jq
 
 # 3. If children are merge_blocked from an upstream bug you've fixed:
-otto v5 retry-children --task v5-X --task v5-Y --dry-run    # validate
-otto v5 retry-children --task v5-X --task v5-Y              # execute
+otto recover retry-children --task v5-X --task v5-Y --dry-run    # validate
+otto recover retry-children --task v5-X --task v5-Y              # execute
 
 # 4. Dispatch the retries — scheduler picks them up via
 #    `verdict=None, review_state="approved", retry_count>0`
-otto v5 run "<original intent>"
+otto run "<original intent>"
 
 # 5. Verify outcome
-otto v5 status
+otto recover status
 ```
 
 ## What each command does
 
-### `otto v5 status`
+### `otto recover status`
 
 Read-only diagnostic. Shows:
 - Project root + root intent preview
@@ -54,7 +54,7 @@ Read-only diagnostic. Shows:
 - Suggested next command if blocked children exist
 - `--verbose` adds per-child failure metadata (origin/reason/structured)
 
-### `otto v5 plan-resume`
+### `otto recover plan-resume`
 
 Read-only resume simulation. Shows:
 - Phase resume would re-enter (integration / none)
@@ -72,7 +72,7 @@ Read-only resume simulation. Shows:
 - `--model opus|sonnet` to switch cost basis
 - `--intent <text>` to enforce the persisted intent matches (refuses on drift)
 
-### `otto v5 reset-verdict`
+### `otto recover reset-verdict`
 
 Verdict-only correction. Use when:
 - A run incorrectly recorded a verdict and you want to fix it
@@ -83,10 +83,10 @@ Verdict-only correction. Use when:
 not runnable. Use `retry-children` for re-execution.
 
 ```
-otto v5 reset-verdict --task v5-X --to unverified [--dry-run]
+otto recover reset-verdict --task v5-X --to unverified [--dry-run]
 ```
 
-### `otto v5 retry-children`
+### `otto recover retry-children`
 
 Atomic targeted retry. The transaction:
 1. **Validation gate (full set, no mutations):** leaf check, non-foundation,
@@ -105,7 +105,7 @@ Atomic targeted retry. The transaction:
 8. **Rollback on any failure:** restore graph snapshot + un-archive sessions
 
 ```
-otto v5 retry-children
+otto recover retry-children
     --task v5-X --task v5-Y         # targets (required)
     [--cascade-dependents]           # recursively include downstream
     [--continue]                     # OK if worktree dirty (commit first)
@@ -130,7 +130,7 @@ After `retry-children` resets state:
 - Graph entry: `verdict=None, retry_count>0, retry_reason="cli_retry_children"`
 - Pending entry: `verdict=None, review_state="approved", retry_count>0`
 
-`otto v5 run` (no `--fresh`):
+`otto run` (no `--fresh`):
 1. `_resume_root_from_checkpoint` detects partial root + child branches → skip
    compile + decompose + child rebuild (most), re-enter at integration
 2. Scheduler's `take_ready()` finds entries with `verdict=None,
@@ -162,14 +162,14 @@ After fixing the otto bugs (5 commits) and shipping retry-children (Phase
 0+1), the same broken state was recovered via:
 
 ```bash
-otto v5 status                # showed 3 merge_blocked children
-otto v5 retry-children \
+otto recover status                # showed 3 merge_blocked children
+otto recover retry-children \
     --task v5-83da4b4ba629 \
     --task v5-133534052888 \
     --task v5-f353f8ea8602 \
     --dry-run                 # validated atomic plan
-otto v5 retry-children ...    # executed transaction
-otto v5 run "<intent>"        # dispatched retries
+otto recover retry-children ...    # executed transaction
+otto run "<intent>"        # dispatched retries
 ```
 
 Result: $87.64 / 49.5min / 5-of-5 children merged / verdict=partial /

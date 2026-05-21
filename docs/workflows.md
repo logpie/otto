@@ -45,9 +45,9 @@ Recovery: `otto run --resume`, `--force`, `--reset-budget`.
 recursive Lead decomposition.
 
 ```bash
-otto v5 run "URL shortener with admin dashboard and analytics" --tier modular
-otto v5 run "tiny CLI tool that watches a directory" --tier solo
-otto v5 run "multi-feature SPA" --review-first-decomp
+otto run "URL shortener with admin dashboard and analytics" --tier modular
+otto run "tiny CLI tool that watches a directory" --tier solo
+otto run "multi-feature SPA" --review-first-decomp
 ```
 
 Tiers:
@@ -83,8 +83,8 @@ agent message logs, root `summary.json`.
 
 Recovery:
 
-- `otto v5 list-pending` shows tasks awaiting review or dispatch.
-- `otto v5 review approve <task-id>` resumes a `--review-first-decomp` pause.
+- `otto list-pending` shows tasks awaiting review or dispatch.
+- `otto review approve <task-id>` resumes a `--review-first-decomp` pause.
 - Child crashes don't kill the run; the parent still integrates against
   surviving children with verdict `catastrophic` recorded for the
   crashed child.
@@ -292,9 +292,9 @@ otto run --resume --force               # bypass spec-hash validation
 v5:
 
 ```bash
-otto v5 list-pending                    # see what's waiting
-otto v5 review approve <task-id>        # release a review-paused task
-otto v5 review reject <task-id>         # cancel a pending task
+otto list-pending                    # see what's waiting
+otto review approve <task-id>        # release a review-paused task
+otto review reject <task-id>         # cancel a pending task
 ```
 
 Queue:

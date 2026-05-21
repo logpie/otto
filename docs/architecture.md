@@ -2,12 +2,12 @@
 
 Status: current runtime reference as of May 2026, covering both the i2p
 groups pipeline (`otto run`) and the v5 hierarchical Lead pipeline
-(`otto v5 run`).
+(`otto run`).
 
 Older design and audit documents may still say "slice", "PoW", or
 "v3 pipeline". The current runtime uses **Group** for i2p build units,
 **Lead** for v5 agent sessions, **proof packet** for rendered evidence,
-and `otto run` / `otto v5 run` as the canonical direct intent-to-product
+and `otto run` / `otto run` as the canonical direct intent-to-product
 commands.
 
 ## Product Model
@@ -24,7 +24,7 @@ i2p (groups) — otto run
     -> repair loop when needed
     -> proof packet
 
-v5 (hierarchical Lead) — otto v5 run
+v5 (hierarchical Lead) — otto run
   intent
     -> flat spec (intent + behavior_journeys)
     -> root Lead session
@@ -51,7 +51,7 @@ Current top-level commands:
 
 ```text
 otto run        canonical i2p intent-to-product run
-otto v5 run     hierarchical-Lead intent-to-product run
+otto run     hierarchical-Lead intent-to-product run
 otto improve    brownfield bug/feature/target work
 otto certify    brownfield independent audit
 otto queue      file-backed queue and worktree watcher
@@ -172,7 +172,7 @@ terminal output, repo tests, usage examples, and durable state evidence.
 
 ## v5 (Hierarchical Lead) Pipeline
 
-`otto v5 run` drives the universal-agent pipeline. The core primitive is a
+`otto run` drives the universal-agent pipeline. The core primitive is a
 **Lead** — one `query()` call against a provider SDK with Otto's MCP
 tools attached. Same runner at every level; only the prompt differs.
 
@@ -310,7 +310,7 @@ log and emit events; `warn` issues are advisory.
 
 ### Decomposition Tiers
 
-`otto v5 run --tier` controls how the root Lead behaves:
+`otto run --tier` controls how the root Lead behaves:
 
 - `solo` — force inline. Single-scope products.
 - `lead` — allow subtasks. Multi-area products.
@@ -320,7 +320,7 @@ log and emit events; `warn` issues are advisory.
 ### Review-First Decomposition
 
 `--review-first-decomp` pauses the run after the root Lead emits children.
-`otto v5 list-pending` shows the queue; `otto v5 review approve <id>`
+`otto list-pending` shows the queue; `otto review approve <id>`
 resumes. Sub-Leads' decompositions remain autonomous.
 
 ## Providers
@@ -355,7 +355,7 @@ Provider choices today:
   and passes structured output schemas to `turn/start`.
 - `codex`: fallback Codex CLI subprocess integration. Otto runs `codex exec
   --json`, normalizes JSONL into Otto's message/log format.
-- `claude`: Claude SDK integration. Current default for `otto v5 run`.
+- `claude`: Claude SDK integration. Current default for `otto run`.
   Required for the MCP-tool flow because v5 depends on the Claude Agent
   SDK's `create_sdk_mcp_server`.
 
@@ -435,7 +435,7 @@ The watcher:
 
 Queued child commands still invoke Otto CLI commands (`build`, `improve`,
 or `certify`) for compatibility. New direct product builds should prefer
-`otto run` or `otto v5 run`; queue support for a first-class `run` task is
+`otto run` or `otto run`; queue support for a first-class `run` task is
 a future cleanup area.
 
 ## Artifacts And State
@@ -507,8 +507,8 @@ Recovery rules:
 
 v5 recovery:
 
-- `otto v5 list-pending` shows tasks awaiting review or dispatch.
-- `otto v5 review approve <task-id>` resumes after a
+- `otto list-pending` shows tasks awaiting review or dispatch.
+- `otto review approve <task-id>` resumes after a
   `--review-first-decomp` pause.
 - Child crashes promote that child's verdict to `catastrophic`; the
   parent's integration Lead still runs against whatever children produced.
@@ -582,7 +582,7 @@ Known architectural limits still documented elsewhere include:
 - Broader cross-group check generation in i2p.
 - Richer screenshot/video capture for non-web projects.
 - Large-repo contract planning.
-- First-class queue support for the canonical `otto run` / `otto v5 run`
+- First-class queue support for the canonical `otto run` / `otto run`
   surfaces (queue today still invokes `build` / `improve` / `certify`).
 - v5 children run in-process (asyncio) rather than as fresh subprocesses;
   context-isolated subprocess dispatch is a future cleanup if deep trees

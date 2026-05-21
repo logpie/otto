@@ -25,7 +25,7 @@ mid-phase recovery — exactly the case the iTracker Opus run exposed.
    required (CLI command or config).
 2. **Resume must never re-execute work that already completed
    successfully** — pass children stay pass, foundation merges stay.
-3. **Resume must be observable** — `otto v5 status` and a new
+3. **Resume must be observable** — `otto recover status` and a new
    `plan-resume` must accurately predict what resume will do BEFORE the
    user spends money.
 4. **--fresh always wins** — explicit fresh-run overrides any
@@ -40,7 +40,7 @@ helper, extracted shared logic).
 
 **Spec:**
 ```
-otto v5 retry-children --task <id> [--task <id> ...]
+otto recover retry-children --task <id> [--task <id> ...]
                        [--cascade-dependents] [--continue]
                        [--dry-run]
 ```
@@ -142,7 +142,7 @@ sessions, restore pending entries, release lock).
 
 7. **Trigger the scheduler** (NOT direct `_run_child`):
    - Print clear next-step:
-     `otto v5 run "<original intent>"` to dispatch the retries.
+     `otto run "<original intent>"` to dispatch the retries.
    - The watcher picks up the retry-replacement entries (whose
      `verdict=None` now matches `take_ready()`'s runnable check) and
      dispatches via canonical `_process_children` → preflight → deps
@@ -162,23 +162,23 @@ sessions, restore pending entries, release lock).
 - Inline-decomposed child (no separate branch) → hard refuse with
   message ("inline children share parent's worktree; use --fresh on
   the parent").
-- Mid-flight otto process detected → refuse, point at `otto v5 status`.
+- Mid-flight otto process detected → refuse, point at `otto recover status`.
 
 **Verify (system-level, each bulletted check is concrete) — [REVISED per Codex R3#5]:**
 - Verify: after `retry-children --task v5-X --dry-run` on the iTracker
   Opus project, the dry-run output lists exactly the worktree(s) /
   session(s) that would be reset, lists the new task state
   (`verdict=None, retry_count=N+1`), and reports estimated cost.
-- Verify: after `retry-children --task v5-X` (no dry-run), `otto v5 status`
+- Verify: after `retry-children --task v5-X` (no dry-run), `otto recover status`
   shows the child's state as **`retry_pending`** (verdict=None,
   retry_count>0) — NOT "unverified" (which is a settled-but-no-evidence
   state per Codex R1). The child's previous session dir is renamed
   `.archived-<ts>`. The pending-entry rewrite is durable in
   v5_pending.jsonl.
-- **Status command update:** `otto v5 status` rendering logic
+- **Status command update:** `otto recover status` rendering logic
   recognizes `verdict=None + retry_count>0` and labels it
   `retry_pending` (distinct from `unverified`).
-- Verify: a subsequent `otto v5 run "<original intent>"` re-builds ONLY
+- Verify: a subsequent `otto run "<original intent>"` re-builds ONLY
   the specified child(ren), skips compile + decompose + other children,
   and dispatches integration.
 - Verify: cost of validating today's fixes via `retry-children` on the
@@ -214,7 +214,7 @@ sessions, restore pending entries, release lock).
 
 **Spec:**
 ```
-otto v5 plan-resume [--json]
+otto recover plan-resume [--json]
 ```
 
 **Behavior:** read-only simulation. Outputs:
@@ -229,7 +229,7 @@ otto v5 plan-resume [--json]
 This is the "look before you spend $$" command.
 
 **Verify:**
-- Verify: on the iTracker Opus project, `otto v5 plan-resume` outputs
+- Verify: on the iTracker Opus project, `otto recover plan-resume` outputs
   "would re-enter at integration phase," lists the 3 merge_blocked
   children with "stays merge_blocked unless reset-verdict or
   retry-children fires," estimates cost < $30.
@@ -276,14 +276,14 @@ file makes resume logic + diagnostic commands trivially aware of
 - Written incrementally during a run (after each phase boundary).
 - Resume logic prefers `checkpoint.json` over inferred state; falls
   back to inference if checkpoint missing (backward compat).
-- `otto v5 status` and `plan-resume` read this file directly.
+- `otto recover status` and `plan-resume` read this file directly.
 
 **Verify:**
-- Verify: a `otto v5 run` writes a checkpoint.json at every phase
+- Verify: a `otto run` writes a checkpoint.json at every phase
   boundary (compile, decompose, each child completion, integration).
 - Verify: killing the run mid-integration and re-running picks up
   exactly where it left off per the checkpoint.
-- Verify: `otto v5 status` shows the same phase info as
+- Verify: `otto recover status` shows the same phase info as
   checkpoint.json (no second source of truth).
 - Verify: a missing checkpoint.json still works (falls back to
   inference, never crashes).
@@ -291,8 +291,9 @@ file makes resume logic + diagnostic commands trivially aware of
 **Risks:**
 - **R5 (write atomicity):** checkpoint must be written atomically
   (tmp-file + rename) to avoid mid-write crash leaving garbage.
-- **R6 (schema drift):** every otto v5 release must bump
-  schema_version + handle older versions gracefully.
+- **R6 (schema drift):** every otto release that changes the
+  checkpoint shape must bump schema_version + handle older versions
+  gracefully.
 - **R7 (privacy):** checkpoint may contain intent text — be sure
   it's still scoped to the project dir (no leak via `otto_logs/`
   paths to agent prompts; see [[feedback_otto_owned_leakage]]).
@@ -311,14 +312,14 @@ file makes resume logic + diagnostic commands trivially aware of
 
 After Phase 1 ships:
 1. `cd /Users/yuxuan/otto-projects/itracker-cci2p2-opus-022205`
-2. `otto v5 status` → verify state matches expectations
-3. `otto v5 retry-children --task v5-83da4b4ba629 --task v5-133534052888 --task v5-f353f8ea8602`
+2. `otto recover status` → verify state matches expectations
+3. `otto recover retry-children --task v5-83da4b4ba629 --task v5-133534052888 --task v5-f353f8ea8602`
    - Re-runs each of the 3 broken children with TODAY'S FIXED CODE
    - Expected: each builds successfully because the schema-check fix
      prevents the false demotion, and L4041 routing means even if a
      gate fires, it LANDs instead of refusing
    - Estimated cost: ~$10-25 per child × 3 = ~$30-75
-4. `otto v5 run "<intent>"` (no --fresh) → resume into integration
+4. `otto run "<intent>"` (no --fresh) → resume into integration
    - Expected: 5 of 5 children merge to main, integration journey
      check identifies remaining real UI bugs, verdict = `partial`
    - Estimated cost: ~$5-15 for integration phase
