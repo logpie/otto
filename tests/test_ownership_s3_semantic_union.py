@@ -175,6 +175,51 @@ def test_non_owner_touch_to_semantic_contract_still_requires_exact_line_union() 
     ]
 
 
+def test_phase_e_shared_path_without_contract_is_advisory_not_gate() -> None:
+    """Audit F-5 Phase E: a shared path touched by multiple children but with
+    NO foundation_contract entry no longer demotes the merge. The architect's
+    missing declaration is surfaced via _integration_union_undeclared_shared_paths
+    as an advisory; Phase B's _foundation_isolation_feedback catches the
+    declared-partition cases BEFORE features dispatch.
+
+    Linkboard 2026-05-21 reproduction (post-Phase-B catches this earlier;
+    this is the defense in depth)."""
+    from otto.v5.merge import _integration_union_undeclared_shared_paths
+
+    path = "frontend/src/pages/BookmarksPage.tsx"
+    state = {
+        "schema_version": 1,
+        "parent_integration_branch": "main",
+        "foundation_contracts": [],  # NOT declared!
+        "touches": [
+            {"child_task_id": "foundation", "path": path},
+            {"child_task_id": "feature-a", "path": path},
+        ],
+        "contributions": [
+            {
+                "child_task_id": "foundation",
+                "path": path,
+                "line": "<p>Loading…</p>",  # foundation's stub line
+                "line_hash": "loading-stub",
+                "source_branch": "foundation",
+                "base_ref": "base",
+                "head_ref": "foundation",
+            }
+        ],
+    }
+    # Feature A's overwrite — foundation's stub line is gone:
+    final_text_by_path = {
+        path: "export function BookmarksPage() { return <Bookmarks /> }\n"
+    }
+
+    # Pre-Phase-E: this flagged the missing stub line → child marked partial.
+    # Post-Phase-E: no contract → no demote (operator can tighten CHARTER if
+    # they want to gate this; the advisory makes the under-declaration visible).
+    assert v5_runner._integration_union_missing_contributions(state, final_text_by_path) == []
+    # And the advisory exposes the unclaimed shared path for visibility:
+    assert _integration_union_undeclared_shared_paths(state) == [path]
+
+
 def test_literal_registry_path_still_requires_exact_additive_line_union() -> None:
     path = "frontend/src/App.tsx"
     state = {

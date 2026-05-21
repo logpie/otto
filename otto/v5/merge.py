@@ -341,6 +341,23 @@ def _integration_union_missing_contributions(
     state: dict[str, Any],
     final_text_by_path: dict[str, str],
 ) -> list[dict[str, Any]]:
+    """Audit F-5 / Phase E: literal line-preservation is now scoped to paths
+    with an explicit foundation_contract entry. Pre-refactor: every shared
+    path's contributed lines had to survive. That was the false-demote source
+    for foundation-seeded feature-owned files (linkboard 2026-05-21). Post:
+    the check is the cross-product of (declared contract × literal/semantic
+    rules); shared paths without a contract become advisory via
+    `_integration_union_undeclared_shared_paths` (not this function) so
+    the architect's missing-declaration is still visible without demoting
+    a perfectly-good merge.
+
+    Phase B's foundation_seeded_feature_path check + the broader
+    _foundation_isolation_feedback already catch the architect-declared
+    partition violations BEFORE features dispatch; this function focuses on
+    the narrower invariant — `check: literal` contracts must preserve
+    their declared lines; `check: semantic` contracts must satisfy their
+    declared probes (or trust the owner per Phase D when no probes).
+    """
     shared_paths = _integration_union_shared_paths(state)
     foundation_contracts = _foundation_contracts_by_path_from_union_state(state)
     missing: list[dict[str, Any]] = []
@@ -360,9 +377,17 @@ def _integration_union_missing_contributions(
         normalized_path = _v5r._normalize_contract_path(path)
         contract = foundation_contracts.get(normalized_path)
         child_task_id = str(item.get("child_task_id") or "")
+        if contract is None:
+            # Phase E: no contract → no line-preservation gate. The
+            # architect either didn't declare this path (Phase B's
+            # foundation_seeded_feature_path / _foundation_isolation_feedback
+            # surfaces that BEFORE we get here) or two siblings legitimately
+            # touch a non-cross-cutting path (CHANGELOG.md, etc.). The
+            # `_integration_union_undeclared_shared_paths` helper exposes
+            # the same data as an advisory for operator visibility.
+            continue
         if (
-            contract
-            and str(contract.get("check") or "") == "semantic"
+            str(contract.get("check") or "") == "semantic"
             and _semantic_union_contributor_allowed(
                 child_task_id=child_task_id,
                 contract=contract,
@@ -384,6 +409,21 @@ def _integration_union_missing_contributions(
             "head_ref": str(item.get("head_ref") or ""),
         })
     return missing
+
+
+def _integration_union_undeclared_shared_paths(state: dict[str, Any]) -> list[str]:
+    """Phase E advisory: shared paths touched by multiple children where the
+    architect did NOT declare a foundation_contract. These don't block the
+    merge but indicate the CHARTER partition is under-specified — operator
+    can decide whether to tighten or accept.
+    """
+    shared_paths = _integration_union_shared_paths(state)
+    contracted = set(_foundation_contracts_by_path_from_union_state(state).keys())
+    return sorted({
+        path for path in shared_paths
+        if _v5r._normalize_contract_path(path) not in contracted
+    })
+
 
 @contextlib.contextmanager
 def _integration_union_guard_lock(
