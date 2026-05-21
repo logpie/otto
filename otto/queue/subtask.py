@@ -31,6 +31,14 @@ from typing import Any
 
 from otto.paths import cross_sessions_dir, sidecar_lock_path
 from otto.observability import iso_timestamp
+from otto.schemas import (
+    VERDICT_CATASTROPHIC,
+    VERDICT_MERGE_BLOCKED,
+    VERDICT_PARTIAL,
+    VERDICT_PASS,
+    VERDICT_PENDING_CHILDREN,
+    VERDICT_UNVERIFIED,
+)
 
 V5_PENDING_FILENAME = "v5_pending.jsonl"
 
@@ -178,6 +186,97 @@ def read_pending(project_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _latest_session_dir_for_task(project_dir: Path, task_id: str) -> Path | None:
+    sessions_root = project_dir / "otto_logs" / "sessions"
+    if not sessions_root.exists():
+        return None
+    matches: list[Path] = []
+    for summary in sessions_root.glob("*/summary.json"):
+        try:
+            payload = json.loads(summary.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("task_id") == task_id:
+            matches.append(summary.parent)
+    return sorted(matches)[-1] if matches else None
+
+
+def _latest_session_dir_with_spec(project_dir: Path) -> Path | None:
+    sessions_root = project_dir / "otto_logs" / "sessions"
+    if not sessions_root.exists():
+        return None
+    matches = [
+        session_dir
+        for session_dir in sessions_root.iterdir()
+        if session_dir.is_dir() and (session_dir / "spec" / "spec.json").exists()
+    ]
+    return sorted(matches)[-1] if matches else None
+
+
+def _parent_session_dir_for_retry(
+    project_dir: Path,
+    task: dict[str, Any],
+) -> Path:
+    for key in ("parent_session_dir", "session_dir"):
+        raw = task.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return Path(raw)
+    parent_task_id = str(task.get("parent_task_id") or "root")
+    parent_session = _latest_session_dir_for_task(project_dir, parent_task_id)
+    if parent_session is not None:
+        return parent_session
+    spec_session = _latest_session_dir_with_spec(project_dir)
+    if spec_session is not None:
+        return spec_session
+    return cross_sessions_dir(project_dir)
+
+
+def _synthesize_pending_entry_for_retry(
+    project_dir: Path,
+    task_id: str,
+    task: dict[str, Any],
+    *,
+    now: str,
+    retry_reason: str,
+) -> dict[str, Any]:
+    parent_task_id = str(task.get("parent_task_id") or "root")
+    entry = _pending_entry(
+        project_dir=project_dir,
+        parent_task_id=parent_task_id,
+        parent_session_dir=_parent_session_dir_for_retry(project_dir, task),
+        intent=str(task.get("intent") or task_id),
+        depends_on=[
+            str(dep) for dep in (task.get("depends_on") or []) if str(dep)
+        ],
+        owned_paths=[
+            str(path) for path in (task.get("owned_paths") or []) if str(path)
+        ],
+        action_ids=[
+            str(action_id)
+            for action_id in (task.get("action_ids") or [])
+            if str(action_id)
+        ],
+        task_role=str(task.get("task_role") or "feature"),
+        parent_integration_branch=(
+            str(task.get("integration_branch") or "").strip() or None
+        ),
+        task_id=task_id,
+    )
+    entry["verdict"] = None
+    entry["completed_at"] = None
+    entry["review_state"] = "approved"
+    try:
+        retry_count = int(task.get("retry_count", 0) or 0)
+    except (TypeError, ValueError):
+        retry_count = 0
+    entry["retry_count"] = max(1, retry_count)
+    entry["retry_reason"] = retry_reason
+    entry["retry_initiated_at"] = now
+    entry["synthesized_for_retry"] = True
+    entry["superseded"] = False
+    return entry
+
+
 def rewrite_pending_for_retry(
     project_dir: Path,
     task_ids: list[str],
@@ -201,9 +300,9 @@ def rewrite_pending_for_retry(
         `superseded: True` so `read_pending()` excludes them and
         duplicate-task preflight only sees the single active entry
         (Codex Plan Gate R4#2).
-      - If no entry exists for the task_id, this function does NOT
-        synthesize one — the caller (retry-children CLI) is
-        responsible for creating one with proper context fields.
+      - If no entry exists for the task_id, synthesize one from the
+        durable task graph plus the latest parent/spec session so the
+        scheduler can dispatch the reset task.
 
     Atomic: locks v5_pending.jsonl, reads all, mutates in-memory,
     writes to tmp + rename. Crash-safe.
@@ -211,7 +310,9 @@ def rewrite_pending_for_retry(
     Returns a summary dict:
       {
         "rewritten": [task_ids that had existing entries],
-        "missing": [task_ids that did NOT have existing entries],
+        "synthesized": [task_ids that needed a new entry],
+        "missing": [task_ids that could not be synthesized because the
+                    graph entry was missing],
         "superseded_count": N (number of stale entries marked),
       }
 
@@ -221,8 +322,10 @@ def rewrite_pending_for_retry(
     path = v5_pending_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = _now_iso()
-    targets = set(task_ids)
+    target_order = list(dict.fromkeys(task_ids))
+    targets = set(target_order)
     rewritten: list[str] = []
+    synthesized: list[str] = []
     missing: list[str] = []
     superseded_count = 0
 
@@ -249,10 +352,33 @@ def rewrite_pending_for_retry(
             if tid in targets:
                 latest_idx_by_task[tid] = idx
 
+        try:
+            from otto.queue.task_graph import read_graph
+
+            graph_tasks = read_graph(project_dir).get("tasks") or {}
+            if not isinstance(graph_tasks, dict):
+                graph_tasks = {}
+        except Exception:  # noqa: BLE001 - missing graph entries are reported below
+            graph_tasks = {}
+
         # Mutate.
-        for tid in targets:
+        for tid in target_order:
             if tid not in latest_idx_by_task:
-                missing.append(tid)
+                task = graph_tasks.get(tid)
+                if isinstance(task, dict):
+                    existing.append(
+                        _synthesize_pending_entry_for_retry(
+                            project_dir,
+                            tid,
+                            task,
+                            now=now,
+                            retry_reason=retry_reason,
+                        )
+                    )
+                    latest_idx_by_task[tid] = len(existing) - 1
+                    synthesized.append(tid)
+                else:
+                    missing.append(tid)
                 continue
             # Mark older entries for this task as superseded.
             for idx, entry in enumerate(existing):
@@ -283,6 +409,7 @@ def rewrite_pending_for_retry(
 
     return {
         "rewritten": rewritten,
+        "synthesized": synthesized,
         "missing": missing,
         "superseded_count": superseded_count,
     }
@@ -311,9 +438,15 @@ def _reconcile_pending_entry_with_graph(
 
 
 _TERMINAL_FOR_REDISPATCH_VERDICTS = frozenset({
-    "pass", "partial", "unverified", "merge_blocked", "catastrophic",
+    VERDICT_PASS,
+    VERDICT_PARTIAL,
+    VERDICT_UNVERIFIED,
+    VERDICT_MERGE_BLOCKED,
+    VERDICT_CATASTROPHIC,
 })
-_NON_RUNNABLE_VERDICTS = _TERMINAL_FOR_REDISPATCH_VERDICTS | {"pending_children"}
+_NON_RUNNABLE_VERDICTS = _TERMINAL_FOR_REDISPATCH_VERDICTS | {
+    VERDICT_PENDING_CHILDREN,
+}
 
 
 def _verdict_satisfies_dependency(
@@ -381,7 +514,11 @@ def _globally_non_runnable_task_ids(project_dir: Path) -> set[str]:
     terminal for the planning Lead's own dispatch: that Lead already emitted
     children and must not be picked up again by a sibling scheduler loop.
     """
-    from otto.queue.task_graph import contract_amendment_retry_is_stale, read_graph
+    from otto.queue.task_graph import (
+        _retry_in_progress_is_live,
+        contract_amendment_retry_is_stale,
+        read_graph,
+    )
 
     try:
         graph = read_graph(project_dir)
@@ -389,6 +526,9 @@ def _globally_non_runnable_task_ids(project_dir: Path) -> set[str]:
         return set()
     done: set[str] = set()
     for tid, t in (graph.get("tasks") or {}).items():
+        if isinstance(t, dict) and _retry_in_progress_is_live(t):
+            done.add(tid)
+            continue
         if (
             isinstance(t, dict)
             and t.get("contract_amendment_retry_in_progress")

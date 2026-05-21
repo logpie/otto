@@ -78,6 +78,12 @@ TaskRole = Literal["foundation", "feature", "contract_amendment", "integration"]
 TASK_ROLES: set[str] = {"foundation", "feature", "contract_amendment", "integration"}
 CONTRACT_AMENDMENT_RETRY_MAX_CLAIMS = 2
 CONTRACT_AMENDMENT_RETRY_STALE_SECONDS = 15 * 60
+RETRY_IN_PROGRESS_STALE_SECONDS = 60 * 60
+BLOCKER_METADATA_KEYS = (
+    "merge_blocked_reason",
+    "merge_blocked_structured_reason",
+    "merge_blocked_origin",
+)
 
 
 def task_graph_path(project_dir: Path) -> Path:
@@ -137,6 +143,68 @@ def contract_amendment_retry_is_stale(
     if heartbeat is None:
         return True
     return now - heartbeat > CONTRACT_AMENDMENT_RETRY_STALE_SECONDS
+
+
+def _retry_in_progress_stale_seconds() -> int:
+    raw = os.environ.get("OTTO_RETRY_IN_PROGRESS_STALE_SECONDS")
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return RETRY_IN_PROGRESS_STALE_SECONDS
+
+
+def _owner_field_matches(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    key: str,
+) -> bool:
+    return str(left.get(key) or "") == str(right.get(key) or "")
+
+
+def _retry_in_progress_owner_matches(entry: Any, owner: dict[str, Any]) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    current_owner = entry.get("owner")
+    if not isinstance(current_owner, dict):
+        return False
+    return (
+        _owner_field_matches(current_owner, owner, "pid")
+        and _owner_field_matches(current_owner, owner, "host")
+        and _owner_field_matches(current_owner, owner, "started_at")
+    )
+
+
+def _retry_in_progress_is_live(
+    entry: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    """Return whether a retry-children scheduler guard should still block.
+
+    New markers are owner dictionaries. Legacy bare ``True`` markers are treated
+    as stale so a crashed retry cannot strand a task forever.
+    """
+    marker = entry.get("retry_in_progress") if isinstance(entry, dict) else None
+    if not marker or not isinstance(marker, dict):
+        return False
+    owner = marker.get("owner")
+    if not isinstance(owner, dict):
+        return False
+
+    owner_host = str(owner.get("host") or "")
+    if owner_host == socket.gethostname() and _pid_is_running(owner.get("pid")):
+        return True
+
+    started_at = (
+        _parse_iso_seconds(owner.get("started_at"))
+        or _parse_iso_seconds(entry.get("retry_in_progress_at"))
+    )
+    if started_at is None:
+        return False
+    now = time.time() if now is None else now
+    return now - started_at <= _retry_in_progress_stale_seconds()
 
 
 def _empty_graph() -> dict[str, Any]:
@@ -318,6 +386,8 @@ def set_verdict(
         graph["tasks"][task_id]["completed_at"] = _now_iso()
         if cost_usd is not None:
             graph["tasks"][task_id]["cost_usd"] = float(cost_usd)
+        if verdict != VERDICT_MERGE_BLOCKED:
+            _clear_blocker_metadata_from_task(graph["tasks"][task_id])
 
 
 def set_verdict_and_metadata(
@@ -353,6 +423,8 @@ def set_verdict_and_metadata(
             graph["tasks"][task_id]["completed_at"] = _now_iso()
             if cost_usd is not None:
                 graph["tasks"][task_id]["cost_usd"] = float(cost_usd)
+        if verdict != VERDICT_MERGE_BLOCKED:
+            _clear_blocker_metadata_from_task(graph["tasks"][task_id])
         graph["tasks"][task_id].update(clean)
 
 
@@ -384,6 +456,59 @@ def update_task_metadata(
                 "foundation_contracts": [],
             }
         graph["tasks"][task_id].update(clean)
+
+
+def _clear_blocker_metadata_from_task(task: dict[str, Any]) -> None:
+    for key in BLOCKER_METADATA_KEYS:
+        if key in task:
+            task[key] = None
+
+
+def clear_blocker_metadata(project_dir: Path, task_id: str) -> None:
+    """Clear stale merge-blocked metadata without changing verdict state."""
+    with _locked_graph(project_dir) as (_path, graph):
+        task = graph["tasks"].get(task_id)
+        if isinstance(task, dict):
+            _clear_blocker_metadata_from_task(task)
+
+
+def mark_retry_in_progress(
+    project_dir: Path,
+    task_ids: list[str],
+    in_progress: bool,
+    *,
+    owner: dict[str, Any] | None = None,
+) -> None:
+    """Durably mark tasks being rewritten by retry-children."""
+    now = _now_iso()
+    owner_token = dict(owner or {})
+    with _locked_graph(project_dir) as (_path, graph):
+        tasks = graph.get("tasks") or {}
+        if not isinstance(tasks, dict):
+            return
+        for task_id in task_ids:
+            task = tasks.get(task_id)
+            if not isinstance(task, dict):
+                continue
+            if in_progress:
+                if not owner_token:
+                    owner_token = {
+                        "pid": os.getpid(),
+                        "host": socket.gethostname(),
+                        "started_at": now,
+                    }
+                task["retry_in_progress"] = {"owner": dict(owner_token)}
+                task["retry_in_progress_at"] = str(
+                    owner_token.get("started_at") or now
+                )
+                task["retry_in_progress_cleared_at"] = None
+            else:
+                if owner is not None and not _retry_in_progress_owner_matches(
+                    task.get("retry_in_progress"), owner
+                ):
+                    continue
+                task["retry_in_progress"] = False
+                task["retry_in_progress_cleared_at"] = now
 
 
 def set_contract_amendment_blocked(
@@ -727,7 +852,7 @@ def entry_is_satisfactory_terminal(entry: dict[str, Any]) -> bool:
     if entry.get("blocked_on_task_id"):
         return False
     verdict = str(entry.get("verdict") or "")
-    if verdict == "merge_blocked":
+    if verdict == VERDICT_MERGE_BLOCKED:
         return False
     # Stale merge_blocked metadata is also disqualifying (a previous
     # terminal that hasn't been cleared). retry helpers clear these.
@@ -735,9 +860,9 @@ def entry_is_satisfactory_terminal(entry: dict[str, Any]) -> bool:
         return False
     if entry.get("merge_blocked_reason"):
         return False
-    if verdict == "pass":
+    if verdict == VERDICT_PASS:
         return True
-    if verdict != "partial":
+    if verdict != VERDICT_PARTIAL:
         return False
     # `partial` is satisfactory if EITHER human-reviewed-partial OR
     # otto-annotated-partial via the chokepoint's LAND path.
