@@ -733,7 +733,6 @@ class AutopilotController:
             config,
             agent_type="fix",
             max_turns=min(int(config.get("max_turns_per_call") or 40), 40),
-            max_subagent_dispatches=0,
         )
         options.effort = _pilot_effort(config)
         text, _cost, _session, _breakdown = await run_agent_with_timeout(

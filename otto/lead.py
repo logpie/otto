@@ -1013,8 +1013,15 @@ async def _request_canonical_verdict_rewrite(
         "```json\n"
         f"{context['original_text']}\n"
         "```\n\n"
-        "Do not edit product code. Do not run a broad repair. Write the "
-        "canonical verdict and stop."
+        "Investigate before you write the canonical verdict. Read "
+        f"{session_dir / 'lead' / 'messages.jsonl'} to see what tools you "
+        f"actually called and what their results were. If your scope ran "
+        f"journey artifacts, those live under {session_dir} too. Ground the "
+        f"rewrite in the evidence you can actually verify, not in what the "
+        f"malformed verdict claimed.\n\n"
+        "Do not edit product code (this is a verdict-rewrite turn, not a "
+        "repair turn). Do not run a broad repair. But DO read whatever "
+        "session artifacts you need to write an honest canonical verdict."
     )
     try:
         from otto.agent import run_agent_with_timeout

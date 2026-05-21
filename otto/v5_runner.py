@@ -3343,10 +3343,18 @@ async def _resolve_child_scope_with_agent(
         f"Parent spec path: {parent_spec_path}\n"
         f"Original child scope JSON: {json.dumps(child_scope, sort_keys=True)}\n"
         f"Fallback reason: {fallback_reason}\n\n"
-        "Read the parent spec if needed and return only one JSON object with "
-        "keys: task_intent (string), owned_paths (array of strings), "
-        "action_ids (array of strings). Use exact ids from the parent spec. "
-        "If the scope cannot be resolved, return null."
+        f"You MUST read the parent spec at {parent_spec_path} before deciding. "
+        "The fallback reason above tells you which scope ids in the child were "
+        "missing/ambiguous in the parent; you cannot pick the correct ids "
+        "without seeing the parent's actual `behavior_journeys`, "
+        "`primary_actions`, and `feature_owned_paths` lists. Read the spec "
+        "(via Read), grep for the missing ids if needed, then return one JSON "
+        "object with keys: task_intent (string), owned_paths (array of "
+        "strings), action_ids (array of strings). Use EXACT ids from the "
+        "parent spec — guessing ids that look right but don't exist in the "
+        "spec re-introduces the original ambiguity. If after reading the "
+        "spec the scope still cannot be resolved (genuine spec gap, not "
+        "missed-by-the-original-prompt), return null."
     )
     _emit(on_event, {
         "event": "context_scope_resolution_agent_start",
