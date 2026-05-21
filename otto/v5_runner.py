@@ -2509,71 +2509,18 @@ async def run_v5_pipeline(
                     result=integration_result,
                     on_event=on_event,
                 )
-            if _preflight_repair_escalated(preflight_result):
-                post_preflight_result = preflight_result
-            else:
-                post_preflight_result = await _run_integration_smoke_preflight_with_repair(
-                    project_dir=project_dir,
-                    worktree_path=project_dir,
-                    task_id=ROOT_TASK_ID,
-                    phase="post_agent",
-                    session_dir=integration_session_dir,
-                    config=config,
-                    integration_branch=None,
-                    journey_scope="root_integration",
-                    on_event=on_event,
-                )
+            # Phase-1 unified verifier: ROOT integration Lead drove the
+            # journeys itself via chrome-devtools MCP in the same session
+            # it made edits. We trust its verdict; no separate post-agent
+            # deterministic journey runner + repair-agent loop. The
+            # pre-integration preflight stays attached to verify_result
+            # for proof-packet rendering, but there's no
+            # post_integration_preflight anymore. See
+            # plan-unified-self-verifying-agent.md Phase 1.
             if integration_result.verify_result is None:
                 integration_result.verify_result = {}
             if isinstance(integration_result.verify_result, dict):
                 integration_result.verify_result["pre_integration_preflight"] = preflight_result
-                integration_result.verify_result["post_integration_preflight"] = post_preflight_result
-            if (
-                integration_result.verdict != VERDICT_CATASTROPHIC
-                and _integration_smoke_blocks(post_preflight_result)
-            ):
-                _it_reason = (
-                    "Post-agent smoke_clean_deploy still has blocking issues: "
-                    + "; ".join(
-                        str(issue.get("message") or issue.get("kind"))
-                        for issue in post_preflight_result.get("issues", [])
-                        if isinstance(issue, dict)
-                        and issue.get("severity") in ("error", "block")
-                    )
-                )
-                # Chokepoint: a post-agent smoke block is VERIFICATION →
-                # LAND (partial)+annotation, never merge_blocked (Task #5).
-                _it_verdict, _it_reason = _integration_terminal_verdict(
-                    blocks=True,
-                    current_verdict=integration_result.verdict,
-                    reason=_it_reason,
-                )
-                integration_result.verdict = _it_verdict
-                integration_result.failure_reason = _it_reason
-                if isinstance(integration_result.verify_result, dict):
-                    integration_result.verify_result["verdict"] = _it_verdict
-                    integration_result.verify_result["summary"] = _it_reason
-                    if _it_verdict != VERDICT_MERGE_BLOCKED:
-                        integration_result.verify_result["landed_with_annotation"] = True
-                        integration_result.verify_result.setdefault(
-                            "annotations", []
-                        ).append({
-                            "origin": "integration_post_agent_smoke",
-                            "detail": _it_reason,
-                            "cause": "verification",
-                        })
-                set_verdict(
-                    project_dir,
-                    ROOT_TASK_ID,
-                    _it_verdict,
-                    cost_usd=integration_result.cost_usd,
-                )
-                _emit(on_event, {
-                    "event": "integration_smoke_failed",
-                    "task_id": ROOT_TASK_ID,
-                    "verdict": _it_verdict,
-                    "worktree": str(project_dir),
-                })
             result.integration_results[ROOT_TASK_ID] = integration_result
             _emit(on_event, {
                 "event": "integration_done",
