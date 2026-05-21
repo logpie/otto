@@ -1177,7 +1177,17 @@ async def compile_flat_spec(
         )
 
         prompt_bytes_total += len(prompt_text.encode("utf-8"))
-        result_text = await _run_compile(prompt_text, options, prompt_subdir, project_dir)
+        result_text, attempt_session_id = await _run_compile(
+            prompt_text, options, prompt_subdir, project_dir
+        )
+        # Thread session continuity: next attempt resumes this thread so the
+        # agent sees its prior turn as conversation history (not as a fresh
+        # session re-derived from stringified warnings).
+        if attempt_session_id:
+            try:
+                options.resume = attempt_session_id
+            except (AttributeError, TypeError):
+                pass
         output_bytes_total += len(result_text.encode("utf-8"))
         message_metrics = compile_message_metrics_from_jsonl(prompt_subdir / "messages.jsonl")
         if first_token_ts is None:
@@ -1363,11 +1373,19 @@ async def compile_flat_spec(
     return spec
 
 
-async def _run_compile(prompt: str, options: Any, log_dir: Path, project_dir: Path) -> str:
-    """Run one compile attempt. Returns the LLM's text output."""
+async def _run_compile(
+    prompt: str, options: Any, log_dir: Path, project_dir: Path
+) -> tuple[str, str]:
+    """Run one compile attempt. Returns ``(text, session_id)``.
+
+    The session_id lets the caller resume this SDK conversation on a
+    retry instead of spawning a fresh agent that re-derives strategy
+    from a stringified warnings dump. Tier-D-3 of the agentic-vs-fixture
+    audit — was the only true fresh-agent-per-cycle site in otto.
+    """
     from otto.agent import run_agent_with_timeout
 
-    text, _cost, _session_id, breakdown = await run_agent_with_timeout(
+    text, _cost, session_id, breakdown = await run_agent_with_timeout(
         prompt,
         options,
         log_dir=log_dir,
@@ -1383,13 +1401,16 @@ async def _run_compile(prompt: str, options: Any, log_dir: Path, project_dir: Pa
     if structured_result is None:
         structured_result = _read_last_success_structured_output(messages_jsonl)
     if structured_result is not None:
-        return json.dumps(structured_result)
+        return json.dumps(structured_result), session_id
     if _provider_uses_claude_structured_tool(getattr(options, "provider", None)):
         structured_tool_input = _read_structured_output_tool_input(messages_jsonl)
         if structured_tool_input is not None:
-            return json.dumps(structured_tool_input)
+            return json.dumps(structured_tool_input), session_id
     result_text = _read_last_success_result_text(messages_jsonl)
-    return _extract_first_json_object(result_text if result_text is not None else (text or ""))
+    return (
+        _extract_first_json_object(result_text if result_text is not None else (text or "")),
+        session_id,
+    )
 
 
 def _utc_now() -> str:

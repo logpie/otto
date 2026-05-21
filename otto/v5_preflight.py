@@ -496,7 +496,48 @@ def smoke_start_services(
                 s.close()
         log(f"smoke: after {timeout_s}s, listening={listening}/declared={declared_ports}")
         missing = [p for p in declared_ports if p not in listening]
+        # Drain any stderr emitted during the smoke window — start.sh
+        # crashes / port-conflict tracebacks / npm install errors all
+        # live here. Pre-fix this was captured via stderr=PIPE but
+        # never read, so a stuck start.sh failed silently from the
+        # integration agent's perspective.
+        stderr_tail = ""
+        if proc and proc.stderr is not None:
+            try:
+                # Use communicate with a short timeout to avoid hanging
+                # if the proc is still alive (we kill it in `finally`).
+                _, stderr_bytes = proc.communicate(timeout=0.5)
+                if stderr_bytes:
+                    text = stderr_bytes.decode("utf-8", errors="replace")
+                    # Tail is enough to fingerprint the failure shape;
+                    # full stderr would bloat the preflight issue list.
+                    stderr_tail = text[-2000:].strip()
+            except subprocess.TimeoutExpired:
+                # Still running; we'll kill it in `finally`. We can
+                # still drain whatever is buffered without blocking via
+                # os.read on the underlying fd (read1 isn't in the
+                # IO[bytes] type stub Popen exposes).
+                try:
+                    if proc.stderr is not None:
+                        import os as _os
+                        fd = proc.stderr.fileno()
+                        # Non-blocking read of whatever's buffered.
+                        import fcntl as _fcntl
+                        flags = _fcntl.fcntl(fd, _fcntl.F_GETFL)
+                        _fcntl.fcntl(fd, _fcntl.F_SETFL, flags | _os.O_NONBLOCK)
+                        try:
+                            buf = _os.read(fd, 2048)
+                            if buf:
+                                stderr_tail = buf.decode("utf-8", errors="replace").strip()
+                        except BlockingIOError:
+                            pass
+                except (OSError, ValueError):
+                    pass
         if missing:
+            stderr_note = (
+                f"\nstart.sh stderr (last {len(stderr_tail)} chars):\n{stderr_tail}"
+                if stderr_tail else ""
+            )
             issues.append(
                 PreflightIssue(
                     kind="pre_integration_services_not_listening",
@@ -505,9 +546,14 @@ def smoke_start_services(
                         f"After running start.sh for {timeout_s}s, these "
                         f"declared ports are not listening: {missing}. "
                         f"Integration may waste time iterating on start failure."
+                        f"{stderr_note}"
                     ),
                 )
             )
+        elif stderr_tail:
+            # Ports came up but start.sh wrote to stderr — log for
+            # visibility even though we don't raise an issue.
+            log(f"smoke: start.sh wrote stderr (ports OK): {stderr_tail[-500:]}")
     except Exception as exc:  # noqa: BLE001
         issues.append(
             PreflightIssue(
