@@ -1259,6 +1259,7 @@ def _repair_prompt(packet: RepairPacket) -> str:
         )
     return (
         custom_text
+        + _ORACLE_PRE_CHECK_GUIDANCE
         + _oracle_focus_guidance(packet)
         + f"{scope_text}Preserve the product contract, P0-P4 "
         "merge invariants, and owned-path/scope rules. "
@@ -1272,6 +1273,29 @@ def _repair_prompt(packet: RepairPacket) -> str:
         f"Oracle command: {json.dumps(packet.acceptance_oracle.get('command') or [])}\n"
         f"Repair unit: {json.dumps(packet.repair_unit, sort_keys=True, default=str)}\n"
     )
+
+
+_ORACLE_PRE_CHECK_GUIDANCE = (
+    "## First action: run the oracle BEFORE investigating\n\n"
+    "Your packet was dispatched because the orchestrator captured a failed "
+    "oracle snapshot. That snapshot may be stale — transient conditions "
+    "(npm/pip cache contention, port rebinding latency, filesystem sync "
+    "delays) often self-resolve between the orchestrator's check and your "
+    "dispatch. The acceptance oracle command is in the packet; run it FIRST.\n\n"
+    "Decision tree:\n"
+    "  - Oracle passes on entry → write a no-op repair verdict (verdict=pass, "
+    "    summary='oracle already passing on repair entry; no work needed') "
+    "    and exit IMMEDIATELY. Do NOT investigate the historical failure. "
+    "    Do NOT make speculative changes. Do NOT burn additional turns.\n"
+    "  - Oracle still failing → proceed with investigation. The packet's "
+    "    evidence (attempt_history, latest_oracle_result) describes what "
+    "    was failing; diagnose THAT.\n\n"
+    "Rationale: when the orchestrator's snapshot has gone stale and the "
+    "oracle is already passing, exiting cleanly costs ~$0 and ~0 turns. "
+    "Continuing burns a full turn for no work. Trust the current oracle "
+    "state over the historical snapshot.\n\n"
+)
+
 
 
 def _structured_escalation(

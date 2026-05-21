@@ -600,6 +600,17 @@ Guidance:
 - IDs should be terse and stable, e.g. `issue.create` or `report.export`.
 - Consolidate repeated or low-priority claims; intent_claims cap <= 30.
 - Prefer useful product structure over perfect cross-reference coverage. Build agents can reason from context.
+
+## Journey coverage is YOUR responsibility, not a downstream concern
+
+Before you emit the spec, walk every declared `core_entities[*].primary_actions[*].id` and every `intent_claims[*].id`. For each, ask: is this exercised by at least one `behavior_journey`?
+
+- If yes → fine, move on.
+- If no → either (a) add a journey that covers it, OR (b) emit a `coverage_exception` entry on that action/claim with a single-sentence reason (e.g., `"reason": "diagnostic-only endpoint, not part of user-visible flow"`). Future-Otto verifiers will accept either signal; what they will NOT accept is a silent gap.
+
+`coverage_exception` is a per-id field, e.g. `"id": "bookmark.search", "coverage_exception": "covered by api_full_lifecycle implicitly via list-with-q parameter"`.
+
+The downstream `lint_warnings` mechanism exists for failures of this self-check — it's not a polite "fyi"; it's a reminder you skipped step. The reviewer reading the spec needs to know which actions are journey-covered and which are accepted as exceptions; without your explicit decision, every uncovered action looks like a bug.
 """
 
 

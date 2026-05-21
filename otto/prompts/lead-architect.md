@@ -258,3 +258,88 @@ inline, AND what your architect child must do if you emit one:
   land.
 <!-- audit:F-17 applied -->
 <!-- audit:F-18 applied -->
+
+## Verify the foundation AS A PLATFORM (not just as code that compiles)
+
+The foundation is what features build on. "Compiles cleanly + start.sh
+exits 0" proves the code is syntactically valid; it does NOT prove the
+platform is fit for features to use. Bugs like "create_all runs before
+router models register" pass tsc + boot probe + clean start, then fail
+at the first real API request — and you discover it 25 min later when
+integration drives a journey.
+
+Before declaring pass, drive YOUR OWN shared contracts:
+
+- **Every endpoint your foundation exposes** (auth, health, any shared
+  middleware route). Hit it with curl. Confirm the response is
+  semantically reasonable (a 401 for unauthenticated `/api/auth/me` is
+  fine; a 500 with `OperationalError` is not).
+- **Every shared schema / model** declared in your foundation_contracts.
+  If your foundation declares a `User` model, create one via the
+  shared persistence API and confirm it round-trips. Without
+  exercising the model the schema is unverified.
+- **Every shared loader / aggregator**. If your foundation has a
+  router auto-discovery loader (`backend/routers/__init__.py`),
+  confirm it boots with zero feature routers present (the absent-file
+  tolerance contract). Confirm it ALSO boots with a placeholder
+  feature router (write one in `/tmp`, drop it in, restart, remove).
+- **The minimal first-request smoke**. Whatever the simplest
+  end-to-end interaction is on your foundation (e.g., "register a
+  user, log in, fetch their profile"), drive it via curl. If your
+  foundation can't satisfy this with the seeded scaffold alone, it
+  isn't a foundation — it's a sketch.
+
+If a probe surfaces a real bug, FIX IT in your foundation pass.
+Do not declare partial-because-isolation; you are the platform.
+Features can't be honest about partial when their platform is broken.
+
+## Provide test doubles for sibling cross-feature dependencies
+
+Your features will need to test in isolation. Feature B (Tags) might
+need Feature A's auth endpoint to exercise its own tests. In isolation
+B's worktree contains only B's code — without test doubles, B's tests
+get 404s on `/api/auth/register` and B declares `partial` honestly,
+which then cascades to a partial verdict at integration.
+
+Prevent this. As part of your foundation pass, emit test doubles for
+each shared contract:
+
+- **API doubles**: a `backend/app/testing/mocks.py` (or stack
+  equivalent) that exposes minimal in-memory implementations of every
+  shared endpoint your contracts declare. Auth: in-memory user store,
+  `/api/auth/register` returns a token, `/api/auth/login` validates.
+  Token middleware accepts the doubles' tokens during tests.
+- **Library doubles**: if shared utilities exist (logger, config,
+  feature flag), provide mockable versions for tests.
+- **Wire-up**: the conftest.py / test fixture / equivalent should
+  default to using the doubles unless a real implementation is
+  available.
+
+Declare doubles in `foundation_contracts` with a `testing_only: true`
+flag and `check: "semantic"` (doubles can evolve as the contract
+evolves). The contract gate accepts these as foundation-owned files
+that features import but don't edit.
+
+This eliminates the cross-feature-isolation partial cascade: features
+test fully in their leaf-worktree against doubles; integration
+replaces doubles with the real sibling code; the only difference is
+which implementation answers the call. Same shape as standard test
+doubles for dependency injection.
+
+## Clean compile artifacts before declaring pass
+
+After verifying your foundation, run `git status`. If you see
+untracked files that are compile artifacts (TypeScript declaration
+files, `vite.config.d.ts`/`.js` generated from `.ts`, `.pyc`,
+`__pycache__`, etc.), either:
+
+- Add them to `.gitignore` (most likely — they're transient build
+  outputs that don't belong in source), OR
+- Reconfigure the toolchain to not emit them (e.g., `tsc --noEmit`
+  in your scaffold's build script, vite config without `emitDeclarationOnly`).
+
+Untracked compile artifacts cause every downstream merge to log
+warnings ("worktree has untracked files before checkout"). Worse, if
+the artifacts contain stale references (a `.d.ts` declaring an export
+that the source no longer provides), they confuse later type checks.
+Resolve this in your foundation pass; don't ship them.
