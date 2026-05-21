@@ -987,121 +987,43 @@ async def _ensure_child_merge_ready(
     spec_path: Path,
     on_event: Any = None,
 ) -> LeadResult:
+    """Post-refactor (2026-05-21): children's verdict reflects only their
+    leaf-time self-verify outcome. The orchestrator no longer attempts
+    upward merge or dispatches child-verify repair at child-finish time —
+    those concerns belong to the integration Lead (the single merge
+    authority, see lead-integration.md Step 1).
+
+    This function previously: attempted git merge upward; on conflict
+    dispatched a child-verify repair packet; on repair-pass refreshed the
+    child's verdict; on residual partial applied LAND-with-annotation via
+    the chokepoint. All of that work is now integration's responsibility.
+    The integration Lead merges every child's `i2p/build/<task_id>`
+    branch into the integration worktree and resolves conflicts via
+    real `git merge` operations.
+
+    Kept as a thin no-op pass-through for now to preserve the call
+    site signature; the body will be removed entirely once the dispatch
+    call site has been updated to skip this function. Until then, the
+    function records reviewed-partial flags (a no-cost data
+    propagation that integration also reads) and returns the result
+    unchanged.
+
+    Unused parameters retained to avoid breaking the call site during
+    incremental rollout: child_worktree, child_session_dir,
+    parent_integration_branch, original_intent, config, max_parallel,
+    run_started_at, spec_path are all no-longer-used here but match the
+    caller's keyword interface.
+    """
+    del child_worktree, child_session_dir, parent_integration_branch
+    del original_intent, config, max_parallel, run_started_at, spec_path
     _record_reviewed_partial_if_present(project_dir, child_task_id, result)
-    if _child_result_allows_upward_merge(project_dir, child_task_id, result):
-        return result
-    if result.verdict not in (VERDICT_PARTIAL, VERDICT_UNVERIFIED):
-        return result
-
-    current = result
-    original_cost = result.cost_usd
-
-    repair = await _v5r._run_child_verify_repair_packet(
-        project_dir=project_dir,
-        child_task_id=child_task_id,
-        child_worktree=child_worktree,
-        child_session_dir=child_session_dir,
-        parent_integration_branch=parent_integration_branch,
-        original_intent=original_intent,
-        result=current,
-        config=config,
-        max_parallel=max_parallel,
-        run_started_at=run_started_at,
-        spec_path=spec_path,
-        on_event=on_event,
-    )
-    current.cost_usd = original_cost + repair.cost_usd
-    if current.verify_result is None:
-        current.verify_result = {}
-    if isinstance(current.verify_result, dict):
-        current.verify_result["child_verify_repair"] = {
-            "verdict": repair.verdict,
-            "summary": repair.summary,
-            "repair_packet": repair.packet_path,
-            "composite_gate": repair.composite_gate,
-            "escalation": repair.escalation,
-        }
-        current.verify_result["repair_packet"] = repair.packet_path
-    if repair.verdict != VERDICT_PASS:
-        return _block_child_before_upward_merge(
-            project_dir=project_dir,
-            child_task_id=child_task_id,
-            result=current,
-            reason=(
-                "Child verify/repair oracle did not pass: "
-                f"{repair.summary}"
-            ),
-            on_event=on_event,
-        )
-
-    current = _v5r._refresh_child_result_from_verdict_file(
-        project_dir=project_dir,
-        child_task_id=child_task_id,
-        child_session_dir=child_session_dir,
-        result=current,
-        repair=repair,
-    )
-    _record_reviewed_partial_if_present(project_dir, child_task_id, current)
     _v5r._emit(on_event, {
-        "event": "child_verify_repair_done",
+        "event": "child_merge_deferred_to_integration",
         "task_id": child_task_id,
-        "verdict": current.verdict,
-        "repair_packet": repair.packet_path,
+        "verdict": result.verdict,
+        "note": "integration Lead is the single merge authority post-refactor",
     })
-    if _child_result_allows_upward_merge(project_dir, child_task_id, current):
-        return current
-
-    # Repair oracle PASSED, but the child's own verdict.json was not lifted.
-    # This is the cross-feature isolation pattern: the child honestly
-    # reported `partial` because its tests couldn't run without a sibling
-    # feature's code in its isolated worktree (e.g. Feature B needs
-    # Feature A's auth router). The repair oracle ran against the
-    # integrated worktree where the sibling IS present, so the work is
-    # behaviorally fine — it's just that the child never updated its
-    # own verdict.json to reflect the resolved isolation gap.
-    #
-    # LAND with annotation rather than block. The chokepoint pattern
-    # already does this for many other "honest partial that is OK to
-    # land" cases; this is the same shape. The annotation captures the
-    # cause so the proof packet records why a 'partial' verdict landed.
-    annotation_reason = (
-        "Child reported partial due to cross-feature isolation in its leaf "
-        "worktree (sibling feature's code not present). Child verify/repair "
-        "oracle subsequently PASSED against the integrated worktree where "
-        f"the isolation is resolved: {repair.summary or 'oracle passed'}"
-    )
-    from otto.queue.task_graph import set_verdict_and_metadata
-    set_verdict_and_metadata(
-        project_dir,
-        child_task_id,
-        cast(Any, "partial"),
-        cost_usd=current.cost_usd,
-        metadata={
-            "failure_reason": annotation_reason,
-            "landed_with_annotation": True,
-            "annotation_origin": "child_verify_repair_resolved_isolation",
-            "annotation_detail": annotation_reason,
-            "annotation_cause": "verification",
-            "annotation_structured_reason": {
-                "kind": "child_verify_repair_resolved_isolation",
-                "leaf_verdict": current.verdict,
-                "repair_summary": repair.summary,
-                "repair_verdict": repair.verdict,
-            },
-        },
-    )
-    current.verdict = "partial"
-    current.failure_reason = annotation_reason
-    if isinstance(current.verify_result, dict):
-        current.verify_result["landed_with_annotation"] = True
-        current.verify_result["annotation_origin"] = "child_verify_repair_resolved_isolation"
-    _v5r._emit(on_event, {
-        "event": "child_landed_with_annotation",
-        "task_id": child_task_id,
-        "origin": "child_verify_repair_resolved_isolation",
-        "reason": annotation_reason,
-    })
-    return current
+    return result
 
 class TerminalCause(enum.Enum):
     PRODUCT = "product"

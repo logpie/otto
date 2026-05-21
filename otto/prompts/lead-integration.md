@@ -29,17 +29,46 @@ Your CWD is the integration worktree where children's work has been merged.
 First read `{integration_packet_path}`. Then read `CHARTER.md`,
 `decisions.md`, and `{journeys_path}` before editing.
 
-## Step 1 — Make the merged product coherent
+## Step 1 — You are the single merge authority. Merge every child's branch.
 
-1. Inspect child verdicts and `decisions.md`.
-2. Resolve contradictions between child decisions or between decisions and
-   actual code.
-3. Recover `merge_blocked` children when a `build_branch` is provided. Try
-   `git merge <build_branch>` in this worktree, resolve conflicts by hand,
-   and commit legitimate product paths with an `integration:` message.
-4. If pre-integration clean-boot smoke says `"passed": false`, repair that
-   concrete blocker first (the stack must boot before you can verify
+Children build in isolation on their own branches (`i2p/build/<task_id>`).
+The orchestrator does NOT pre-merge them. Your job at integration time is
+to bring all their work together and resolve any conflicts. Concretely:
+
+1. Read `{integration_packet_path}` and `decisions.md`. The packet lists
+   each child's `task_id`, `verdict` (from the child's own self-verify),
+   and `build_branch` (the ref to merge from).
+2. For EACH child in the packet, run `git merge <build_branch>` in this
+   worktree. Children with verdict=pass at leaf-time are still expected
+   to merge cleanly in most cases; children with verdict=partial or
+   landed_with_annotation may have known issues their session noted.
+   Either way, attempt the merge.
+3. **Resolve conflicts by hand.** Common conflict shapes:
+   - Two features both wrote to a shared file (e.g.,
+     `backend/tests/conftest.py`, a shared API client, a shared style
+     file). Keep both contributions; pick the union that makes both
+     features work.
+   - One feature edited a file another feature owns. The owner's
+     version is canonical; revert the non-owner's edit and note the
+     overstep in `decisions.md`.
+   - Schema/contract drift: one feature changed a shared type that
+     another consumed. Honor `decisions.md` if it explains which
+     direction; otherwise pick what makes both features functional
+     and append a decision entry.
+   Commit each merge (or one batch commit) with `integration:` prefix
+   and a one-line summary of what merged + what conflicts you resolved.
+4. Resolve contradictions between child decisions in `decisions.md`
+   itself (separate from code conflicts).
+5. If pre-integration clean-boot smoke says `"passed": false`, repair
+   that concrete blocker (the stack must boot before you can verify
    journeys).
+
+If a merge produces a working, journey-driveable product even with
+some claims partially delivered, that is `pass` (you'll report the
+partial claims honestly in `intent_coverage.partial`). If you can't
+get the merged product to satisfy ANY end-to-end journey, that is
+`partial`. If the conflicts are irreconcilable (no plausible union
+exists), that is `merge_blocked` with a structured reason.
 
 Integration may edit across subsystems. Keep fixes scoped to glue,
 arbitration, and repair needed for the merged product to run. If a feature

@@ -1,65 +1,58 @@
-"""Regression: when child-verify repair passes its oracle but the child's
-own verdict.json wasn't lifted (cross-feature isolation pattern), the
-upward merge LANDS with annotation instead of blocking.
+"""Post-big-refactor (2026-05-21): _ensure_child_merge_ready is a
+no-op pass-through; the orchestrator no longer attempts upward merge
+or dispatches child-verify repair at child-finish time. Integration
+Lead is the single merge authority (see lead-integration.md Step 1)
+and handles ALL merging + conflict resolution + journey verification.
 
-The bug class: Feature B builds its router fully but its own tests need
-Feature A's auth endpoint that isn't in B's isolated worktree. B honestly
-reports `verdict: partial`. The child-verify repair runs against the
-integrated worktree (where A IS present) and the oracle passes. But B's
-verdict.json still says partial — B never updated it. Pre-fix:
-_ensure_child_merge_ready blocked the upward merge. Post-fix: it
-LANDS with annotation (landed_with_annotation=True) so aggregation
-counts the child as satisfactory_terminal.
+The cross-feature-isolation partial cascade this function previously
+handled via LAND-with-annotation is now resolved by integration
+naturally: integration merges the sibling code in, so the cross-feature
+test passes by construction. No need to second-guess the leaf verdict.
 
-Same shape as commit e8293e97c (foundation_contract_write_gate moving
-from refuse to LAND-annotate) and the broader chokepoint pattern.
+These tests assert the new no-op behavior. The function still exists
+as a thin pass-through to preserve the dispatch.py call site signature
+during incremental rollout; a follow-up commit will inline the
+no-op and delete the function.
 """
 
 from __future__ import annotations
 
 import inspect
 
-# Import v5_runner first to break the circular-import on otto.v5.merge
-# (v5_runner imports merge symbols, so this primes the cycle).
+# Import v5_runner first to prime the circular-import on otto.v5.merge.
 from otto import v5_runner  # noqa: F401
 from otto.v5.merge import _ensure_child_merge_ready
 
 
-def test_repair_pass_with_unlifted_verdict_lands_with_annotation() -> None:
-    """Source-level guard: the post-repair-pass path must mark
-    landed_with_annotation=True instead of blocking."""
+def test_function_is_now_a_noop_passthrough() -> None:
+    """The function should return the result unchanged. No merge attempt,
+    no repair dispatch, no LAND-with-annotation. Integration Lead handles
+    all of that."""
     src = inspect.getsource(_ensure_child_merge_ready)
 
-    # The function must include the LAND-with-annotation path:
-    assert "landed_with_annotation" in src and "True" in src, (
-        "_ensure_child_merge_ready should LAND with annotation when "
-        "repair.verdict == PASS but the child's verdict.json wasn't lifted "
-        "to a mergeable verdict."
+    # The function must NOT call merge/repair APIs:
+    assert "_run_child_verify_repair_packet" not in src, (
+        "Child-verify repair packet dispatch was removed in the integration-"
+        "as-single-merge-authority refactor. Integration Lead handles "
+        "conflicts and re-verification — no need to dispatch a repair at "
+        "child-finish time."
     )
-    assert "child_verify_repair_resolved_isolation" in src, (
-        "Annotation origin should be child_verify_repair_resolved_isolation "
-        "so the proof packet records why the partial verdict landed."
-    )
-    assert "set_verdict_and_metadata" in src, (
-        "Should use set_verdict_and_metadata to atomically write the "
-        "annotation alongside the verdict."
+    assert "_block_child_before_upward_merge" not in src, (
+        "Block-and-LAND-with-annotation is no longer applied at "
+        "child-finish; the integration Lead's merge resolves the cross-"
+        "feature isolation that previously triggered this."
     )
 
+    # The function must record reviewed-partial flags (a no-cost data
+    # propagation that integration also reads) and pass through:
+    assert "_record_reviewed_partial_if_present" in src
+    assert "return result" in src
 
-def test_block_path_still_fires_when_repair_oracle_fails() -> None:
-    """The fail-closed path (repair.verdict != PASS) still blocks the
-    upward merge — only the repair-PASS-but-unlifted case lands now."""
+
+def test_emits_deferred_to_integration_event() -> None:
+    """Telemetry event surfaces the new behavior for monitoring."""
     src = inspect.getsource(_ensure_child_merge_ready)
-    # The original block path on repair fail is preserved:
-    assert "Child verify/repair oracle did not pass" in src
-    # And the helper call that routes through the chokepoint:
-    assert "_block_child_before_upward_merge" in src
-
-
-def test_emits_child_landed_with_annotation_event() -> None:
-    """Event surface for the new landing path so monitoring can
-    distinguish 'landed with annotation due to isolation gap' from
-    'merge_blocked'."""
-    src = inspect.getsource(_ensure_child_merge_ready)
-    assert '"event": "child_landed_with_annotation"' in src
-    assert '"origin": "child_verify_repair_resolved_isolation"' in src
+    assert '"event": "child_merge_deferred_to_integration"' in src, (
+        "Should emit a telemetry event noting that merge handling is "
+        "deferred to integration."
+    )

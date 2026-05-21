@@ -1914,11 +1914,14 @@ def _build_child_summaries(
             )
             if reconstructed is not None:
                 record.update(reconstructed)
-        # Surface the build branch for merge_blocked children so the
-        # integration Lead can recover their work via git rather than
-        # dispatching the build agent to rewrite it.
+        # Post-refactor (2026-05-21): integration Lead is the single merge
+        # authority. The orchestrator no longer pre-merges children at
+        # child-finish time. EVERY child's `i2p/build/<id>` branch is
+        # surfaced here so the integration Lead can merge them all.
+        # Previously only merge_blocked children carried `build_branch`
+        # because the others had been pre-merged; that's no longer true.
+        record["build_branch"] = child_branch_name(cid)
         if verdict == VERDICT_MERGE_BLOCKED:
-            record["build_branch"] = child_branch_name(cid)
             record["recovery_hint"] = (
                 f"Work passed verify but failed to merge. Try "
                 f"`git merge {record['build_branch']}` in this worktree, "
