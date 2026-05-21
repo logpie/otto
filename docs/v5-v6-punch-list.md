@@ -3,112 +3,148 @@
 Things deliberately not in v5, with rationale for deferral and pointers
 to where they connect.
 
-## NEXT-2 — Foundation test doubles must be endpoint stubs, not real-router-loaders
+## NEXT-2 — Feature tests test the feature; cross-feature behavior is integration's truth
 
 **Status:** queued.
 
 ### Pattern
 
-A `lead-architect.md` directive told the foundation Lead to "provide
-test doubles for sibling cross-feature dependencies." Intent: features
-with cross-contract test needs (one feature's tests need a sibling
-feature's endpoints to satisfy preconditions) use foundation-provided
-mocks in their leaf tests instead of declaring `partial` because
-their own worktree doesn't contain sibling code.
+When sibling features share contracts (one feature's endpoints/commands
+satisfy another's preconditions), the testing feature's leaf-time tests
+can't run cleanly: the sibling's implementation isn't in the testing
+feature's isolated worktree. Today this triggers an "honest partial"
+verdict that cascades to aggregate-partial.
 
-Live validation surfaced an interpretation gap. The foundation agent
-built test infrastructure that uses the project's normal test-client
-factory — which loads the real router files from the filesystem (the
-stack's standard pattern). For cross-feature tests to actually
-exercise sibling endpoints, sibling router files have to physically
-exist in the testing feature's worktree. Since the testing feature
-doesn't own those files, the agent's next move was to copy them,
-violating the partition.
+A prior attempt (the `lead-architect.md` "provide test doubles"
+directive) tried to fix this by having the foundation provide stub
+infrastructure. Live validation showed the agent picked the
+stack-conventional shape (a test-client that loads real router code
+from the filesystem) — which still requires sibling files to be
+present, leading the testing feature to COPY sibling code and violate
+the partition.
 
-### Why the prompt was insufficient
+### Why "test doubles" framing is overfit
 
-"Test doubles" was interpreted as "test infrastructure that uses real
-code" — the stack-conventional meaning of `TestClient` /
-`MockMVC` / equivalent in most frameworks. A literal reading of
-"doubles" would be "stubs that STAND IN for sibling code, not require
-it." The agent picked the engineer-intuitive default. The
-cross-feature isolation constraint Otto operates under didn't
-override the framework convention.
+It pushed Otto toward solving "how do we make cross-feature tests
+work at FEATURE time" — adding stub-shape complexity (one stub file
+per shared contract, foundation_contracts declaration, child-intent
+rubric updates, foundation-gate check). All real engineering, but
+chasing a wrongly-framed problem.
 
-### What the doubles should actually be
+The fundamental observation: **Otto's integration Lead already drives
+every cross-feature journey live as the behavioral truth.** That IS
+the cross-feature test. Re-doing cross-feature verification at leaf
+time via stubs is redundant work that introduces drift risk (stub
+response shape vs real implementation response shape) and orchestration
+complexity (foundation builds stubs, child intent names them, gate
+checks them, agent has to know to use them).
 
-Endpoint stubs (or stack-equivalent: CLI subcommand stubs, library
-function stubs, RPC handler stubs) that:
+### Cleaner framing
 
-1. Register contract-shaped endpoints **without importing sibling
-   implementation files**. They satisfy the contract; they don't
-   route through real code.
-2. Are **shaped by foundation_contracts**. The architect declares the
-   contract (the public surface, the response/return shape); the
-   stub implements that contract minimally. Same authority that
-   decides the contract decides the stub.
-3. Are **opt-in per test**. The testing feature's test-fixture
-   imports the stub for sibling-owned contracts, then registers its
-   OWN real implementation for the feature-under-test. Sibling
-   features stubbed; feature-under-test real.
+Treat feature-time tests and integration-time journeys as **different
+layers verifying different invariants**:
 
-### The chain of responsibility
+| Layer | Verifies | Inputs available |
+|---|---|---|
+| Feature-time tests (leaf) | The FEATURE's own contract: its router/handler/function correctness, error paths, type checks, schema validation, edge cases | Only the feature's own code + foundation-owned contracts (interfaces, types, DI surfaces) |
+| Integration journey (live) | CROSS-FEATURE behavior: the full user-visible flow through multiple features | Everything: all features' real implementations |
 
-For this to work end-to-end every link must know what "doubles" means:
+When a feature's endpoint requires auth (sibling-owned), the feature's
+leaf tests should:
+
+1. Test what the feature CAN test in isolation: unauthenticated paths
+   return 401, schema validation, error handlers, internal state
+   transitions, DB model behavior — all without sibling code.
+2. For auth-gated paths, use **standard dependency injection
+   override**: `app.dependency_overrides[get_current_user] = lambda:
+   fake_user()`. No stub files, no custom infrastructure — just the
+   framework's own DI mechanism.
+3. NOT test the cross-feature flow at leaf time. That flow is the
+   integration journey's responsibility, and the journey already
+   exists.
+
+### What the foundation owns (smaller scope than test doubles)
+
+Foundation owns the **shared contracts** — the interfaces, signatures,
+types, and DI surfaces that features build against:
+
+- The `User` type, `Token` type, `Session` type
+- The DI dependencies: `get_current_user() -> User`, `get_db() -> Session`,
+  any other cross-cutting injection point
+- The schema definitions, error classes, common middleware
+- (For non-HTTP stacks) the equivalent: shared library interfaces,
+  CLI command base classes, RPC service definitions
+
+Foundation does NOT own sibling routers, handlers, or implementations.
+Features implement against the foundation's contracts. Tests override
+the contract's DI surface — same as standard dependency-injection
+testing in any framework.
+
+### Why this is fundamental, not overfit
+
+It does NOT introduce a new abstraction (stubs, test-double files,
+testing_only flags). It uses what's already in the framework
+(dependency injection) and Otto (integration journeys as
+cross-feature truth).
+
+The fix is small: tell the foundation to own shared CONTRACTS not
+shared INFRASTRUCTURE. Tell features to test their own code at leaf
+time using DI overrides for any foundation-owned dependency, and NOT
+write cross-feature tests at leaf time — those are integration's job.
+
+### The chain of responsibility (much smaller than before)
 
 | Agent | Responsibility |
 |---|---|
-| Foundation Lead | Emit one stub artifact per shared contract. Declare each in `foundation_contracts` with a `testing_only` flag |
-| Root Lead writing child intents | When a feature's tests need a sibling-owned contract, name the stub paths in the child's intent under "shared modules you import" |
-| Feature Lead | Use the stubs in tests. Do not copy sibling code |
-| Integration Lead | Real implementations are present at integration; verify the contract shape matches what stubs promised |
+| Foundation Lead | Define and emit shared contracts (interfaces, types, DI surfaces). NOT stubs of sibling features. |
+| Root Lead writing child intents | Tell features: "your leaf tests test YOUR code; use DI overrides on foundation contracts when a contract is required; do NOT write cross-feature tests at leaf time — the integration journey covers those" |
+| Feature Lead | Test own code with DI overrides. Don't copy sibling code. Don't write cross-feature scenarios at leaf time. |
+| Integration Lead | Drive cross-feature journeys live. Same as today. |
 
 ### Connects to
 
-- The lead-architect.md "Provide test doubles" section is where the
-  foundation prompt lives — needs the sharpening above.
-- The lead.md child-intent rubric (F-7) needs an addition: child
-  intents must name the stub paths in the "shared modules" list
-  when the feature has cross-contract tests.
-- The chokepoint LAND-with-annotation pattern is a PATCH for the
-  consequence (a feature-partial cascading because it can't test
-  in isolation); this is the PROTOCOL fix (the feature can pass
-  cleanly because the stubs exist).
+- The `lead-architect.md` "Provide test doubles" section was solving
+  the wrong problem; the next iteration sharpens it to "Provide
+  shared contracts" instead.
+- The `lead.md` child-intent rubric (F-7) should add: "cross-feature
+  tests belong in the integration journey, not in your feature's
+  leaf tests."
+- The chokepoint LAND-with-annotation pattern remains the safety
+  net for any cross-feature partial that DOES leak through (e.g., a
+  feature insists on a cross-feature test despite the rubric).
 
 ### Suggested first commits (smallest first)
 
-1. Sharpen the foundation-prompt's "Provide test doubles" section:
-   replace generic prose with the concrete shape — endpoint stubs,
-   no sibling imports, declared in foundation_contracts. Include a
-   stack-shape example (HTTP stub, CLI stub, library stub — one
-   per major project kind).
-2. Update the child-intent rubric: child intents MUST include a
-   "shared stubs to import" list when the feature's tests need
-   sibling-owned contracts.
-3. Add a foundation-gate check: every declared `foundation_contracts`
-   entry with `testing_only:true` must have a stub file at the
-   declared path. Same shape as the existing partition checks.
-4. Validate via a fresh project run. Expected outcome: testing
-   feature's fixtures import the stubs, no copying of sibling
-   code, all tests pass at leaf time, no branch-ancestry
-   violation, aggregate verdict = pass.
-
-### Why this matters
-
-The "honest cross-feature isolation partial" problem doesn't go away
-with one prompt edit. The shape of doubles is the load-bearing
-detail; the chain from "foundation provides X" → "children use X"
-needs every link to know what X is. Today only the foundation knows;
-sibling features pattern-match to the framework's default
-test-client.
+1. Replace the `lead-architect.md` "Provide test doubles" section
+   with "Provide shared contracts": foundation defines DI surfaces,
+   types, interfaces — not implementations of sibling features.
+   Include stack-shape examples (HTTP DI, CLI command base, library
+   interface).
+2. Update the child-intent rubric in `lead.md` F-7: features test
+   their own code; cross-feature scenarios are integration's
+   responsibility; use DI overrides for foundation-owned
+   contracts in tests.
+3. Validate via a fresh project run. Expected outcome: feature
+   tests use `dependency_overrides` for foundation contracts, no
+   sibling code copying, all feature tests pass at leaf time, no
+   branch-ancestry violation, integration journey verifies
+   cross-feature behavior as the single source of truth.
 
 ### Risk
 
-Medium. Stubs that drift from the real router's response shape break
-integration. Mitigation: foundation_contracts declares the response
-shape; both the stub and the real implementation must match it
-(today's contract gate already enforces this for the real
-implementation; extend to the stub).
+Low. This shrinks the surface — fewer artifacts, no new
+declarations, no new gate. It relies on the framework's own DI
+mechanism (which features already use to wire up their own routes)
+and on the integration journey (which already exists and is the
+behavioral truth post-Phase 1).
+
+### What this REPLACES
+
+The previous "endpoint stubs" framing (committed earlier in this
+file's history). That framing was a reasonable engineering instinct
+but overfit to the framework convention of "TestClient loads real
+code." The simpler answer was hiding in plain sight: features test
+features; integration tests integration; DI overrides bridge.
 
 ---
 
