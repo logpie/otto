@@ -298,6 +298,11 @@ def clean_verify_command(
         packet_path = Path(env_packet) if env_packet else None
     env_worktree = os.environ.get("OTTO_CLEAN_VERIFY_WORKTREE", "").strip()
     project_dir = Path(env_worktree) if packet_path is not None and env_worktree else Path.cwd()
+    # Phase-1 unified verifier: UI journeys are agent-self-verified.
+    # `verify_from_clean_oracle` only runs install/build/start gates and
+    # the API executor — explicit `behavior_journeys=[]` short-circuits
+    # the deleted UI journey runner so this CLI matches the production
+    # preflight_oracle invocation.
     result = verify_from_clean_oracle(
         project_dir,
         scope=cast(Scope, verify_scope),
@@ -310,6 +315,7 @@ def clean_verify_command(
             journey_artifact_dir
             or (Path(env_artifact_dir) if env_artifact_dir else None)
         ),
+        behavior_journeys=[],
     )
     if packet_path is not None:
         from otto.v5_preflight_repair import append_repair_packet_oracle_event

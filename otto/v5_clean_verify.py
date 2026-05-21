@@ -951,85 +951,44 @@ def _run_ui_journeys_clean_oracle_step(
     timeout_s: int,
     journey_scope: ExecutionScope,
 ) -> tuple[CleanOracleStepResult, CleanOracleIssue | None]:
+    """Removed in the Phase-1 unified-verifier cleanup.
+
+    The deterministic Python+Playwright UI journey runner
+    (`otto.journey_ui_executor`) has been deleted. UI behavior journeys
+    are now driven by the integration Lead in-session via the
+    chrome-devtools MCP, and recorded in the Lead's own ``verdict.json``
+    journeys[] — `journey_verdict_sink.agent_self_verified_executor_results`
+    pulls those records into the fail-closed sink.
+
+    This stub remains so that any legacy caller that still passes a
+    non-empty ``behavior_journeys`` list to ``verify_from_clean_oracle``
+    fails-closed visibly rather than silently importing a deleted
+    module.
+    """
+    del journeys, project, base_url, artifact_dir, timeout_s, journey_scope
     started_at = _iso_now()
-    started = time.monotonic()
-    if not base_url:
-        step = _oracle_step(
-            step_id="ui_journeys",
-            status="failed",
-            return_code=1,
-            command=["ui_journey_executor"],
-            cwd=temp_root,
-            started_at=started_at,
-            duration_s=time.monotonic() - started,
-            reason="ui journeys require at least one declared frontend port",
-        )
-        return step, _issue_from_step(
-            kind="oracle_infra_error",
-            message="ui journeys require at least one declared frontend port",
-            step=step,
-        )
-
-    from otto.journey_ui_executor import run_ui_journey_executor
-
-    probe = run_ui_journey_executor(
-        journeys=journeys,
-        base_url=base_url,
-        project_dir=project,
-        clean_project_dir=temp_root,
-        artifact_dir=artifact_dir,
-        timeout_s=timeout_s,
-    )
-    verdicts = resolve_journey_verdicts(
-        journeys=journeys,
-        execution_scope=journey_scope,
-        executor_results=probe.executor_results,
-        registered_executor_levels={"ui", "api"},
-    )
-    verdict_path = artifact_dir / "journey-verdicts.json"
-    verdict_path.parent.mkdir(parents=True, exist_ok=True)
-    verdict_path.write_text(
-        json.dumps(
-            {
-                "_written_at": _iso_now(),
-                "source": "journey_verdict_sink",
-                "journey_scope": journey_scope,
-                "base_url": base_url,
-                "executor_results": probe.executor_results,
-                "journey_verdicts": verdicts,
-                "artifact_paths": [str(path) for path in probe.artifact_paths],
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    artifacts = [str(path) for path in probe.artifact_paths]
-    artifacts.append(str(verdict_path))
-    failures = failed_journey_ids(verdicts)
-    infra_error = probe.infra_error or ""
-    passed = not failures and not infra_error
-    reason = (
-        f"{len(verdicts)}/{len(verdicts)} ui journeys passed"
-        if passed
-        else infra_error or f"ui journeys failed: {', '.join(failures)}"
-    )
     step = _oracle_step(
         step_id="ui_journeys",
-        status="passed" if passed else "failed",
-        return_code=0 if passed else 1,
-        command=["ui_journey_executor", base_url],
+        status="failed",
+        return_code=1,
+        command=["ui_journey_executor", "removed"],
         cwd=temp_root,
         started_at=started_at,
-        duration_s=time.monotonic() - started,
-        reason=reason,
+        duration_s=0.0,
+        reason=(
+            "ui_journey_executor removed in Phase-1 unified-verifier cleanup; "
+            "integration Lead drives UI journeys via chrome-devtools MCP and "
+            "records them in verdict.json journeys[]"
+        ),
     )
-    step.artifact_paths.extend(artifacts)
-    if passed:
-        return step, None
-    issue_kind = "oracle_infra_error" if infra_error else "ui_journey_failed"
-    return step, _issue_from_step(kind=issue_kind, message=reason, step=step)
+    return step, _issue_from_step(
+        kind="oracle_infra_error",
+        message=(
+            "ui_journey_executor removed; callers must pass behavior_journeys=[] "
+            "to verify_from_clean_oracle (UI journeys are now agent-self-verified)"
+        ),
+        step=step,
+    )
 
 
 def verify_from_clean_oracle(
