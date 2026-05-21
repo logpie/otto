@@ -165,8 +165,18 @@ class RepairPacket:
         self.packet_dir.mkdir(parents=True, exist_ok=True)
         with _repair_unit_lock(self.packet_dir, self.repair_unit_id):
             tmp_path = self.packet_path.with_suffix(".json.tmp")
+            payload = self.to_jsonable()
+            # Scrub orchestrator-internal ephemeral port allocations from
+            # the agent-facing packet. The probe allocates fresh ephemeral
+            # ports each run (51751, 52351, etc. — see _ephemeral_port_plan
+            # in v5_clean_verify.py); the agent's repair work doesn't need
+            # those specific numbers, and leaking them risks the agent
+            # pattern-matching on a value that has no semantic meaning.
+            # Keep the env var NAMES (so the agent knows the contract:
+            # "API_PORT is parameterized") but replace the values.
+            _scrub_ephemeral_ports_in_packet(payload)
             tmp_path.write_text(
-                json.dumps(self.to_jsonable(), indent=2, sort_keys=True, default=str) + "\n",
+                json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
                 encoding="utf-8",
             )
             tmp_path.replace(self.packet_path)
@@ -1233,6 +1243,52 @@ _LIVE_BROWSER_REPAIR_GUIDANCE = (
     "starting point, but NEVER use them as your primary diagnostic — the live "
     "page after your edit is what matters.\n\n"
 )
+
+
+# Env var names that hold ephemeral port allocations from the
+# orchestrator's clean-deploy probe. Their VALUES are useless to the
+# repair agent (they're freshly allocated each run) and risk
+# distracting the agent. We strip the values when serializing the
+# packet for the agent; the orchestrator still operates on the real
+# values in memory.
+_EPHEMERAL_PORT_ENV_PATTERNS = (
+    "_PORT",  # API_PORT, FRONTEND_PORT, BACKEND_PORT, DB_PORT, ...
+    "PORT_",  # PORT_API, PORT_FRONTEND, ...
+)
+
+
+def _is_ephemeral_port_env_key(key: str) -> bool:
+    if not isinstance(key, str):
+        return False
+    upper = key.upper()
+    return any(pat in upper for pat in _EPHEMERAL_PORT_ENV_PATTERNS) or upper == "PORT"
+
+
+def _scrub_ephemeral_ports_in_packet(payload: dict[str, Any]) -> None:
+    """Recursively walk `payload` and replace ephemeral-port env values
+    with `'<ephemeral, scrubbed>'`. Operates in-place.
+
+    Repair agent receives a packet that says "API_PORT is parameterized
+    by the contract" (which it needs to know) but not the specific
+    ephemeral integer the probe picked (which it doesn't need and
+    might pattern-match on incorrectly).
+    """
+    SCRUB_VALUE = "<ephemeral, scrubbed>"
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            env = node.get("env")
+            if isinstance(env, dict):
+                for key in list(env.keys()):
+                    if _is_ephemeral_port_env_key(key):
+                        env[key] = SCRUB_VALUE
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(payload)
 
 
 def _repair_prompt(packet: RepairPacket) -> str:
