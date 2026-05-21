@@ -3,6 +3,88 @@
 Things deliberately not in v5, with rationale for deferral and pointers
 to where they connect.
 
+## NEXT-3 — Parallel-merge ancestry check is redundant with integration merge
+
+**Status:** queued.
+
+### Pattern
+
+Features build in parallel worktrees, each branched from main at
+decompose time. When a feature finishes, the orchestrator asks "is
+this feature's branch an ancestor of main?" before declaring the
+feature passable. The ancestry check assumes a fast-forward-only
+merge model.
+
+In parallel build, this assumption breaks: whichever feature
+finishes first lands its commits on main. The second feature's
+branch — still based on the OLD main HEAD — is no longer an
+ancestor of the NEW main HEAD (which now contains the first
+feature's commits). Ancestry verification fails. The second
+feature's verdict goes partial via the chokepoint
+LAND-with-annotation path, even though the feature's code is
+perfectly fine in isolation.
+
+The "guilty" feature is whichever loses the race. It's a flaky
+signal that depends on completion order, not code quality. Every
+loser triggers a child-verify repair packet → agent dispatch
+(~$0.10-0.30 each — the no-op repair pattern documented elsewhere)
+→ chokepoint LAND-with-annotation.
+
+### Why it's redundant
+
+The integration Lead's job is exactly to merge everything together
+and resolve conflicts. It already does this work — via real git
+merges, conflict resolution, and journey re-verification. The
+ancestry check is a pre-flight optimization assuming fast-forward,
+which parallel build by definition violates.
+
+### Agentic alternative
+
+Move the merge concern entirely to the integration Lead:
+
+- Drop the ancestry check as a verdict-affecting gate for parallel
+  feature children.
+- Let each parallel-built feature land partial-with-annotation
+  ONLY when its OWN code has a real issue, not when the merge
+  topology is divergent.
+- Integration Lead handles the merge (it already does today via
+  `git merge <build_branch>` in `lead-integration.md` Step 1).
+
+OR (less invasive): rebase parallel-built feature branches onto
+the current main HEAD before running the ancestry check. Recovers
+fast-forward-ness in the common case where there are no actual
+content conflicts. Real conflicts still fall to integration.
+
+### Connects to
+
+- Task #81's LAND-with-annotation handles the consequence today;
+  this is the PROTOCOL fix that prevents the false-positive.
+- The audit-orchestrator-brittleness.md pattern A1/A2 (stale
+  snapshot decisions before agent dispatch) — same shape: a
+  pre-flight check makes decisions based on a snapshot that's
+  stale at decision time due to parallel work.
+
+### Suggested first commits
+
+1. Identify the ancestry-check call site (`v5_runner.py` near where
+   `child branch ancestry verification failed` is emitted).
+2. For parallel feature children (siblings of the same parent),
+   demote the ancestry check from "verdict-affecting gate" to
+   "merge-readiness hint" — the integration Lead handles the
+   real merge anyway.
+3. Validate via a fresh run with 2+ parallel features that finish
+   close together. Expected: no spurious partial-on-loser, no
+   repair packet dispatch for "branch ancestry failed."
+
+### Risk
+
+Low. The ancestry check duplicates work the integration Lead does
+better (real merge with conflict resolution). Removing it as a
+verdict-gate doesn't lose any real safety; integration is the
+authority.
+
+---
+
 ## NEXT-2 — Feature tests test the feature; cross-feature behavior is integration's truth
 
 **Status:** queued.
