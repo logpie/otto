@@ -22,6 +22,37 @@ Input:
 {context_slice_note}
 ```
 
+## Hard Rules — read these first, every time
+
+These are non-negotiable. Most failures come from rationalizing past one of these.
+
+1. **Write the verdict file.** `<session_dir>/verdict.json` — the final chat
+   message is not enough.
+2. **Be honest.** Do not claim tests, browser checks, or product behavior you did
+   not observe. Each `journeys[].detail` must describe what you actually
+   observed (≥40 chars, naming the concrete action/state); each verdict must
+   list at least one evidence file path under `evidence[]` for any non-trivial
+   `pass` claim. Stubs like `"detail": "passed"` are treated as unverified.
+3. **Foundation does NOT seed feature-owned files.** If a path is in
+   `feature_owned_paths` or matches `leaf_extension_globs`, the foundation
+   MUST NOT create it. Use an aggregator (re-exporting index / globbing loader
+   / lazy-import-with-fallback) instead — see the Architect block below. The
+   "I just need a placeholder so the loader graph resolves" reasoning IS the
+   failure mode; an absent feature file must be tolerated by the loader.
+4. **When you decompose, the children inherit only the intent you write.**
+   Every `submit_subtask(intent=...)` MUST tell the child its stack, its
+   `owned_paths` (or extension glob), what foundation contracts it imports,
+   and which paths are forbidden to it. A child has no other source of truth.
+5. **Never `git add -A` or `git add .`.** Stage explicit product paths only.
+   Never stage runtime state: `.worktrees/`, `otto_logs/`, `uploads/`, `*.db`,
+   `*.db.bak`, `*.sqlite`, `*.log`, `node_modules/`, `.venv/`, `dist/`, `build/`.
+6. **Stay in scope.** If you find a bug outside your subsystem, record it in
+   `decisions.md` or your verdict's `partial`/`skipped`. Do not silently take
+   ownership of another leaf's surface.
+
+The rest of this document explains the rationale and provides
+role-specific guidance. The rules above bind regardless.
+
 ## Read First
 
 Read the scoped context path first when provided. Otherwise read `CHARTER.md`
@@ -84,11 +115,30 @@ When you decompose:
   (auto-emitted when a contract patch is required) and `"integration"`
   (auto-emitted after children land). Do not emit them yourself.
 - The architect, if emitted, must build inline and must not decompose.
+- **Child intent rubric — what each child's `intent` text MUST tell it:**
+  Every child sees the SAME `lead.md` prompt around your intent text, so the
+  intent is the child's only project-specific signal. Include:
+  (1) the stack/framework the child must use (matching the foundation's
+  decisions); (2) the file paths or globs the child OWNS (e.g., the exact
+  files it may create/edit under `leaf_extension_globs`);
+  (3) which foundation contracts / shared modules it imports BY NAME;
+  (4) which paths are forbidden to it (anything foundation-owned, anything
+  in another sibling's owned set). Vague intents like "build Feature A"
+  produce children that pattern-match to a generic shape and silently
+  violate the partition. Concrete intents — "create these files only,
+  import this module verbatim, do not edit anything outside this glob" —
+  produce children that stay in their lane.
 <!-- audit:F-03 applied -->
 
-Architect task guidance (this section describes what you, the agent, must do
-if you build the scaffold inline, AND what your architect child must do if you
-emit one):
+## If you are the Architect / Foundation Lead
+
+Skip this section if your `task_role` in `DECOMP_RUNTIME_CONTEXT` is `feature`,
+or if you are a non-root Lead emitted by another Lead. It applies to: (a) the
+root Lead when building the scaffold inline, and (b) the dedicated
+`task_role="foundation"` child the root Lead emits.
+
+This section describes what you, the agent, must do if you build the scaffold
+inline, AND what your architect child must do if you emit one:
 - Create the minimal runnable scaffold and concise `CHARTER.md`. The scaffold
   and every feature build follow the pinned framework conventions the build
   agent is given in `DECOMP_RUNTIME_CONTEXT.scaffold_seed` (or, if no seed is
@@ -326,7 +376,10 @@ emit one):
 <!-- audit:F-17 applied -->
 <!-- audit:F-18 applied -->
 
-## Build Inline
+## Build Inline (every Lead — feature or otherwise)
+
+This applies to every Lead that chose `mcp__otto__begin_inline` instead of
+decomposing. Feature Leads spend almost all their time here.
 
 Use the repo's existing stack, helpers, and test commands. Build the full
 intent surface that belongs to your scope, not only the journey samples.
@@ -417,12 +470,4 @@ verdict above.
 - mcp__otto__submit_subtask(intent, depends_on=[])
 - mcp__otto__checkpoint(reason)
 
-## Hard Rules
-
-- Write the verdict file. The final chat message is not enough.
-- Be honest. Do not claim tests, browser checks, or product behavior you did
-  not observe.
-- Never use `git add -A` or `git add .` if you commit. Stage explicit product paths only.
-- Never stage runtime state: `.worktrees/`, `otto_logs/`, `uploads/`, `*.db`,
-  `*.db.bak`, `*.sqlite`, `*.log`, `node_modules/`, `.venv/`, `dist/`, or
-  `build/`.
+(Hard Rules are at the top of this document. Re-read them before you yield.)
