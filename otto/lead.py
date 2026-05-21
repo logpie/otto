@@ -203,6 +203,17 @@ async def run_lead(
         except Exception:  # noqa: BLE001
             existing_mcp = {}
         existing_mcp["otto"] = mcp_server
+        # Phase-1 unified verifier: integration Lead drives behavior
+        # journeys itself via chrome-devtools MCP (no separate Python
+        # journey runner, no separate repair agent). Same env/yaml
+        # opt-out as Tier-A's repair-agent attachment, with
+        # default_enabled=True for the integration kind so the Lead
+        # gets browser tools without per-project opt-in.
+        if kind == "integration":
+            from otto.v5_preflight_repair import _browser_mcp_server_config
+            browser_cfg = _browser_mcp_server_config(config, default_enabled=True)
+            if browser_cfg is not None:
+                existing_mcp.setdefault("chrome-devtools", browser_cfg)
         try:
             options.mcp_servers = existing_mcp
         except Exception:  # noqa: BLE001

@@ -1711,45 +1711,16 @@ async def _run_integration(
             result=result,
             on_event=on_event,
         )
-    if _v5r._preflight_repair_escalated(preflight_result):
-        post_preflight_result = preflight_result
-    else:
-        post_preflight_result = await _v5r._run_integration_smoke_preflight_with_repair(
-            project_dir=project_dir,
-            worktree_path=integration_cwd,
-            task_id=task_id,
-            phase="post_agent",
-            session_dir=integration_session_dir,
-            config=config,
-            integration_branch=parent_integration_branch,
-            on_event=on_event,
-        )
+    # Phase-1 unified verifier: the integration Lead drove the journeys
+    # itself via chrome-devtools MCP in the same session it made edits.
+    # We trust its verdict; no separate post-agent journey runner +
+    # repair-agent loop. The pre-integration preflight stays attached
+    # to verify_result for proof-packet rendering, but there's no
+    # post_integration_preflight anymore. See plan-unified-self-verifying-agent.md.
     if result.verify_result is None:
         result.verify_result = {}
     if isinstance(result.verify_result, dict):
         result.verify_result["pre_integration_preflight"] = preflight_result
-        result.verify_result["post_integration_preflight"] = post_preflight_result
-    if result.verdict != VERDICT_CATASTROPHIC and _v5r._integration_smoke_blocks(post_preflight_result):
-        result.verdict = "merge_blocked"
-        result.failure_reason = (
-            "Post-agent smoke_clean_deploy still has blocking issues: "
-            + "; ".join(
-                str(issue.get("message") or issue.get("kind"))
-                for issue in post_preflight_result.get("issues", [])
-                if isinstance(issue, dict)
-                and issue.get("severity") in ("error", "block")
-            )
-        )
-        if isinstance(result.verify_result, dict):
-            result.verify_result["verdict"] = "merge_blocked"
-            result.verify_result["summary"] = result.failure_reason
-        set_verdict(project_dir, task_id, "merge_blocked", cost_usd=result.cost_usd)
-        _v5r._emit(on_event, {
-            "event": "integration_smoke_failed",
-            "task_id": task_id,
-            "verdict": "merge_blocked",
-            "worktree": str(integration_cwd),
-        })
     integration_results[task_id] = result
     _v5r._emit(on_event, {"event": "integration_done", "task_id": task_id, "verdict": result.verdict})
     restore_branch = _v5r._integration_restore_branch(project_dir, task_id, config)

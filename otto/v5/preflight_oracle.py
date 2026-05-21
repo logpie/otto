@@ -1100,8 +1100,18 @@ def _run_integration_smoke_preflight(
         # exists — stays FULLY gated (NOT gate-weakening; the p0fix2
         # npm-run-build rollup block would still fire here). Every other
         # phase keeps the default (None => the full compiled journeys).
+        # Phase-1 unified verifier: only the integration Lead drives
+        # behavior_journeys (via chrome-devtools MCP, in-session). All
+        # *preflight* checks are boot-only smokes — they verify the
+        # stack installs/builds/starts cleanly but never re-run
+        # journeys. Running journeys at preflight wasted ~60min in the
+        # post-agent path (and the foundation_clean_boot path already
+        # learned this — see the historical p0fix3 incident).
+        # Empty list short-circuits journey loading; the
+        # install/build/start step DAG still runs and gates merge.
+        _BOOT_ONLY_PHASES = {"foundation_clean_boot", "pre_agent", "post_agent"}
         _probe_behavior_journeys: list[dict[str, Any]] | None = (
-            [] if phase == "foundation_clean_boot" else None
+            [] if phase in _BOOT_ONLY_PHASES else None
         )
         clean_oracle_result = _v5r.verify_from_clean_oracle(
             worktree_path,
