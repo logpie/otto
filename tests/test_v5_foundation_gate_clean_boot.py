@@ -317,12 +317,20 @@ def test_foundation_clean_boot_runs_zero_behavior_journeys(
     )
 
 
-def test_other_phases_keep_full_behavior_journeys_no_regression(
+def test_all_preflight_phases_are_boot_only_post_phase_1(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """No-regression guard: every phase OTHER than foundation_clean_boot must
-    keep behavior_journeys=None (=> the full compiled journeys load) so
-    integration / feature / subtree clean-verify is unchanged."""
+    """Phase-1 unified verifier (plan-unified-self-verifying-agent.md):
+    all _run_integration_smoke_preflight phases are boot-only smokes.
+    Behavior journeys are the integration Lead's exclusive responsibility
+    via chrome-devtools MCP; the deterministic Playwright runner is no
+    longer wired into the production path.
+
+    Pre-Phase-1 this test asserted that non-foundation phases kept the
+    full compiled journeys (deterministic Python+Playwright). Phase 1
+    deliberately broke that assertion to collapse the
+    'deterministic verifier + separate repair agent' anti-pattern that
+    burned 60 min in linkboard's post_agent path."""
     import otto.v5_runner as R
 
     captured: dict[str, object] = {}
@@ -340,7 +348,14 @@ def test_other_phases_keep_full_behavior_journeys_no_regression(
         R, "preflight_issues_from_clean_oracle", lambda *_a, **_k: []
     )
 
-    for phase in ("integration_smoke", "subtree_integration", "pre_integration"):
+    for phase in (
+        "integration_smoke",
+        "subtree_integration",
+        "pre_integration",
+        "pre_agent",
+        "post_agent",
+        "child_merge_conflict_repair",
+    ):
         captured.clear()
         R._run_integration_smoke_preflight(
             worktree_path=tmp_path,
@@ -348,7 +363,7 @@ def test_other_phases_keep_full_behavior_journeys_no_regression(
             phase=phase,
             spec_path=tmp_path / "spec" / "spec.json",
         )
-        assert captured["behavior_journeys"] is None, (
-            f"phase {phase!r} must keep full compiled journeys "
-            f"(behavior_journeys=None); got {captured['behavior_journeys']!r}"
+        assert captured["behavior_journeys"] == [], (
+            f"phase {phase!r} must be boot-only (behavior_journeys=[]); got "
+            f"{captured['behavior_journeys']!r}"
         )
