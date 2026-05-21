@@ -86,8 +86,20 @@ inline, AND what your architect child must do if you emit one:
   equivalent files for the project's actual test runner, which you must
   discover from `package.json` / `pyproject.toml` / `Cargo.toml` /
   `go.mod` / etc.), shared lint/type config — MUST be created by the
-  scaffold and declared as a `foundation_contracts` entry owned by the
-  architect/scaffold task. Choose `check` per these semantics:
+  scaffold AND POPULATED WITH WORKING FIXTURES, and declared as a
+  `foundation_contracts` entry owned by the architect/scaffold task.
+  An EMPTY `conftest.py` does not satisfy this rule — features will then
+  each invent their own and clash at merge. The scaffold's conftest must
+  ship the standard test-time DI overrides for every foundation-owned
+  dependency. For an HTTP web app, this typically means at minimum:
+  a `client` fixture wiring `TestClient(app)` with `dependency_overrides`
+  for `get_db` (in-memory engine, fresh per test) and `get_current_user`
+  (returning a configurable fake `User`); a `fake_user_factory` data
+  factory; an `auth_headers` fixture that exercises the auth contract's
+  shape without requiring the real auth router. Stack-equivalent
+  fixtures for non-HTTP projects. Place the conftest at the path
+  pytest expects (typically `backend/tests/conftest.py`, NOT at the
+  package root). Choose `check` per these semantics:
   - `check: "literal"` means byte-exact match enforced — the file's content
     must not drift across features (use this for route/API registries,
     plugin loaders, and any file whose registration pattern must not
@@ -100,10 +112,11 @@ inline, AND what your architect child must do if you emit one:
   — that field is exclusively for route/API/screen registration registries
   (which must be `check: "literal"`); putting test/build infra there fails
   the contract gate. Feature leaves add only their own `test_<feature>.*`
-  modules under the extension globs and import the shared harness; they must
-  never create or edit the shared test bootstrap (the foundation_contract
-  owner makes that an isolation violation). Divergent independent creates of
-  these files are the #1 cause of integration merge conflicts.
+  modules under the extension globs and IMPORT FIXTURES FROM THE SCAFFOLD'S
+  conftest. They must never create or edit the shared test bootstrap (the
+  foundation_contract owner makes that an isolation violation). Divergent
+  independent creates of these files are the #1 cause of integration merge
+  conflicts.
 <!-- audit:F-04 applied -->
 <!-- audit:F-07 applied -->
 - Shared cross-feature CLIENT RUNTIME STATE (when the project has a client
@@ -288,6 +301,13 @@ Before declaring pass, drive YOUR OWN shared contracts:
   user, log in, fetch their profile"), drive it via curl. If your
   foundation can't satisfy this with the seeded scaffold alone, it
   isn't a foundation — it's a sketch.
+- **Your test fixtures actually work**. Write ONE throwaway test
+  file that imports every fixture you exposed (client, db_session,
+  auth_headers, fake_user_factory, etc.) and asserts it returns a
+  usable object. Run it. If the fixture can't even be imported
+  without errors, features will hit the same import error and end
+  up writing their own conftest — causing merge conflict. Throw
+  the throwaway test away after; the fixtures stay.
 
 If a probe surfaces a real bug, FIX IT in your foundation pass.
 Do not declare partial-because-isolation; you are the platform.
