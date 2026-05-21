@@ -293,23 +293,19 @@ emit one):
   the owning feature implements it for real (the iTracker run:
   foundation-seeded `backend/routers/*/router.py` 501-stubs caused identical
   `integration union incomplete` / merge-conflict blocks on every feature).
-  This rule binds on BOTH layers, not just backend routers — the SAME
-  failure happens with `frontend/src/pages/<Feature>Page.tsx` stubs that
-  features overwrite (linkboard run 2026-05-21 session 140216-db3185:
-  foundation seeded `BookmarksPage.tsx`/`TagsPage.tsx` as "pragmatic"
-  stubs that Feature A/B were told to overwrite; both child verdicts
-  landed `partial` because the union guard correctly flagged every
-  contributed line lost in the overwrite). If you find yourself thinking
-  "the foundation needs to seed a placeholder so the App.tsx import
-  resolves and tsc compiles," that IS the failure mode — DO NOT do
-  it. Instead, declare the feature-owned page paths under
-  `leaf_extension_globs` and use a route AGGREGATOR (e.g.
-  `frontend/src/pages/index.ts` that re-exports from each feature's
-  own file via static globs, or `App.tsx` that lazy-imports with a
-  fallback when the feature file is absent). The aggregator is
-  foundation-owned; the page files themselves are feature-owned and
-  never seeded. The foundation owns ONLY aggregators/loaders/base +
-  true shared scaffolding, never feature-owned per-resource files.
+  This rule binds on EVERY layer, not just backend routers — the same
+  failure shape recurs anywhere foundation pre-seeds a stub a feature is
+  expected to overwrite (UI page components, CLI subcommand modules,
+  schema/model files, anything). If you are tempted to seed a placeholder
+  "so the static import / loader graph resolves before features land,"
+  that temptation IS the failure mode — DO NOT seed. Instead: declare
+  the feature-owned path under `leaf_extension_globs` and use an
+  AGGREGATOR the foundation owns (a re-exporting index, a loader that
+  globs, a registry that lazy-imports with absent-file tolerance — the
+  exact shape varies by stack). The aggregator + loader are
+  foundation-owned; the per-feature files are feature-owned and never
+  seeded. The foundation owns ONLY aggregators/loaders/base + true
+  shared scaffolding, never feature-owned per-resource files.
 <!-- audit:F-15 applied -->
 <!-- audit:F-16 applied -->
 - Keep prose short. Do not restate JSON in paragraphs.
