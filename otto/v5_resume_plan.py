@@ -1,4 +1,4 @@
-"""Single source of truth: "what would `otto v5 run` (no --fresh) do
+"""Single source of truth: "what would `otto run` (no --fresh) do
 right now given the project's persisted state?"
 
 Used by three sites that historically duplicated this logic (with
@@ -69,7 +69,7 @@ class ChildPrediction:
 
 @dataclass
 class ResumePlan:
-    """The full picture of what `otto v5 run` (no --fresh) would do
+    """The full picture of what `otto run` (no --fresh) would do
     right now. Pure data — caller renders or consumes."""
 
     status: ResumeStatus
@@ -113,7 +113,7 @@ def compute_resume_plan(
     config: dict[str, Any] | None = None,
 ) -> ResumePlan:
     """Inspect the project's persisted state and predict what
-    `otto v5 run` (no --fresh) would do.
+    `otto run` (no --fresh) would do.
 
     Args:
         project_dir: project root.
@@ -268,7 +268,7 @@ def compute_resume_plan(
             "address this on the next run"
         )
     if plan.status == "RESUMABLE":
-        plan.suggested_next.append('otto v5 run "<original intent>"')
+        plan.suggested_next.append('otto run "<original intent>"')
         if plan.root_verdict in {"merge_blocked", "partial"} and blocked_count == 0 and rebuild_count == 0:
             plan.concerns.append(
                 f"root is '{plan.root_verdict}' but no children need rebuild; "
@@ -288,7 +288,7 @@ def _predict_child(
     entry: dict[str, Any],
     sat_fn: Any,
 ) -> ChildPrediction:
-    """Predict what happens to this child on the next `otto v5 run`."""
+    """Predict what happens to this child on the next `otto run`."""
     intent_preview = (entry.get("intent") or "")[:80]
     verdict = str(entry.get("verdict") or "") or "(none)"
     retry_count = int(entry.get("retry_count", 0) or 0)
