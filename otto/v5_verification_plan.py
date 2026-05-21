@@ -30,14 +30,40 @@ from otto.schemas import VERDICT_PASS
 # (lead.py defers `from otto.v5_verification_plan import validate_lead_verdict`
 # inside `run_lead`; symmetric deferral keeps pyright + runtime both happy).
 
+# Gating checks: a failed REQUIRED entry here demotes the agent's verdict
+# from `pass` to `partial` (see _aggregate_outcome below, ~line 192).
+#
+# These are intentionally narrow: only HONESTY checks belong here — things
+# the agent could be wrong/dishonest about that no amount of live evidence
+# would compensate for.
+#
+#   local_scope_check    — did the agent attach evidence for what it claimed
+#                          (test_command, journeys, evidence list)? Without
+#                          evidence we can't trust the verdict.
+#   verdict_consistency  — are partial/built/skipped lists internally
+#                          coherent (no entity in both built AND partial,
+#                          no skipped without reason, etc.)?
+#
+# Document-coherence checks (whether spec pages line up with CHARTER IA
+# routes, whether entities have empty-state copy, whether a structured
+# contract is attached) were moved to ADVISORY_KINDS below: they catch
+# real architectural drift but they should NOT silently override an
+# agent's live-verified `pass`. The agent just spent 5+ min driving every
+# behavior journey through chrome-devtools and observed real DOM state —
+# overriding that with a doc-vs-doc string-match is the same architectural
+# anti-pattern Phase 1 just fixed for journey verification.
+# Advisories still write to verification_plan.json for the audit trail;
+# operators can act on them; the verdict respects the agent.
 CHECK_KINDS = (
-    "structured_contract_present",
-    "page_has_ia_route",
-    "entity_has_empty_state",
     "local_scope_check",
     "verdict_consistency",
 )
 ADVISORY_KINDS = (
+    # Document-coherence (moved from CHECK_KINDS — see comment above)
+    "structured_contract_present",
+    "page_has_ia_route",
+    "entity_has_empty_state",
+    # Pre-existing advisories
     "page_resolves",
     "route_resolves",
     "endpoint_resolves",
