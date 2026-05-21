@@ -524,6 +524,87 @@ This is now the #1 P1 item for any further v6 hardening. Verdict
 shape is the load-bearing contract between agents and the runner;
 brittle parsing means silently-discarded work.
 
+### Journey contract-vs-reality gap (intent over literal selectors)
+
+**State:** discovered concretely on iTracker (2026-05-20) after 3
+iterations stabilized at `partial` verdict with 3 residual journey
+fails. Diagnosis showed the 3 residuals are NOT real product bugs in
+the way the verdict framed them:
+
+| Journey | Looked for | Actual product state |
+|---|---|---|
+| kanban / setup.cycle | `label='Cycle name'` | Cycle creation UI genuinely missing (real gap) |
+| comment_mention / setup.invite_bob | `label='Email'` | `<input type="email" placeholder="teammate@example.com">` exists, but no `<label>`/`aria-label` so `getByLabelText("Email")` misses |
+| search / setup.issue_a | `label='New issue title'` | `aria-label="New issue title"` exists in source — likely a route/visibility timing miss, NOT a label miss |
+
+The structural problem: `spec.behavior_journeys[].pass_model` mixes two
+distinct layers in one declarative blob:
+1. **Intent** — what behavior must work ("user invites teammate via
+   email; teammate appears in members list")
+2. **UI contract** — exact role/name/label selectors the planner
+   *guesses* the children will use (written BEFORE the product exists)
+
+Children build independently with their own naming choices ("Member
+email" vs "Email", placeholder vs `<label>`, inline form vs modal).
+Each is a correct realization of the intent. The literal contract
+treats every divergence as a failure. The planner has no way to be
+right consistently because there's no canonical "right" name.
+
+Semantic fallback (`_semantic_locator` in `otto/journey_ui_executor.py`)
+already softens this — it snapshots interactive controls, walks
+preceding siblings to recover unassociated `<label>`, and fuzzy-matches
+the step's intent. But it still requires `name`/`label`/`text` overlap
+to find a candidate; an input with ONLY a placeholder and no label
+falls through.
+
+**Why this is architectural, not just three brittle locators:** every
+coordination point that pre-commits before children make their
+decisions creates a chokepoint. The planner is guessing what children
+will name things. This is structurally identical to rigid microservice
+contracts; the industry pattern there is consumer-driven contracts +
+capability discovery, not stricter selectors.
+
+**v6 reconciliation paths (in order of structural depth):**
+
+- **Path A — Capability manifest (cheapest structural fix):** each
+  child emits a manifest of what they built (route, form, fields with
+  accessible attributes actually present, behavioral postcondition).
+  Integration phase synthesizes concrete probe sequences by matching
+  planner-intent → child-manifest. Planner stops writing selectors;
+  children declare what they made; oracle reconciles. ~500 LOC,
+  mostly in `build.py` (manifest emit) + `lead_verify.py` (match+
+  generate). Matching itself is one LLM call per integration, not per
+  step.
+- **Path B — Intent + behavioral postcondition oracle:** restructure
+  the journey schema so the oracle's success condition is "behavioral
+  outcome occurred" (API call hit, DB row present, expected text
+  visible *somewhere*) rather than "literal selector path executed".
+  Existing `success_observables` already do this partially but they're
+  gated behind the literal locator chain. ~300 LOC reshape of
+  `_check_observable` + verdict structure.
+- **Path C — LLM-agent oracle:** hand journey description + product URL
+  to a Claude agent that discovers the UI like a real user. Robust to
+  any UI shape; ~$5–20 per journey, non-deterministic. Reserve for
+  the hardest cases (complex flows, a11y regressions); not the
+  default.
+
+**Concrete next step for v6 scoping:** write
+`research-journey-intent-vs-contract.md` cataloging the journey types
+we have today, the contract-vs-reality failures observed across
+products (linkboard 8k/16k, iTracker, plus older cases), and a typed
+capability-manifest schema proposal. Need to decide whether Path A
+graduates to v6 or remains a v7 architecture beat.
+
+**Source incidents:**
+- iTracker Opus 2026-05-20 (3 iterations, ended at `partial` —
+  `otto_logs/sessions/2026-05-20-211157-47cc57/`)
+- Pre-existing semantic fallback was added for resume16k journey-1
+  "Name" label drift (commit referenced inline at
+  `otto/journey_ui_executor.py:1186`) — that fix is local; the
+  architectural gap it patches is still open.
+
+**Memory ref:** add `[[journey-intent-vs-contract]]` when written.
+
 ## Verifier / audit
 
 ### Audit's LLM-judge integration
