@@ -24,7 +24,7 @@ from otto.v5_preflight_repair import (
     run_oracle_repair_agent,
 )
 from otto.agent import AgentCallError
-from otto import v5_runner
+from otto import v5_preflight_repair, v5_runner
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -630,6 +630,106 @@ async def test_agent_call_error_returns_structured_repair_escalation(tmp_path: P
     assert result.escalation["reason"] == "agent_call_failed"
     events = packet.events()
     assert any(event["event"]["type"] == "agent_error" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_repair_agent_attaches_chrome_devtools_mcp_and_live_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-browser-mcp",
+        budget=RepairBudget(agent_turns=1, oracle_invocations=1),
+    )
+    monkeypatch.delenv("OTTO_REPAIR_BROWSER_MCP", raising=False)
+    monkeypatch.setattr(
+        v5_preflight_repair.shutil,
+        "which",
+        lambda name: "/usr/bin/npx" if name == "npx" else None,
+    )
+    seen: dict[str, Any] = {}
+
+    async def fake_agent(
+        prompt: str,
+        options: Any,
+        **kwargs: Any,
+    ) -> tuple[str, float, str, dict[str, Any]]:
+        del kwargs
+        seen["prompt"] = prompt
+        seen["mcp_servers"] = dict(getattr(options, "mcp_servers", {}) or {})
+        return "repair attempted", 0.0, "sess-browser", {}
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=fake_agent,
+        oracle_runner=lambda _packet: _oracle_result(passed=False),
+    )
+
+    assert result.verdict == "merge_blocked"
+    assert result.agent_session_id == "sess-browser"
+    browser_mcp = seen["mcp_servers"]["chrome-devtools"]
+    assert browser_mcp == {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "chrome-devtools-mcp@latest", "--headless"],
+    }
+    assert "## Live browser tools available" in seen["prompt"]
+    assert "mcp__chrome-devtools__take_snapshot" in seen["prompt"]
+    assert "PRIOR-RUN snapshots" in seen["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_repair_agent_retries_without_browser_mcp_on_startup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    packet = _packet(
+        tmp_path,
+        repo,
+        unit_id="unit-browser-mcp-fallback",
+        budget=RepairBudget(agent_turns=1, oracle_invocations=1),
+    )
+    monkeypatch.delenv("OTTO_REPAIR_BROWSER_MCP", raising=False)
+    monkeypatch.setattr(
+        v5_preflight_repair.shutil,
+        "which",
+        lambda name: "/usr/bin/npx" if name == "npx" else None,
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def flaky_agent(
+        prompt: str,
+        options: Any,
+        **kwargs: Any,
+    ) -> tuple[str, float, str, dict[str, Any]]:
+        del prompt
+        mcp_servers = dict(getattr(options, "mcp_servers", {}) or {})
+        calls.append({"mcp_servers": mcp_servers, "log_dir": kwargs.get("log_dir")})
+        if "chrome-devtools" in mcp_servers:
+            raise AgentCallError("chrome-devtools MCP failed to launch")
+        return "repair attempted", 0.0, "sess-static", {}
+
+    result = await run_oracle_repair_agent(
+        packet,
+        config={"max_turns_per_call": 1},
+        agent_runner=flaky_agent,
+        oracle_runner=lambda _packet: _oracle_result(passed=False),
+    )
+
+    assert result.verdict == "merge_blocked"
+    assert result.agent_session_id == "sess-static"
+    assert "chrome-devtools" in calls[0]["mcp_servers"]
+    assert "chrome-devtools" not in calls[1]["mcp_servers"]
+    assert Path(calls[1]["log_dir"]).name == "without-browser-mcp"
+    events = packet.events()
+    assert any(event["event"]["type"] == "browser_mcp_unavailable" for event in events)
 
 
 @pytest.mark.asyncio

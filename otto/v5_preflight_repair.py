@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from collections.abc import Awaitable, Callable
@@ -35,6 +36,12 @@ from otto.v5_common import git_capture as _git_capture
 
 import logging
 logger = logging.getLogger("otto.v5_preflight_repair")
+
+
+_CHROME_DEVTOOLS_MCP_NAME = "chrome-devtools"
+_REPAIR_BROWSER_MCP_ENV = "OTTO_REPAIR_BROWSER_MCP"
+_FALSEY_FLAG_VALUES = {"0", "false", "no", "off", "disabled"}
+_TRUTHY_FLAG_VALUES = {"1", "true", "yes", "on", "enabled"}
 
 
 
@@ -1189,12 +1196,42 @@ _HARNESS_BLACKBOX_GUIDANCE = (
     "NEVER read, grep, search, or reverse-engineer Otto's source, the oracle, "
     "the journey executor, or the test harness to infer how it works — that "
     "is out of scope, cannot change the verdict, and wastes the repair "
-    "budget. Diagnose ONLY from the product source and the failure evidence "
-    "in the repair packet: for UI-journey failures read the per-journey "
+    "budget. Diagnose ONLY from the product source, the failure evidence "
+    "in the repair packet, and live browser observations: for UI-journey "
+    "failures use the live browser tools below, and use the per-journey "
     "artifacts (screenshot.png, dom.html, console-errors.jsonl, "
-    "network.jsonl, verdict.json) under the journeys artifact directory. Fix "
-    "the PRODUCT behavior the journeys assert so the UNMODIFIED oracle "
-    "passes; never try to satisfy the harness by guessing its internals. "
+    "network.jsonl, verdict.json) under the journeys artifact directory as "
+    "prior-run context. Fix the PRODUCT behavior the journeys assert so the "
+    "UNMODIFIED oracle passes; never try to satisfy the harness by guessing "
+    "its internals. "
+)
+
+
+_LIVE_BROWSER_REPAIR_GUIDANCE = (
+    "\n\n## Live browser tools available\n\n"
+    "You have `mcp__chrome-devtools__*` tools attached. When investigating a "
+    "UI-journey failure:\n\n"
+    "1. Start the project's dev stack with Bash — check the project's "
+    "`start.sh` or similar.\n"
+    "2. Use `mcp__chrome-devtools__new_page` and "
+    "`mcp__chrome-devtools__navigate_page` to load the page the journey "
+    "targets.\n"
+    "3. Use `mcp__chrome-devtools__take_snapshot` (or "
+    "`mcp__chrome-devtools__take_screenshot` plus "
+    "`mcp__chrome-devtools__evaluate_script` for DOM probes) to SEE what's "
+    "actually rendered, not just what the prior orchestrator captured.\n"
+    "4. If the deterministic Playwright matcher reported a selector miss "
+    "(for example, `role='button' name='Add tag'`), inspect the live page "
+    "yourself. Decide whether to rename the control to literally match what "
+    "the journey contract expects, or flag in your verdict that the journey "
+    "contract is brittle and needs intent-based matching. Prefer renaming the "
+    "product control when feasible.\n"
+    "5. Iterate: edit, restart the stack if needed, re-navigate, and "
+    "re-observe.\n\n"
+    "The static screenshot.png/dom.html files in the repair packet are "
+    "PRIOR-RUN snapshots from before any fix you make. They are useful as a "
+    "starting point, but NEVER use them as your primary diagnostic — the live "
+    "page after your edit is what matters.\n\n"
 )
 
 
@@ -1227,6 +1264,7 @@ def _repair_prompt(packet: RepairPacket) -> str:
         "merge invariants, and owned-path/scope rules. "
         "Diagnose from the complete evidence packet. "
         + _HARNESS_BLACKBOX_GUIDANCE
+        + _LIVE_BROWSER_REPAIR_GUIDANCE
         + "Run the oracle as your "
         "acceptance loop. Stop only when the oracle passes or you can produce a "
         "structured escalation record explaining why it cannot within budget.\n\n"
@@ -1271,6 +1309,94 @@ def _structured_escalation(
         "closeout_summary": closeout_summary,
         "_written_at": _iso_now(),
     }
+
+
+def _coerce_optional_flag(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in _FALSEY_FLAG_VALUES:
+        return False
+    if text in _TRUTHY_FLAG_VALUES:
+        return True
+    return default
+
+
+def _repair_browser_mcp_enabled(
+    config: dict[str, Any] | None,
+    *,
+    default_enabled: bool,
+) -> bool:
+    env_value = os.environ.get(_REPAIR_BROWSER_MCP_ENV)
+    if env_value is not None:
+        return _coerce_optional_flag(env_value, default=default_enabled)
+
+    cfg = config or {}
+    for key in (
+        "repair_browser_mcp",
+        "enable_repair_browser_mcp",
+        "repair_chrome_devtools_mcp",
+    ):
+        if key in cfg:
+            return _coerce_optional_flag(cfg.get(key), default=default_enabled)
+    return default_enabled
+
+
+def _browser_mcp_server_config(
+    config: dict[str, Any] | None = None,
+    *,
+    default_enabled: bool = False,
+) -> dict[str, Any] | None:
+    """Return the optional chrome-devtools MCP server config.
+
+    The helper defaults off so callers outside repair do not pay for browser
+    tool startup unless they opt in. The preflight repair path passes
+    ``default_enabled=True``.
+    """
+    if not _repair_browser_mcp_enabled(config, default_enabled=default_enabled):
+        return None
+    if shutil.which("npx") is None:
+        logger.warning(
+            "chrome-devtools MCP disabled for repair agent: npx not found on PATH"
+        )
+        return None
+    return {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "chrome-devtools-mcp@latest", "--headless"],
+    }
+
+
+def _attach_browser_mcp_server(options: Any, server_config: dict[str, Any] | None) -> bool:
+    if not server_config:
+        return False
+    try:
+        existing_mcp = dict(getattr(options, "mcp_servers", {}) or {})
+    except Exception:  # noqa: BLE001
+        existing_mcp = {}
+    existing_mcp[_CHROME_DEVTOOLS_MCP_NAME] = server_config
+    try:
+        options.mcp_servers = existing_mcp
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "could not attach chrome-devtools MCP to repair agent options; "
+            "falling back to static artifacts"
+        )
+        return False
+    return True
+
+
+def _should_retry_without_browser_mcp(exc: Any) -> bool:
+    if str(getattr(exc, "session_id", "") or "").strip():
+        return False
+    cost = getattr(exc, "total_cost_usd", None)
+    if isinstance(cost, (int, float)) and float(cost) > 0.0:
+        return False
+    return True
 
 
 async def run_oracle_repair_agent(
@@ -1324,6 +1450,9 @@ async def run_oracle_repair_agent(
     else:
         selected_runner = agent_runner
 
+    browser_mcp_config = _browser_mcp_server_config(config, default_enabled=True)
+    browser_mcp_disabled_after_launch_failure = False
+
     def elapsed_wall_s() -> float:
         return prior_elapsed_wall_s + (time.monotonic() - started)
 
@@ -1358,15 +1487,28 @@ async def run_oracle_repair_agent(
         phase_label: str,
         log_name: str,
     ) -> tuple[str, float, str, dict[str, Any]]:
-        options = make_agent_options(
-            worktree,
-            config,
-            agent_type="build",
-            resume=packet.agent_session_id or None,
-        )
-        max_turns = packet.budget.provider_max_turns or int(config.get("max_turns_per_call") or 1)
-        options.max_turns = max(1, max_turns)
-        options.cwd = str(worktree)
+        nonlocal browser_mcp_disabled_after_launch_failure
+
+        def build_options(*, include_browser_mcp: bool) -> tuple[Any, bool]:
+            options = make_agent_options(
+                worktree,
+                config,
+                agent_type="build",
+                resume=packet.agent_session_id or None,
+            )
+            max_turns = packet.budget.provider_max_turns or int(
+                config.get("max_turns_per_call") or 1
+            )
+            options.max_turns = max(1, max_turns)
+            options.cwd = str(worktree)
+            browser_mcp_attached = (
+                include_browser_mcp
+                and not browser_mcp_disabled_after_launch_failure
+                and _attach_browser_mcp_server(options, browser_mcp_config)
+            )
+            return options, browser_mcp_attached
+
+        options, browser_mcp_attached = build_options(include_browser_mcp=True)
         log_dir = packet.packet_dir / "agent" / log_name
         log_dir.mkdir(parents=True, exist_ok=True)
         timeout_s = int(
@@ -1378,15 +1520,46 @@ async def run_oracle_repair_agent(
                 ),
             )
         )
-        return await selected_runner(
-            prompt,
-            options,
-            log_dir=log_dir,
-            phase_name=phase_name,
-            phase_label=phase_label,
-            timeout=timeout_s,
-            project_dir=worktree,
-        )
+        try:
+            return await selected_runner(
+                prompt,
+                options,
+                log_dir=log_dir,
+                phase_name=phase_name,
+                phase_label=phase_label,
+                timeout=timeout_s,
+                project_dir=worktree,
+            )
+        except AgentCallError as exc:
+            if not browser_mcp_attached or not _should_retry_without_browser_mcp(exc):
+                raise
+            browser_mcp_disabled_after_launch_failure = True
+            reason = str(getattr(exc, "reason", "") or exc)
+            logger.warning(
+                "repair agent startup failed while chrome-devtools MCP was attached; "
+                "retrying without live browser tools: %s",
+                reason,
+            )
+            packet.append_event(
+                "browser_mcp_unavailable",
+                digest=latest_oracle.digest,
+                payload={
+                    "reason": reason,
+                    "fallback": "static_artifacts",
+                },
+            )
+            retry_options, _ = build_options(include_browser_mcp=False)
+            retry_log_dir = log_dir / "without-browser-mcp"
+            retry_log_dir.mkdir(parents=True, exist_ok=True)
+            return await selected_runner(
+                prompt,
+                retry_options,
+                log_dir=retry_log_dir,
+                phase_name=phase_name,
+                phase_label=phase_label,
+                timeout=timeout_s,
+                project_dir=worktree,
+            )
 
     def reconcile_replayed_usage() -> None:
         nonlocal cost_usd, agent_turns_used, closeout_turns_used, oracle_invocations
