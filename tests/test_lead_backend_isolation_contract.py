@@ -42,11 +42,19 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-LEAD = Path("otto/prompts/lead.md")
+LEAD_CORE = Path("otto/prompts/lead.md")
+LEAD_ARCHITECT = Path("otto/prompts/lead-architect.md")
 
 
 def _text() -> str:
-    return LEAD.read_text(encoding="utf-8")
+    # An architect Lead sees BOTH files concatenated (audit F-1 follow-up:
+    # split-file conditional render). Tests here assert what the architect
+    # actually reads, so grep the union.
+    return (
+        LEAD_CORE.read_text(encoding="utf-8")
+        + "\n"
+        + LEAD_ARCHITECT.read_text(encoding="utf-8")
+    )
 
 
 def _norm(s: str) -> str:

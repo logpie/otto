@@ -1,70 +1,76 @@
-"""Architect block in lead.md is conditionally stripped at render time.
+"""lead.md + lead-architect.md compose conditionally by Lead role.
 
-Audit F-1 follow-up: lead.md has a ~245-line architect-only section. For
-feature children (non-root, task_role != 'foundation'), that block is
-~50% of the prompt budget spent on dead instructions. Stripping it at
-render time keeps the source file intact (so file-grep tests still pass)
-while sharpening the rendered prompt for feature Leads.
+Audit F-1 follow-up. lead.md (~225 lines) is the universal Lead prompt —
+Hard Rules, Decide, Build Inline, Verdict, Tools — that every Lead reads.
+lead-architect.md (~250 lines) is appended ONLY for the root Lead and
+foundation children, who actually design the scaffold and author
+CHARTER's feature_owned_paths / foundation_contracts.
+
+The split keeps the file structure aligned with audience: a reader of
+lead.md sees what every Lead sees, no runtime stripping, no markers.
 """
 
 from __future__ import annotations
 
-from otto.lead import _strip_architect_block
+from otto.lead import _compose_lead_template
 from pathlib import Path
 
 
-def _read_lead_template() -> str:
-    return Path("otto/prompts/lead.md").read_text(encoding="utf-8")
+def _read(name: str) -> str:
+    return Path("otto/prompts") / name
 
 
-def test_lead_md_has_architect_block_markers() -> None:
-    template = _read_lead_template()
-    assert "<!-- LEAD_ARCHITECT_BLOCK_START -->" in template
-    assert "<!-- LEAD_ARCHITECT_BLOCK_END -->" in template
-    assert template.index("<!-- LEAD_ARCHITECT_BLOCK_START -->") < template.index(
-        "<!-- LEAD_ARCHITECT_BLOCK_END -->"
+def test_lead_md_is_core_only() -> None:
+    """lead.md should NOT contain architect-only content. That lives in
+    lead-architect.md and is appended only when needed."""
+    text = (Path("otto/prompts") / "lead.md").read_text(encoding="utf-8")
+    # Architect-specific phrases must not be in the core:
+    assert "If you are the Architect / Foundation Lead" not in text
+    assert "feature_owned_paths" in text  # the Hard Rule mention IS here
+    # But the deep architect-block content must NOT be here:
+    assert "Foundation Contracts" not in text  # CHARTER block heading
+    assert "registration_isolation" not in text  # architect-only contract field
+
+
+def test_lead_architect_md_exists_and_is_architect_only() -> None:
+    arch = (Path("otto/prompts") / "lead-architect.md").read_text(encoding="utf-8")
+    assert "If you are the Architect / Foundation Lead" in arch
+    assert "Foundation Contracts" in arch
+    assert "registration_isolation" in arch
+    assert "Information Architecture Contract" in arch
+
+
+def test_compose_feature_lead_excludes_architect() -> None:
+    """Feature children get just lead.md."""
+    composed = _compose_lead_template(include_architect=False)
+    assert "If you are the Architect / Foundation Lead" not in composed
+    # But Hard Rules still survive:
+    assert "Hard Rules" in composed
+    assert "Write the verdict file" in composed
+    assert "Never `git add -A`" in composed
+    # And the stub anti-pattern Hard Rule is preserved:
+    assert "Foundation does NOT seed feature-owned files" in composed
+
+
+def test_compose_architect_lead_includes_both() -> None:
+    """Root + foundation Leads get lead.md + lead-architect.md concatenated."""
+    composed = _compose_lead_template(include_architect=True)
+    # Core content:
+    assert "Hard Rules" in composed
+    assert "Build Inline" in composed
+    # Architect content:
+    assert "If you are the Architect / Foundation Lead" in composed
+    assert "Foundation Contracts" in composed
+    assert "registration_isolation" in composed
+
+
+def test_feature_lead_prompt_is_substantially_smaller() -> None:
+    """Feature children's prompt should be well under half the architect's,
+    so instruction-following actually holds on the rules they need."""
+    core = _compose_lead_template(include_architect=False)
+    full = _compose_lead_template(include_architect=True)
+    # The split should give feature children at least 50% reduction:
+    assert len(core) < len(full) * 0.5, (
+        f"feature prompt is {len(core)} chars, architect is {len(full)}; "
+        f"feature should be < {int(len(full) * 0.5)}"
     )
-
-
-def test_strip_removes_architect_block_content() -> None:
-    template = _read_lead_template()
-    stripped = _strip_architect_block(template)
-    # The content between the markers (the architect-only section) is gone:
-    assert "If you are the Architect / Foundation Lead" not in stripped
-    # The Hard Rules section (BEFORE the architect block) still survives:
-    assert "Hard Rules — read these first" in stripped
-    # The Build Inline section (AFTER the architect block) still survives:
-    assert "Build Inline (every Lead — feature or otherwise)" in stripped
-    # A placeholder comment replaces the block so the markdown reads cleanly:
-    assert "Architect / Foundation guidance omitted" in stripped
-
-
-def test_strip_significantly_shrinks_prompt() -> None:
-    template = _read_lead_template()
-    stripped = _strip_architect_block(template)
-    # Feature Lead prompts should be substantially smaller — the architect
-    # block alone is ~10K chars; the strip should remove at least 8K to be
-    # meaningful (gives a margin for the placeholder + minor restructure).
-    delta = len(template) - len(stripped)
-    assert delta >= 8000, f"strip removed only {delta} chars; expected >= 8000"
-
-
-def test_strip_is_idempotent_when_markers_absent() -> None:
-    """Falls back to identity on a template missing markers — degrades
-    gracefully rather than producing a broken prompt."""
-    template = "No markers here.\nJust prose.\n"
-    assert _strip_architect_block(template) == template
-
-
-def test_strip_preserves_hard_rules_intact() -> None:
-    """The Hard Rules block (top of lead.md) survives stripping — those
-    are the load-bearing invariants feature children MUST still read."""
-    template = _read_lead_template()
-    stripped = _strip_architect_block(template)
-    # Specific Hard Rules clauses that bind on every Lead:
-    assert "Write the verdict file" in stripped
-    assert "Never `git add -A`" in stripped
-    assert "feature_owned_paths" in stripped  # the stub anti-pattern rule
-    assert "child_intent must include" in stripped.replace(
-        "Every `submit_subtask(intent=...)` MUST tell the child its stack, its\n   `owned_paths` (or extension glob), what foundation contracts it imports,\n   and which paths are forbidden to it.", "child_intent must include"
-    )  # rubric exists, content paraphrased

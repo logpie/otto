@@ -625,29 +625,27 @@ def _template_with_runtime_block(template: str, kind: LeadKind) -> str:
     return template
 
 
-_ARCHITECT_BLOCK_START = "<!-- LEAD_ARCHITECT_BLOCK_START -->"
-_ARCHITECT_BLOCK_END = "<!-- LEAD_ARCHITECT_BLOCK_END -->"
-_ARCHITECT_BLOCK_PLACEHOLDER = (
-    "<!-- Architect / Foundation guidance omitted: not applicable to "
-    "feature Leads. See lead.md if you need it for reference. The Hard "
-    "Rules at the top of this prompt still bind. -->"
-)
+def _compose_lead_template(*, include_architect: bool) -> str:
+    """Compose the Lead's prompt by concatenating the core template with
+    the architect-only section (when applicable).
 
+    `lead.md` (the core) is what every Lead reads: Hard Rules, Decide,
+    Build Inline, Verdict, Tools. `lead-architect.md` is appended ONLY
+    when the Lead is the root or a `task_role="foundation"` child —
+    those are the agents who actually design the scaffold and author
+    CHARTER's feature_owned_paths / foundation_contracts.
 
-def _strip_architect_block(template: str) -> str:
-    """Remove the architect-only section between the START/END markers.
-
-    Falls back to returning the template unchanged if the markers are
-    absent or malformed — better to render a long prompt than a broken
-    one. The architect block is ~245 lines / ~3400 tokens, so this is the
-    single biggest token-budget win for feature Leads.
+    The split keeps the file structure aligned with audience: a reader
+    of `lead.md` sees what every Lead sees, no more, no less. Feature
+    children's rendered prompt is ~225 lines / ~2800 tokens — comfortably
+    in the zone where instruction-following holds. Architects get
+    ~480 lines / ~6800 tokens of guidance they actually need.
     """
-    start = template.find(_ARCHITECT_BLOCK_START)
-    end = template.find(_ARCHITECT_BLOCK_END)
-    if start < 0 or end < 0 or end < start:
-        return template
-    end += len(_ARCHITECT_BLOCK_END)
-    return template[:start] + _ARCHITECT_BLOCK_PLACEHOLDER + template[end:]
+    core = _read_prompt_template("lead.md")
+    if not include_architect:
+        return core
+    architect = _read_prompt_template("lead-architect.md")
+    return core.rstrip() + "\n\n" + architect
 
 
 def _render_prompt(
@@ -665,28 +663,25 @@ def _render_prompt(
     integration_packet_path: str = "",
 ) -> str:
     """Render the Lead's prompt by interpolating into the template."""
-    template_name = "lead.md" if kind == "plan_or_inline" else "lead-integration.md"
-    template = _template_with_runtime_block(_read_prompt_template(template_name), kind)
-
     journeys_path = session_dir / "spec" / "spec.json"
     is_root = integration_branch is None
 
-    # Audit F-1 follow-up: lead.md has a 245-line architect block (the
-    # 'If you are the Architect / Foundation Lead' section). For NON-ROOT
-    # feature Leads, that's ~50% of the prompt budget spent on dead
-    # instructions — they're not designing the scaffold, they're building
-    # against one. Strip the block for them so instruction-following
-    # focuses on the rules that actually apply. Root Leads (who may
-    # build the scaffold inline OR emit a foundation child) and
-    # foundation children (task_role indicated via runtime context) keep
-    # the full block. Block markers added to lead.md preserve the source
-    # for file-grep tests.
-    if kind == "plan_or_inline" and not is_root:
+    # Decide which template to use. Integration Leads have their own
+    # file. For plan_or_inline, ROOT and FOUNDATION children see the
+    # architect-augmented prompt; FEATURE children see the core only.
+    # (Audit F-1 follow-up — see _compose_lead_template docstring.)
+    if kind == "integration":
+        template = _template_with_runtime_block(
+            _read_prompt_template("lead-integration.md"), kind
+        )
+    else:
         task_role = ""
         if isinstance(decomp_runtime_context, dict):
             task_role = str(decomp_runtime_context.get("task_role") or "").strip().lower()
-        if task_role and task_role != "foundation":
-            template = _strip_architect_block(template)
+        include_architect = is_root or task_role == "foundation"
+        template = _template_with_runtime_block(
+            _compose_lead_template(include_architect=include_architect), kind
+        )
     intent_runtime_block = _render_intent_runtime_block(
         task_id=task_id,
         intent=intent,

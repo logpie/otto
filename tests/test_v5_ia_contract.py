@@ -200,7 +200,12 @@ def test_check_coherence_includes_ia_findings(tmp_path: Path) -> None:
 
 
 def test_architect_prompt_keeps_concise_ia_contract_requirement() -> None:
-    prompt = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
+    # Architect-specific guidance now lives in lead-architect.md (audit F-1
+    # follow-up: split-file conditional render). The architect Lead sees
+    # lead.md + lead-architect.md concatenated.
+    core = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
+    architect = Path("otto/prompts/lead-architect.md").read_text(encoding="utf-8")
+    prompt = core + "\n" + architect
 
     assert "Information Architecture Contract" in prompt
     assert "registration_isolation" in prompt
@@ -209,7 +214,9 @@ def test_architect_prompt_keeps_concise_ia_contract_requirement() -> None:
 
 
 def test_architect_prompt_prefers_short_charter_without_slicer_dependency() -> None:
-    prompt = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
+    core = Path("otto/prompts/lead.md").read_text(encoding="utf-8")
+    architect = Path("otto/prompts/lead-architect.md").read_text(encoding="utf-8")
+    prompt = core + "\n" + architect
 
     assert "Keep prose short" in prompt
     assert "operational facts" in prompt
