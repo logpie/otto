@@ -3,6 +3,134 @@
 Things deliberately not in v5, with rationale for deferral and pointers
 to where they connect.
 
+## NEXT-2 — Foundation test doubles must be endpoint stubs, not real-router-loaders
+
+**Status:** queued. Discovered 2026-05-21 in the agentic-changes
+validation run (`linkboard-validate-agentic-131728`).
+
+### What was tried
+
+The `lead-architect.md` prompt edit (commit `4247c922e`) told the
+foundation Lead: "Provide test doubles for sibling cross-feature
+dependencies." The intent: features with cross-contract test needs
+(Feature B's tags tests need Feature A's auth endpoints to fetch a
+token) should use foundation-provided mocks in their leaf tests
+instead of declaring `partial` because their own worktree doesn't
+contain sibling code.
+
+### What the agent did
+
+Foundation built `backend/app/testing/mocks.py` with:
+
+```python
+def create_test_client() -> TestClient:
+    db_state = InMemoryDB()
+    test_app = FastAPI()
+    ...
+    register_routers(test_app)  # ← loads ALL router files from filesystem
+    return TestClient(test_app)
+```
+
+The `register_routers` step loads REAL router code from disk. For
+Feature B's `test_filter_bookmarks_by_tag` to actually exercise the
+bookmarks endpoint, the bookmarks router file has to physically exist
+in Feature B's worktree. Since Feature B doesn't own that file, it
+copied Feature A's `auth.py` and `bookmarks.py` to its worktree.
+Partition violation. Branch ancestry verification failed at merge.
+
+### Why the prompt was insufficient
+
+The phrase "test doubles" was interpreted by the agent as "test
+infrastructure that uses real code." A literal reading: doubles
+should STAND IN for sibling code, not require it. The agent went
+with the engineer-intuitive shape (in-memory DB + real router loading)
+because that's what "test client" usually means in FastAPI; it
+optimized for what most projects do, not for the cross-feature
+isolation constraint Otto operates under.
+
+### What the doubles should actually look like
+
+Endpoint stubs that:
+
+1. Register the contract-shaped endpoints **without importing sibling
+   router files**. Auth example: `backend/app/testing/auth_stub.py`
+   exports a `register_auth_stub(app)` function that adds:
+   `app.post("/api/auth/register", lambda body: {"token": "stub-{email}"})`,
+   `app.get("/api/auth/me", lambda token: {"email": "stub@example.com"})`.
+   No `from app.routers.auth import router`. No filesystem dependency.
+2. Be **shaped by foundation_contracts**. The architect declares the
+   contract (the API surface, the response shape); the stub
+   implements that contract minimally. Same authority that decides
+   the contract decides the stub.
+3. Be **explicitly opt-in per test**. Feature B's conftest:
+   ```python
+   from app.testing.auth_stub import register_auth_stub
+   @pytest.fixture
+   def client():
+       app = FastAPI()
+       register_auth_stub(app)
+       # Feature B's own router(s) follow:
+       from app.routers.tags import router as tags_router
+       app.include_router(tags_router)
+       return TestClient(app)
+   ```
+   Sibling features are stubbed; the feature-under-test is real.
+
+### The chain of responsibility
+
+For this to work end-to-end:
+
+| Agent | Responsibility |
+|---|---|
+| Foundation Lead | Emit per-contract endpoint stub files (`backend/app/testing/auth_stub.py`, `..._stub.py` per shared contract). Declare each stub in `foundation_contracts` with `testing_only:true` |
+| Root Lead writing child intents | Tell sibling features: "for tests that need sibling-owned endpoints, import the foundation's stubs; DO NOT copy sibling code." Concrete: name the stub paths in the intent's "shared modules you import" section |
+| Feature Lead | Use the stubs. Do NOT copy sibling code |
+| Integration Lead | At integration, real router code is present → tests can run against either stubs or real routers; verify both shapes |
+
+### Connects to
+
+- The `lead-architect.md` "Provide test doubles" section (commit
+  `4247c922e`) is where the foundation prompt lives — needs the
+  sharpening described above.
+- The `lead.md` child-intent rubric (F-7, commit `9d499cc13`) needs
+  to add "name the stub paths in the intent's 'shared modules' list."
+- Task #81's LAND-with-annotation (commit `1741223e8`) was the
+  PATCH for the consequence (Feature B partial cascading); this is
+  the PROTOCOL fix (Feature B can pass cleanly).
+
+### Suggested first commits
+
+1. Sharpen `lead-architect.md`: replace "test doubles" prose with
+   the concrete shape (endpoint stubs, no sibling imports,
+   declared in foundation_contracts). Include the stub example.
+2. Update `lead.md` F-7 rubric: child intents MUST include a
+   "shared stubs to import" list when the feature has cross-contract
+   tests.
+3. Add a foundation-gate check: does each declared `foundation_contracts`
+   entry with `testing_only:true` actually have a stub file at the
+   declared path? Same shape as the existing partition checks.
+4. Validate via fresh linkboard. Expected outcome: Feature B's
+   conftest imports `auth_stub`, no copying of sibling code, all
+   tests pass at leaf time, no branch-ancestry violation, aggregate
+   verdict = pass.
+
+### Why this matters
+
+The "honest cross-feature isolation partial" problem doesn't go away
+with one prompt edit. The shape of the doubles is the load-bearing
+detail; the chain from "foundation provides X" → "children use X"
+needs every link to know what X is. Today, only the foundation knows.
+
+### Risk
+
+Medium. Stubs that drift from the real router's response shape break
+integration. Mitigation: foundation_contracts declares the response
+shape; both the stub and the real router are required to match it
+(today's contract gate already enforces this for the real router; we
+extend it to the stub).
+
+---
+
 ## NEXT — Spec + journeys as a verified pair (auto-derived, human-editable)
 
 **Status:** queued. Start after the current architectural pass is live-validated.
