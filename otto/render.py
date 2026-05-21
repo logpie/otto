@@ -415,6 +415,13 @@ def render_html(packet: ProofPacket, *, session_dir: Path | None = None) -> str:
     # Audit section
     parts.append(_render_audit_section(packet, session_dir=session_dir))
 
+    # Verification advisories — surfaces findings the verifier flagged but
+    # didn't loud-enough to demote the verdict (page_has_ia_route, entity
+    # empty-state gaps, action-not-named-in-tests, etc.). After P0a moved
+    # these to ADVISORY_KINDS the agent's verdict is authoritative; this
+    # section ensures the findings still get human review.
+    parts.append(_render_verification_advisories(session_dir=session_dir))
+
     # Known limitations
     parts.append(_render_limitations(packet))
 
@@ -623,6 +630,57 @@ def _render_audit_section(packet: ProofPacket, *, session_dir: Path | None) -> s
                 rel = _relative_to_session(o, session_dir)
                 parts.append(f'<li><a href="{escape(rel)}" target="_blank">{escape(Path(o).name)}</a></li>')
             parts.append("</ul>")
+    return "\n".join(parts)
+
+
+def _render_verification_advisories(*, session_dir: Path | None) -> str:
+    """Render the verification_plan.json findings (advisory + gate) so
+    operators see what the verifier flagged even when the verdict was
+    `pass`. Empty section if no plan file or no findings.
+    """
+    if session_dir is None:
+        return ""
+    try:
+        from otto.v5_verification_plan import load_advisory_findings
+    except ImportError:
+        return ""
+    try:
+        findings = load_advisory_findings(session_dir)
+    except Exception:  # noqa: BLE001
+        return ""
+    advisories = findings.get("advisories") or []
+    gates = findings.get("gate_failures") or []
+    journeys = findings.get("journey_failures") or []
+    if not (advisories or gates or journeys):
+        return ""
+    parts = ["<h2>Verification advisories</h2>"]
+    if gates or journeys:
+        parts.append(
+            "<p><strong>Gate / journey failures (the verifier demoted the verdict on these):</strong></p>"
+        )
+        parts.append("<ul>")
+        for f in gates + journeys:
+            parts.append(
+                f"<li>❌ <code>{escape(str(f.get('kind') or ''))}/"
+                f"{escape(str(f.get('id') or ''))}</code> — "
+                f"{escape(str(f.get('detail') or '')[:300])}</li>"
+            )
+        parts.append("</ul>")
+    if advisories:
+        parts.append(
+            "<p><strong>Advisories (real findings; verdict NOT demoted):</strong> "
+            "the agent's live-verified verdict is authoritative, but these "
+            "findings represent real spec↔CHARTER drift or missing-coverage "
+            "signals that may need operator follow-up.</p>"
+        )
+        parts.append("<ul>")
+        for f in advisories:
+            parts.append(
+                f"<li>⚠️ <code>{escape(str(f.get('kind') or ''))}/"
+                f"{escape(str(f.get('id') or ''))}</code> — "
+                f"{escape(str(f.get('detail') or '')[:300])}</li>"
+            )
+        parts.append("</ul>")
     return "\n".join(parts)
 
 

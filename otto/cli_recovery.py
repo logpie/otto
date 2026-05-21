@@ -190,6 +190,69 @@ def _register_status_command(recover_group: click.Group) -> None:
             for c in plan.concerns:
                 console.print(f"    • {c}")
 
+        # Verification advisories from the most recent run's
+        # verification_plan.json — surface doc-coherence / quality flags
+        # the agent's authoritative verdict didn't demote on. This closes
+        # the "operator reads pass and never opens proof-packet.json" gap
+        # P0a's demote-to-advisory introduced.
+        _print_verification_advisories(project_dir)
+
+
+def _print_verification_advisories(project_dir: Path) -> None:
+    """Find the most recent run's session_dir + render its verification
+    advisories. Silent if no session OR no findings."""
+    try:
+        from otto import paths
+        from otto.v5_verification_plan import load_advisory_findings
+
+        latest = paths.resolve_pointer(project_dir, paths.LATEST_POINTER)
+        if latest is None:
+            # Fallback: glob the sessions dir for the most-recent one.
+            sessions_root = paths.sessions_root(project_dir)
+            if not sessions_root.exists():
+                return
+            candidates = sorted(
+                sessions_root.iterdir(),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not candidates:
+                return
+            latest = candidates[0]
+        findings = load_advisory_findings(latest)
+    except Exception:  # noqa: BLE001 — best-effort
+        return
+    advisories = findings.get("advisories") or []
+    gates = findings.get("gate_failures") or []
+    journeys = findings.get("journey_failures") or []
+    if not (advisories or gates or journeys):
+        return
+    console.print(f"\n[bold]Verification advisories[/bold] [dim]({latest.name})[/dim]")
+    if gates or journeys:
+        console.print(
+            f"  [red]✗ {len(gates) + len(journeys)} gate/journey failure(s) "
+            "(verdict demoted)[/red]"
+        )
+        for f in (gates + journeys)[:8]:
+            console.print(
+                f"    [red]·[/red] {f.get('kind')}/{f.get('id')}: "
+                f"{str(f.get('detail') or '')[:140]}"
+            )
+        if len(gates + journeys) > 8:
+            console.print(f"    [dim]... and {len(gates + journeys) - 8} more[/dim]")
+    if advisories:
+        console.print(
+            f"  [yellow]· {len(advisories)} advisory finding(s) "
+            "(verdict NOT demoted)[/yellow]"
+        )
+        for f in advisories[:8]:
+            console.print(
+                f"    [yellow]·[/yellow] {f.get('kind')}/{f.get('id')}: "
+                f"{str(f.get('detail') or '')[:140]}"
+            )
+        if len(advisories) > 8:
+            console.print(f"    [dim]... and {len(advisories) - 8} more[/dim]")
+
 
 def _register_reset_verdict_command(recover_group: click.Group) -> None:
     @recover_group.command("reset-verdict")
