@@ -2945,6 +2945,20 @@ def _foundation_isolation_feedback(
                     "overlaps": overlaps,
                 })
 
+    # Structural backstop (audit-prompts.md task #72 / F-3): the partition can
+    # be self-consistent on paper but the foundation may still have COMMITTED
+    # files into a feature-owned region. The runtime union-guard catches this
+    # ~25 min later during integration; catching it here (before features
+    # dispatch) saves the wasted build time. Linkboard 2026-05-21: foundation
+    # committed BookmarksPage.tsx + TagsPage.tsx, both feature-owned. The
+    # architect's narrative was self-aware of the violation but rationalized
+    # past it; the prompt rule alone is insufficient defense — this is the
+    # structural one.
+    findings.extend(_foundation_seeded_feature_path_findings(
+        architect_task_id=architect_task_id,
+        feature_owners=feature_owners,
+    ))
+
     if not findings:
         return None
     return {
@@ -2956,6 +2970,130 @@ def _foundation_isolation_feedback(
         "findings": findings,
         "_written_at": iso_timestamp(),
     }
+
+
+def _foundation_seeded_feature_path_findings(
+    *,
+    architect_task_id: str,
+    feature_owners: list[tuple[str, list[str]]],
+) -> list[dict[str, Any]]:
+    """Return findings for every path the foundation/architect committed that
+    falls inside a feature's declared `owned_paths`.
+
+    Operates on the architect's build branch (`i2p/build/<architect_tid>`)
+    vs. its integration target (`main` for root architects). Empty result on
+    fresh greenfield runs where the architect hasn't pushed anything; also
+    empty if every feature has no declared `owned_paths` yet (the architect
+    is the one who writes those into CHARTER, so a pre-CHARTER state is
+    legitimately empty).
+
+    Thin wrapper: locates project_dir + base_branch + committed paths from git,
+    then delegates the path-intersection to `_compute_foundation_seeded_findings`
+    which is pure-function and unit-testable.
+    """
+    from otto.v5_branching import child_branch_name, integration_branch_name
+
+    if not feature_owners:
+        return []
+    project_dir = _locate_project_dir_for_branch(architect_task_id)
+    if project_dir is None:
+        return []
+    architect_branch = child_branch_name(architect_task_id)
+    base_branch = integration_branch_name(_parent_task_id_of(project_dir, architect_task_id))
+    committed_paths = _branch_committed_paths(project_dir, base_branch, architect_branch)
+    return _compute_foundation_seeded_findings(
+        committed_paths=committed_paths,
+        feature_owners=feature_owners,
+        architect_task_id=architect_task_id,
+    )
+
+
+def _compute_foundation_seeded_findings(
+    *,
+    committed_paths: list[str],
+    feature_owners: list[tuple[str, list[str]]],
+    architect_task_id: str,
+) -> list[dict[str, Any]]:
+    """Pure helper: emit a `foundation_seeded_feature_path` finding for every
+    feature whose `owned_paths` intersect with the architect's committed paths.
+    """
+    if not committed_paths or not feature_owners:
+        return []
+    findings: list[dict[str, Any]] = []
+    for feature_id, owned_paths in feature_owners:
+        if not owned_paths:
+            continue
+        seeded = sorted({
+            committed
+            for committed in committed_paths
+            for owned in owned_paths
+            if _path_overlaps(committed, owned)
+        })
+        if seeded:
+            findings.append({
+                "kind": "foundation_seeded_feature_path",
+                "feature_task_id": feature_id,
+                "owned_paths": owned_paths,
+                "seeded_paths": seeded,
+                "architect_task_id": architect_task_id,
+                "guidance": (
+                    "The foundation/architect committed files that the CHARTER "
+                    "declares as feature-owned. Either remove them from the "
+                    "architect's branch and rely on the feature to create them "
+                    "(use an aggregator pattern so the loader graph resolves "
+                    "without the file), OR update the CHARTER partition if "
+                    "those files genuinely belong to the foundation."
+                ),
+            })
+    return findings
+
+
+def _locate_project_dir_for_branch(architect_task_id: str) -> Path | None:
+    """Locate the project directory whose graph contains this architect.
+
+    Uses the dispatch process's CWD by convention (same pattern other helpers
+    in `_foundation_isolation_feedback`'s call path rely on). Returns None
+    if the architect's worktree isn't where expected — the seeded-path check
+    is best-effort and prefers a silent skip over a false positive.
+    """
+    cwd = Path.cwd()
+    worktree = cwd / ".worktrees" / architect_task_id
+    if worktree.is_dir():
+        return cwd
+    return None
+
+
+def _parent_task_id_of(project_dir: Path, task_id: str) -> str | None:
+    from otto.queue.task_graph import read_graph
+
+    try:
+        task = (read_graph(project_dir).get("tasks") or {}).get(task_id)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(task, dict):
+        return None
+    pid = task.get("parent_task_id")
+    return str(pid) if pid else None
+
+
+def _branch_committed_paths(
+    project_dir: Path, base_branch: str, head_branch: str
+) -> list[str]:
+    """Paths the head branch added vs base, as a sorted unique list.
+
+    Uses `git diff --name-only <base>..<head>` rather than examining the
+    worktree, so this works after the architect's branch has been merged
+    into a temporary integration branch and is now sitting alone again.
+    """
+    try:
+        out = _git_capture(
+            project_dir,
+            ["diff", "--name-only", f"{base_branch}..{head_branch}"],
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    return sorted({line.strip() for line in out.splitlines() if line.strip()})
 
 
 
