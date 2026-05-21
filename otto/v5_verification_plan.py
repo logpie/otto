@@ -286,12 +286,25 @@ def validate_lead_verdict(
         else []
     )
     journey_failures = failed_journey_ids(journey_verdicts) if journey_verdicts else []
-    failed_required = [c for c in checks if c.get("required", True) and c.get("status") == "fail"]
+    # P0a (true): demote on CHECK_KINDS failures only. The producer-set
+    # `required` flag is unreliable — every `_check(...)` call defaults to
+    # `required=True`, so ADVISORY_KINDS checks (page_has_ia_route,
+    # entity_has_empty_state, structured_contract_present) used to demote
+    # the verdict despite being meant as advisories. P0a moved those kinds
+    # to ADVISORY_KINDS in `load_advisory_findings`, but the gate here still
+    # read `required` — so the agent's live-verified `pass` was getting
+    # downgraded to `partial` by doc-vs-doc string matches. Centralize on
+    # the kind whitelist instead: it's the single source of truth for
+    # what demotes.
+    gate_failures = [
+        c for c in checks
+        if c.get("status") == "fail" and c.get("kind") in CHECK_KINDS
+    ]
 
     final_verdict = initial_verdict
     if verification_contract_failures:
         final_verdict = "partial" if final_verdict == VERDICT_PASS else final_verdict
-    if final_verdict == VERDICT_PASS and failed_required:
+    if final_verdict == VERDICT_PASS and gate_failures:
         final_verdict = "partial"
     if final_verdict == VERDICT_PASS and journey_failures:
         final_verdict = "partial"
@@ -314,7 +327,7 @@ def validate_lead_verdict(
         "journey_failures": journey_failures,
         "summary": {
             "total": len(checks),
-            "failed": len(failed_required),
+            "failed": len(gate_failures),
             "skipped": len([c for c in checks if c.get("status") == "skipped"]),
             "advisories": len(advisories),
             "advisory_warnings": len([a for a in advisories if a.get("status") == "warn"]),

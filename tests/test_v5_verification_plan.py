@@ -657,7 +657,15 @@ def test_mutating_action_feedback_text_search_is_advisory(tmp_path: Path) -> Non
     assert outcome.final_verdict == "pass"
 
 
-def test_entity_empty_state_failure(tmp_path: Path) -> None:
+def test_entity_empty_state_failure_is_advisory_not_gate(tmp_path: Path) -> None:
+    """P0a invariant: advisory-kind checks (entity_has_empty_state,
+    page_has_ia_route, structured_contract_present) MUST NOT downgrade
+    the agent's `pass`. The check is recorded for the audit trail; the
+    verdict respects the agent. Regression test for the 2026-05-21
+    linkboard validation finding: producers emit these with
+    `required=True` (default), and the demote logic used to read that
+    flag — so doc-vs-doc string-match `entity_has_empty_state`
+    "failures" silently downgraded live-verified passes."""
     session = tmp_path / "session"
     _passing_project(tmp_path, session)
     _write_contract(tmp_path, session, ia=_ia(cta=False))
@@ -671,7 +679,10 @@ def test_entity_empty_state_failure(tmp_path: Path) -> None:
         matrix_scope="leaf",
     )
 
+    # Check is recorded (audit trail intact)…
     assert _checks_by_kind(outcome.verification_plan)["entity_has_empty_state"][0]["status"] == "fail"
+    # …but the verdict is NOT demoted (the whole point of ADVISORY_KINDS).
+    assert outcome.final_verdict == "pass"
 
 
 def test_no_stub_text_failure(tmp_path: Path) -> None:
