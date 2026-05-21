@@ -639,7 +639,14 @@ def test_uncovered_intent_claim_warns() -> None:
     assert any("claim.audit_log" in warning for warning in warnings)
 
 
-def test_unreferenced_primary_action_warns() -> None:
+def test_unreferenced_primary_action_does_not_warn() -> None:
+    """Action-coverage warnings were removed because they pressured the
+    spec-compile agent to inflate journey counts (each journey costs
+    2-3 min of integration drive time). Action correctness is verified
+    by leaf-time tests written by feature builders; journeys are minimal
+    representative samples of the cross-feature E2E flow, not coverage
+    maps. See the spec-compile prompt's 'Journeys are MINIMAL
+    representative samples' section."""
     spec = _valid_spec()
     spec.core_entities[0]["primary_actions"].append({
         "id": "issue.delete",
@@ -651,7 +658,9 @@ def test_unreferenced_primary_action_warns() -> None:
 
     warnings = validate_structured_spec(spec, strict=True)
 
-    assert any("issue.delete" in warning for warning in warnings)
+    # The action is uncovered by any journey; no warning is emitted
+    # (intentional — see docstring).
+    assert not any("issue.delete" in w for w in warnings)
 
 
 def test_webapp_root_cold_start_journey_gap_warns() -> None:

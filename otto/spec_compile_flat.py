@@ -413,18 +413,22 @@ def validate_structured_spec(spec: Any, *, strict: bool = False) -> list[str]:
     warnings.extend(product_warnings)
     errors.extend(product_errors)
 
-    covered_action_ids = {
-        str(action_id)
-        for journey in journeys
-        for action_id in _as_list(journey.get("covers_primary_actions"))
-        if str(action_id).strip()
-    }
-    for action_id in sorted(action_ids):
-        if action_id not in covered_action_ids:
-            warnings.append(
-                f"core_entities.primary_actions id {action_id!r} is not covered by any behavior_journey"
-            )
-
+    # NOTE: previously this section emitted per-action "not covered by
+    # any behavior_journey" warnings, which pressured the spec-compile
+    # agent to inflate journey counts to silence the lint. Inflated
+    # journey counts multiply integration drive time (~2-3 min per
+    # journey driven live). The action-coverage warning is removed in
+    # favor of the prompt-level rule: "Journeys are MINIMAL
+    # representative samples, not coverage maps." Action correctness
+    # is verified by leaf-time tests; journeys verify the
+    # cross-feature E2E shape.
+    #
+    # The per-claim orphan check remains: a claim that has no backing
+    # in actions, fields, quality_constraints, OR any journey
+    # description is a malformed-spec signal worth surfacing. This
+    # does NOT pressure additional journeys (the agent can satisfy
+    # the check by referencing the claim from existing journey
+    # descriptions or by tying it to an action/field).
     journey_text = "\n".join(str(j.get("description") or "") for j in journeys)
     for claim in intent_claims:
         claim_id = _obj_id(claim)
@@ -596,21 +600,21 @@ Guidance:
 - For an `api` journey, `verification_level` AND `probe_kind` are JOURNEY-level fields (siblings of `pass_model`, exactly like `verification_level` is for ui journeys) — NOT keys inside `pass_model`. An api journey missing the journey-level `probe_kind` fails the schema. The `http_api` pass_model itself has NO `actions`/`final_dom_assertions` (that is the UI shape); it MUST be a `steps` array where every step has `path` + `method` + `expect_status`, and at least one step MUST carry a strong payload assertion — `expect_json`, `expect_body_contains`, `expect_json_path`, or `extract` (a status code alone is NOT sufficient and fails the contract). Concrete example for an `http_api` journey (PAT auth → POST create → GET verify), showing the journey-level fields and the pass_model together:
   `"verification_level": "api", "probe_kind": "http_api", "pass_model": {{"steps": [{{"name": "create issue", "method": "POST", "path": "/api/issues", "headers": {{"Authorization": "Bearer $PAT"}}, "body": {{"title": "Example"}}, "expect_status": 201, "expect_json": {{"identifier": "ENG-1"}}, "extract": {{"issue_id": "$.id"}}}}, {{"name": "fetch it back", "method": "GET", "path": "/api/issues/{{issue_id}}", "headers": {{"Authorization": "Bearer $PAT"}}, "expect_status": 200, "expect_body_contains": "Example"}}]}}`
 - Do not use route-loaded, HTTP-200, body-present, skeleton, or generic text as the only success observable.
-- Use at most 5 representative critical flows; avoid DOM APIs.
 - IDs should be terse and stable, e.g. `issue.create` or `report.export`.
 - Consolidate repeated or low-priority claims; intent_claims cap <= 30.
 - Prefer useful product structure over perfect cross-reference coverage. Build agents can reason from context.
 
-## Journey coverage is YOUR responsibility, not a downstream concern
+## Journeys are MINIMAL representative samples of critical flows, not coverage maps
 
-Before you emit the spec, walk every declared `core_entities[*].primary_actions[*].id` and every `intent_claims[*].id`. For each, ask: is this exercised by at least one `behavior_journey`?
+Behavior journeys are expensive: the integration verifier drives each one live via the real browser (or curl, for api journeys), one atomic action at a time, ~15-30s per action. Five journeys with five steps each is ~10 min of integration drive time.
 
-- If yes → fine, move on.
-- If no → either (a) add a journey that covers it, OR (b) emit a `coverage_exception` entry on that action/claim with a single-sentence reason (e.g., `"reason": "diagnostic-only endpoint, not part of user-visible flow"`). Future-Otto verifiers will accept either signal; what they will NOT accept is a silent gap.
+Pick the FEWEST journeys that exercise the cross-feature user-visible E2E flow. As a heuristic for typical products: **1-3 journeys** total — usually one ui journey covering the core E2E flow plus one api journey covering the same flow at the HTTP level. More journeys are valid only when the cross-feature critical flows are genuinely distinct (e.g., a workflow product with `assign`, `comment`, and `complete` flows that each touch different feature combinations).
 
-`coverage_exception` is a per-id field, e.g. `"id": "bookmark.search", "coverage_exception": "covered by api_full_lifecycle implicitly via list-with-q parameter"`.
+Action coverage is NOT a journey concern. Individual `primary_actions[*].id` are covered by leaf-time unit/integration tests written by feature builders — those tests are cheap (milliseconds per test) and cover edge cases, error paths, and per-action behavior. Journeys verify the SHAPE of the user-visible flow, not every action's correctness.
 
-The downstream `lint_warnings` mechanism exists for failures of this self-check — it's not a polite "fyi"; it's a reminder you skipped step. The reviewer reading the spec needs to know which actions are journey-covered and which are accepted as exceptions; without your explicit decision, every uncovered action looks like a bug.
+If a declared action or claim has no journey: that's fine. The leaf builder will write tests for it; the integration journey will exercise the few that are user-visible. Do NOT add journeys to "cover" actions one-by-one; that inflates integration time without proportional value.
+
+When in doubt: emit FEWER journeys. The integration Lead drives every journey you emit; the cost of an unnecessary journey is real wall-time + dollars, and the value of catching the rare case it would have caught is small.
 """
 
 
