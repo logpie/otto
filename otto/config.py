@@ -901,6 +901,27 @@ def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
                 logging.getLogger("otto.config").warning(
                     "Invalid autopilot config %r, using defaults", v,
                 )
+        elif k == "defaults" and isinstance(v, dict):
+            # User-friendly: `defaults: {provider, model, effort, ...}` is a
+            # common mental-model shape (many config systems group global
+            # defaults this way). Otto's canonical schema puts these keys
+            # top-level, but accepting the nested form prevents silent
+            # ignore-then-fall-back-to-Sonnet when a user writes the
+            # intuitive shape. We flatten the nested form into top-level
+            # so `effective_agent_model` / `agent_provider` see them.
+            # The user's TOP-LEVEL value (from `raw`) wins over their
+            # nested `defaults.X` value — we only warn when the SAME key
+            # was set in both places.
+            import logging
+            _log = logging.getLogger("otto.config")
+            for nested_k, nested_v in v.items():
+                if nested_k in raw:
+                    _log.warning(
+                        "otto.yaml: defaults.%s ignored — top-level %s also set",
+                        nested_k, nested_k,
+                    )
+                else:
+                    merged[nested_k] = nested_v
         else:
             merged[k] = v
     return merged
