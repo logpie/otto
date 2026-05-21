@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, cast
 
 from otto.journey_scope_policy import ExecutionScope, VerificationLevel, applicability_for
@@ -10,6 +12,12 @@ from otto.schemas import VERDICT_UNVERIFIED
 PASSING_STATUSES = frozenset({"pass", "passed"})
 NON_PASS_STATUSES = frozenset({"fail", "failed", "unverified", "skip", "skipped", "defer", "deferred"})
 
+# Agent's verdict.json detail needs to be at least this many chars to be
+# considered "the agent actually observed something" vs "the agent wrote a
+# stub". Keeps the fail-closed invariant: an agent that just stamped
+# `passed: True` with no observation does not earn a pass.
+_MIN_CREDIBLE_DETAIL_CHARS = 40
+
 
 def resolve_journey_verdicts(
     *,
@@ -17,12 +25,29 @@ def resolve_journey_verdicts(
     execution_scope: ExecutionScope,
     executor_results: list[dict[str, Any]] | None = None,
     registered_executor_levels: set[str] | None = None,
+    session_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Compute every journey verdict through one fail-closed path.
 
     Controller-run executor results are the only pass source. For applicable
     journeys, missing or malformed executor proof becomes non-pass.
+
+    Phase-1 unified verifier: when ``session_dir`` is given, also pulls
+    agent-self-verified executor results from any verdict.json under
+    ``session_dir`` (top-level OR ``integration/verdict.json``). The
+    integration Lead drives behavior journeys via chrome-devtools MCP
+    in-session and records per-journey verdicts + evidence in its own
+    verdict.json — those records are the post-Phase-1 equivalent of what
+    the deprecated Python journey runner used to write to
+    ``journey-verdicts.json``. Without this, every UI journey would
+    silently fail-closed as "registered executor for ui produced no
+    usable result" simply because the deterministic Python runner no
+    longer runs.
     """
+    aggregated: list[dict[str, Any]] = list(executor_results or [])
+    if session_dir is not None:
+        aggregated.extend(agent_self_verified_executor_results(session_dir))
+    executor_results = aggregated
 
     executor_by_id = _index_results(executor_results or [])
     registered = set(registered_executor_levels or {"ui", "api"})
@@ -69,6 +94,75 @@ def resolve_journey_verdicts(
             source="journey_verdict_sink",
             detail=f"no registered executor for verification_level {level!r}",
         ))
+    return out
+
+
+def agent_self_verified_executor_results(session_dir: Path) -> list[dict[str, Any]]:
+    """Convert the integration Lead's verdict.json journeys[] into
+    executor-result entries the fail-closed sink will accept.
+
+    The integration Lead's prompt requires it to (a) drive each behavior
+    journey live via chrome-devtools / Bash, (b) save evidence files
+    (screenshots, etc.) under ``integration/screenshots/`` or similar,
+    and (c) record per-journey verdicts in ``verdict.json``. Those
+    records are the post-Phase-1 equivalent of what the deprecated
+    Python journey runner used to write to ``journey-verdicts.json``.
+
+    Credibility (so the fail-closed invariant survives): a journey
+    earns ``proof_usable=True`` only when ALL of:
+
+      1. ``passed: True`` in the agent's verdict
+      2. ``detail`` is at least ``_MIN_CREDIBLE_DETAIL_CHARS`` chars
+         (rejects stub claims like just ``"passed"`` with no
+         observation)
+      3. Parent ``verdict.json`` has a non-empty ``evidence`` list
+         (the prompt requires evidence; an agent that forgot still
+         fails-closed)
+
+    Without all 3, the entry still appears in the result so the sink
+    can produce an honest signal, but ``proof_usable=False`` and the
+    sink's ``_normalize_executor_verdict`` will mark it
+    ``status=unverified`` — same as today's behavior.
+    """
+    out: list[dict[str, Any]] = []
+    for path in (
+        session_dir / "verdict.json",
+        session_dir / "integration" / "verdict.json",
+    ):
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        journeys = payload.get("journeys") or []
+        if not isinstance(journeys, list):
+            continue
+        evidence = payload.get("evidence") or []
+        has_evidence = isinstance(evidence, list) and any(
+            isinstance(e, str) and e.strip() and not e.strip().startswith("#")
+            for e in evidence
+        )
+        for journey in journeys:
+            if not isinstance(journey, dict):
+                continue
+            jid = str(journey.get("id") or "").strip()
+            if not jid:
+                continue
+            passed = bool(journey.get("passed"))
+            detail = str(journey.get("detail") or "")
+            credible = (
+                passed and len(detail) >= _MIN_CREDIBLE_DETAIL_CHARS and has_evidence
+            )
+            out.append({
+                "id": jid,
+                "status": "pass" if passed else "fail",
+                "proof_usable": credible,
+                "detail": detail or "agent self-verified (no detail)",
+                "source": "integration_lead_self_verify",
+            })
     return out
 
 

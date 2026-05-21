@@ -146,11 +146,17 @@ async def run_verify_for_lead(
             encoding="utf-8",
         )
 
+    # Phase-1 unified verifier: pass session_dir so resolve_journey_verdicts
+    # auto-pulls agent-self-verified UI journey results from
+    # `<session_dir>/verdict.json`. Without this, every UI journey
+    # silently fails-closed because the deprecated Python UI runner no
+    # longer produces journey-verdicts.json.
     journey_results = resolve_journey_verdicts(
         journeys=journeys_in_scope,
         execution_scope=execution_scope,
         executor_results=api_executor_results,
         registered_executor_levels={"ui", "api"},
+        session_dir=session_dir,
     )
     api_ids = {str(journey.get("id") or "") for journey in api_journeys}
     api_results = [item for item in journey_results if str(item.get("id") or "") in api_ids]

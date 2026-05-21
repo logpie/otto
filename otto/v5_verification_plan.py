@@ -1053,30 +1053,18 @@ def _journey_verdicts_from_sink(
         execution_scope=execution_scope,
         executor_results=_load_controller_executor_results(session_dir),
         registered_executor_levels={"ui", "api"},
+        session_dir=session_dir,
     )
 
 
 def _load_controller_executor_results(session_dir: Path) -> list[dict[str, Any]]:
-    """Collect executor results from controller-run sources.
+    """Collect controller-run executor results (API executor).
 
-    Historically: API executor (`verify/api-executor-results.json`) and the
-    deterministic Python UI journey runner
-    (`journeys/**/journey-verdicts.json`).
-
-    Phase 1 added a third source: the integration Lead's own `verdict.json`
-    journeys[]. When the integration Lead self-verifies behavior journeys
-    via chrome-devtools MCP in-session, IT is the controller — it writes
-    the executor evidence (screenshots, DOM dumps) to disk and records
-    each journey's pass/fail in its verdict.json. Treating those claims
-    as executor results (when an evidence file is attached) lets the
-    fail-closed journey_verdict_sink count them, instead of marking
-    every UI journey as 'no usable result' because the deprecated
-    Python runner is no longer wired.
+    Phase-1 agent-self-verified UI journeys are pulled by
+    `resolve_journey_verdicts` directly from `session_dir` — see
+    `agent_self_verified_executor_results` in `journey_verdict_sink`.
     """
     candidates = [session_dir / "verify" / "api-executor-results.json"]
-    journeys_dir = session_dir / "journeys"
-    if journeys_dir.exists():
-        candidates.extend(journeys_dir.rglob("journey-verdicts.json"))
     existing = [path for path in candidates if path.is_file()]
     existing.sort(key=lambda path: path.stat().st_mtime)
     results: list[dict[str, Any]] = []
@@ -1087,82 +1075,7 @@ def _load_controller_executor_results(session_dir: Path) -> list[dict[str, Any]]
         for item in payload.get("executor_results") or []:
             if isinstance(item, dict):
                 results.append(dict(item))
-    # Phase 1: also pull agent-self-verified journey claims from the
-    # integration Lead's verdict.json (and any session-root verdict.json
-    # for inline-mode runs that grew journey arrays). Each agent-claimed
-    # journey becomes a synthetic executor_result.
-    results.extend(_agent_self_verified_executor_results(session_dir))
     return results
-
-
-def _agent_self_verified_executor_results(session_dir: Path) -> list[dict[str, Any]]:
-    """Convert agent verdict.json journeys[] into executor-result entries.
-
-    The integration Lead's prompt requires it to (a) drive each behavior
-    journey live via chrome-devtools / Bash, (b) save evidence files
-    (screenshots, etc.) under integration/screenshots/ or similar, and
-    (c) record per-journey verdicts in verdict.json. Those records are
-    the post-Phase-1 equivalent of what the deprecated Python journey
-    runner used to write to journey-verdicts.json — treat them the same.
-
-    We mark proof_usable=True only when the agent's verdict carries a
-    non-empty `evidence` list AND the verdict isn't a textbook empty
-    skeleton. That keeps the fail-closed invariant: an agent that
-    forgot to attach evidence still gets failed-closed; an agent that
-    self-verified with screenshots+description gets counted as passing.
-    """
-    out: list[dict[str, Any]] = []
-    candidates = [
-        session_dir / "verdict.json",
-        session_dir / "integration" / "verdict.json",
-    ]
-    for path in candidates:
-        if not path.is_file():
-            continue
-        payload = _load_json(path)
-        if not isinstance(payload, dict):
-            continue
-        journeys = payload.get("journeys") or []
-        if not isinstance(journeys, list):
-            continue
-        # Evidence presence used to derive proof_usable. The integration
-        # Lead's prompt requires evidence; if it forgot, fail-closed
-        # via proof_usable=False (verdict_sink then marks unverified).
-        evidence = payload.get("evidence") or []
-        has_evidence = (
-            isinstance(evidence, list)
-            and any(
-                isinstance(e, str) and e.strip() and not e.strip().startswith("#")
-                for e in evidence
-            )
-        )
-        for journey in journeys:
-            if not isinstance(journey, dict):
-                continue
-            jid = str(journey.get("id") or "").strip()
-            if not jid:
-                continue
-            passed = bool(journey.get("passed"))
-            detail = str(journey.get("detail") or "")
-            # Require BOTH the agent's pass claim AND a non-trivial
-            # detail string (>= 40 chars — agent that just wrote
-            # "passed" with no observation is not credible) AND
-            # evidence on the parent verdict.
-            credible = (
-                passed
-                and len(detail) >= 40
-                and has_evidence
-            )
-            out.append({
-                "id": jid,
-                "status": "pass" if credible else (
-                    "pass" if passed else "fail"
-                ),
-                "proof_usable": credible,
-                "detail": detail or "agent self-verified (no detail)",
-                "source": "integration_lead_self_verify",
-            })
-    return out
 
 
 def _coverage_label(item: Any) -> str:
