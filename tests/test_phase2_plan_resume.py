@@ -228,7 +228,7 @@ def test_plan_to_json_schema_versioned(tmp_path: Path):
 
 def _otto(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(VENV_PY), "-m", "otto.cli", "v5", *args],
+        [str(VENV_PY), "-m", "otto.cli", "recover", *args],
         cwd=str(cwd), capture_output=True, text=True, timeout=30,
     )
 

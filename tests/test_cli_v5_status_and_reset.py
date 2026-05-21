@@ -16,7 +16,7 @@ VENV_PY = REPO_ROOT / ".venv" / "bin" / "python"
 def _otto(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     """Invoke `otto v5 ...` via the repo's venv."""
     return subprocess.run(
-        [str(VENV_PY), "-m", "otto.cli", "v5", *args],
+        [str(VENV_PY), "-m", "otto.cli", "recover", *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,

@@ -674,8 +674,10 @@ register_queue_commands(main)
 # Canonical run command + review affordances (otto run / list-pending / review)
 from otto.cli_run import register_run_command  # noqa: E402
 from otto.cli_review import register_review_commands  # noqa: E402
+from otto.cli_recovery import register_recover_commands  # noqa: E402
 register_run_command(main)
 register_review_commands(main)
+register_recover_commands(main)
 
 
 if __name__ == "__main__":
