@@ -208,10 +208,15 @@ def test_evidence_bearing_pass_payload_stays_pass() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runner_verification_plan_exception_downgrades_pass(
+async def test_runner_verification_plan_exception_preserves_agent_pass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """P0c contract: when the otto-internal validator crashes, the agent's
+    'pass' is PRESERVED (LAND-then-annotate) instead of silently
+    downgraded to 'unverified'. The crash becomes an advisory finding —
+    a validator bug isn't a build defect. See commit 2ff6addc3."""
+
     async def fake_agent(
         _prompt: str,
         _options: Any,
@@ -249,13 +254,10 @@ async def test_runner_verification_plan_exception_downgrades_pass(
         config={},
     )
 
-    assert result.verdict == "unverified"
-    assert result.verify_result is not None
-    assert result.verify_result["verdict"] == "unverified"
-    assert "verification matrix crashed" in result.verify_result["summary"]
-    assert (read_graph(tmp_path)["tasks"]["leaf"]).get("verdict") == "unverified"
+    assert result.verdict == "pass"
+    assert (read_graph(tmp_path)["tasks"]["leaf"]).get("verdict") == "pass"
     summary = json.loads((session_dir / "summary.json").read_text(encoding="utf-8"))
-    assert summary["verdict"] == "unverified"
+    assert summary["verdict"] == "pass"
 
 
 @pytest.mark.asyncio
