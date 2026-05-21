@@ -3197,6 +3197,7 @@ def _build_decomp_runtime_context(
     run_started_at: float | None,
     spec: FlatSpec | None = None,
     spec_path: Path | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     spec_payload = _spec_payload(spec=spec, spec_path=spec_path)
     graph = read_graph(project_dir)
@@ -3248,7 +3249,17 @@ def _build_decomp_runtime_context(
         or (config.get("defaults", {}) or {}).get("provider")
         or "claude"
     )
+    # Surface this Lead's task_role into the runtime context so
+    # `_render_lead_prompt` can decide whether to strip the architect block
+    # (audit F-1 follow-up: feature children don't need the 245-line
+    # architect guidance).
+    task_role = ""
+    if task_id:
+        entry = tasks.get(task_id)
+        if isinstance(entry, dict):
+            task_role = str(entry.get("task_role") or "feature").strip().lower()
     return {
+        "task_role": task_role,
         "max_parallel": max(1, int(max_parallel or 1)),
         "run_budget_seconds": budget,
         "run_elapsed_seconds": max(0, elapsed),

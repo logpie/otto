@@ -130,12 +130,16 @@ When you decompose:
   produce children that stay in their lane.
 <!-- audit:F-03 applied -->
 
+<!-- LEAD_ARCHITECT_BLOCK_START -->
 ## If you are the Architect / Foundation Lead
 
-Skip this section if your `task_role` in `DECOMP_RUNTIME_CONTEXT` is `feature`,
-or if you are a non-root Lead emitted by another Lead. It applies to: (a) the
-root Lead when building the scaffold inline, and (b) the dedicated
-`task_role="foundation"` child the root Lead emits.
+This section applies to (a) the root Lead when building the scaffold inline,
+and (b) the dedicated `task_role="foundation"` child the root Lead emits.
+
+If you are a feature Lead (a non-root child whose `task_role` is `feature`)
+this section is omitted from your rendered prompt — your owned paths,
+forbidden paths, and stack come from the intent text the root Lead wrote
+for you. The Hard Rules at the top of this document bind on you regardless.
 
 This section describes what you, the agent, must do if you build the scaffold
 inline, AND what your architect child must do if you emit one:
@@ -375,6 +379,8 @@ inline, AND what your architect child must do if you emit one:
   land.
 <!-- audit:F-17 applied -->
 <!-- audit:F-18 applied -->
+
+<!-- LEAD_ARCHITECT_BLOCK_END -->
 
 ## Build Inline (every Lead — feature or otherwise)
 

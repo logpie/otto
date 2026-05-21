@@ -625,6 +625,31 @@ def _template_with_runtime_block(template: str, kind: LeadKind) -> str:
     return template
 
 
+_ARCHITECT_BLOCK_START = "<!-- LEAD_ARCHITECT_BLOCK_START -->"
+_ARCHITECT_BLOCK_END = "<!-- LEAD_ARCHITECT_BLOCK_END -->"
+_ARCHITECT_BLOCK_PLACEHOLDER = (
+    "<!-- Architect / Foundation guidance omitted: not applicable to "
+    "feature Leads. See lead.md if you need it for reference. The Hard "
+    "Rules at the top of this prompt still bind. -->"
+)
+
+
+def _strip_architect_block(template: str) -> str:
+    """Remove the architect-only section between the START/END markers.
+
+    Falls back to returning the template unchanged if the markers are
+    absent or malformed — better to render a long prompt than a broken
+    one. The architect block is ~245 lines / ~3400 tokens, so this is the
+    single biggest token-budget win for feature Leads.
+    """
+    start = template.find(_ARCHITECT_BLOCK_START)
+    end = template.find(_ARCHITECT_BLOCK_END)
+    if start < 0 or end < 0 or end < start:
+        return template
+    end += len(_ARCHITECT_BLOCK_END)
+    return template[:start] + _ARCHITECT_BLOCK_PLACEHOLDER + template[end:]
+
+
 def _render_prompt(
     *,
     kind: LeadKind,
@@ -645,6 +670,23 @@ def _render_prompt(
 
     journeys_path = session_dir / "spec" / "spec.json"
     is_root = integration_branch is None
+
+    # Audit F-1 follow-up: lead.md has a 245-line architect block (the
+    # 'If you are the Architect / Foundation Lead' section). For NON-ROOT
+    # feature Leads, that's ~50% of the prompt budget spent on dead
+    # instructions — they're not designing the scaffold, they're building
+    # against one. Strip the block for them so instruction-following
+    # focuses on the rules that actually apply. Root Leads (who may
+    # build the scaffold inline OR emit a foundation child) and
+    # foundation children (task_role indicated via runtime context) keep
+    # the full block. Block markers added to lead.md preserve the source
+    # for file-grep tests.
+    if kind == "plan_or_inline" and not is_root:
+        task_role = ""
+        if isinstance(decomp_runtime_context, dict):
+            task_role = str(decomp_runtime_context.get("task_role") or "").strip().lower()
+        if task_role and task_role != "foundation":
+            template = _strip_architect_block(template)
     intent_runtime_block = _render_intent_runtime_block(
         task_id=task_id,
         intent=intent,

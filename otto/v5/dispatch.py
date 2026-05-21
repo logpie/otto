@@ -1430,6 +1430,7 @@ async def _run_child(
             max_parallel=max_parallel,
             run_started_at=run_started_at,
             spec_path=child_spec_path,
+            task_id=tid,
         ),
         on_event=on_event,
     )
