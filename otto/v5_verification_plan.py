@@ -640,6 +640,42 @@ def _advise_mutating_actions_have_feedback(root: Path, spec: dict[str, Any]) -> 
     return advisories
 
 
+def _singular_plural_variants(token: str) -> set[str]:
+    """Return common singular/plural variants of an identifier so spec/CHARTER
+    drift between e.g. `task` and `tasks` doesn't fail a literal-id check.
+
+    English plural rules are messy in general; this handles the common cases
+    that show up in entity / page / feature ids:
+      task ↔ tasks       (simple s)
+      bookmark ↔ bookmarks
+      tag ↔ tags
+      story ↔ stories    (y → ies)
+      category ↔ categories
+      box ↔ boxes        (x → es)
+      bus ↔ buses        (s → es)
+
+    Returns a set including the original token. Empty inputs return empty set.
+    """
+    token = (token or "").strip().lower()
+    if not token:
+        return set()
+    out: set[str] = {token}
+    # plural → singular
+    if token.endswith("ies") and len(token) > 3:
+        out.add(token[:-3] + "y")
+    elif token.endswith("es") and len(token) > 2 and token[-3] in "xs":
+        out.add(token[:-2])
+    elif token.endswith("s") and not token.endswith("ss"):
+        out.add(token[:-1])
+    # singular → plural
+    if token.endswith("y") and len(token) > 1 and token[-2] not in "aeiou":
+        out.add(token[:-1] + "ies")
+    elif token.endswith(("x", "s", "sh", "ch")):
+        out.add(token + "es")
+    out.add(token + "s")
+    return out
+
+
 def _check_entities_have_empty_states(spec: dict[str, Any], ia: dict[str, Any]) -> list[dict[str, Any]]:
     empty_states = [
         item for item in ia.get("empty_states") or []
@@ -651,8 +687,17 @@ def _check_entities_have_empty_states(spec: dict[str, Any], ia: dict[str, Any]) 
             continue
         entity_id = str(entity.get("id") or "")
         entity_name = str(entity.get("name") or "").lower()
+        # Match on singular/plural variants too: spec saying `task` while
+        # CHARTER's empty-state references `tasks` (or vice versa) shouldn't
+        # fail the check — they refer to the same entity. Same anti-pattern
+        # as the journey selector literal-match fixed in the unified-verifier
+        # work; relax to semantic equivalence.
+        entity_variants = (
+            _singular_plural_variants(entity_id) | _singular_plural_variants(entity_name)
+        )
         passed = any(
-            str(es.get("entity") or "").lower() in {entity_id.lower(), entity_name}
+            (str(es.get("entity") or "").strip().lower() in entity_variants)
+            or bool(_singular_plural_variants(str(es.get("entity") or "")) & entity_variants)
             for es in empty_states
         )
         checks.append(_check(

@@ -973,23 +973,52 @@ def commit_worktree(*, worktree_path: Path, message: str) -> tuple[bool, str]:
 
 
 _INTEGRATION_ALLOWED_PREFIXES = (
+    # Common JS/TS conventions
     "api/",
     "app/",
     "apps/",
     "backend/",
     "client/",
-    "docs/",
+    "components/",
     "frontend/",
+    "hooks/",
     "lib/",
+    "modules/",
     "packages/",
     "public/",
-    "scripts/",
     "server/",
-    "spec/",
     "src/",
+    "static/",
+    "web/",
+    # Python conventions
+    "config/",
+    "core/",
+    "domain/",
+    "handlers/",
+    "infrastructure/",
+    "middleware/",
+    "models/",
+    "routes/",
+    "schemas/",
+    "services/",
+    "utils/",
+    # Go conventions
+    "cmd/",
+    "internal/",
+    "pkg/",
+    # Rust workspace convention
+    "crates/",
+    # Cross-language
+    "controllers/",
+    "data/",
+    "db/",
+    "docs/",
+    "presentation/",
+    "scripts/",
+    "spec/",
     "test/",
     "tests/",
-    "web/",
+    "types/",
 )
 
 _INTEGRATION_ALLOWED_EXACT = frozenset({
