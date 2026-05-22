@@ -49,7 +49,6 @@ from otto.queue.task_graph import (
     record_task,
     refresh_contract_amendment_retry_heartbeat,
     set_contract_amendment_blocked,
-    set_verdict,
     terminalize_stale_contract_amendment_retry_if_exhausted,
     update_task_metadata,
 )
@@ -1202,47 +1201,6 @@ async def _run_child_verify_repair_packet(
         config=config,
         commit_hook=commit_hook,
     )
-
-def _refresh_child_result_from_verdict_file(
-    *,
-    project_dir: Path,
-    child_task_id: str,
-    child_session_dir: Path,
-    result: LeadResult,
-    repair: Any,
-) -> LeadResult:
-    from otto.lead import _read_agent_verdict
-
-    verify_called, payload = _read_agent_verdict(child_session_dir)
-    if not verify_called or not isinstance(payload, dict):
-        return result
-    verdict = str(payload.get("verdict") or "unverified")
-    if verdict not in {
-        VERDICT_PASS,
-        VERDICT_PARTIAL,
-        VERDICT_UNVERIFIED,
-        VERDICT_MERGE_BLOCKED,
-        VERDICT_CATASTROPHIC,
-    }:
-        verdict = "unverified"
-    result.verify_called = True
-    result.verify_result = payload
-    result.verify_result["repair_packet"] = repair.packet_path
-    result.verdict = cast(Any, verdict)
-    if verdict in {
-        VERDICT_PASS,
-        VERDICT_PARTIAL,
-        VERDICT_UNVERIFIED,
-        VERDICT_MERGE_BLOCKED,
-        VERDICT_CATASTROPHIC,
-    }:
-        set_verdict(
-            project_dir,
-            child_task_id,
-            cast(Any, verdict),
-            cost_usd=result.cost_usd,
-        )
-    return result
 
 def _carry_and_reset_prior_repair_packets(
     project_dir: Path,

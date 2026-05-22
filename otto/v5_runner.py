@@ -1665,123 +1665,13 @@ async def _repair_subtree_propagation_once(
     return True, repair.summary
 
 
-def _verify_child_branches_reached_parent(
-    *,
-    project_dir: Path,
-    parent_task_id: str,
-    on_event: Any = None,
-) -> None:
-    """Verify terminal child branch tips are reachable from their parent target."""
-    from otto.v5_branching import child_branch_name, integration_branch_name
-
-    target = "main" if parent_task_id == ROOT_TASK_ID else integration_branch_name(parent_task_id)
-    for child_id in children_of(project_dir, parent_task_id):
-        child = get_task(project_dir, child_id) or {}
-        if not _task_entry_allows_upward_merge(child):
-            continue
-
-        branches = [child_branch_name(child_id)]
-        if child.get("child_task_ids") or child.get("decomposition") == "emit":
-            branches.append(integration_branch_name(child_id))
-
-        for branch in dict.fromkeys(branches):
-            ok, detail = _branch_is_ancestor(project_dir, branch, target)
-            _emit(on_event, {
-                "event": "child_branch_ancestry_ok" if ok else "child_branch_ancestry_failed",
-                "task_id": child_id,
-                "branch": branch,
-                "target": target,
-                "detail": detail,
-            })
-            if ok:
-                continue
-            # The child built and PASSED (guarded by _task_entry_allows_
-            # upward_merge above) but its branch never reached the parent
-            # integration branch — almost always because a prior run's
-            # children_and_subtree_integration was interrupted/budget-killed
-            # AFTER the child passed but BEFORE its upward merge, or this is a
-            # resumed run that skipped the already-passed child (its merge
-            # only ever ran inside _run_child for freshly-built children).
-            # The work is done and on the branch; it just needs merging.
-            # Re-attempt the canonical upward merge before demoting — only a
-            # GENUINE conflict (merge fails / still unreachable) becomes
-            # merge_blocked. Demoting-without-merging silently drops a
-            # completed, passing feature and ships an incomplete product.
-            recovered = False
-            if branch == child_branch_name(child_id):
-                try:
-                    from otto.v5_branching import merge_child_into_integration
-
-                    m_ok, m_detail = merge_child_into_integration(
-                        project_dir=project_dir,
-                        child_task_id=child_id,
-                        parent_integration_branch=target,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    m_ok, m_detail = False, f"{type(exc).__name__}: {exc}"
-                recheck_ok, recheck_detail = _branch_is_ancestor(
-                    project_dir, branch, target
-                )
-                recovered = bool(m_ok) and recheck_ok
-                _emit(on_event, {
-                    "event": (
-                        "child_branch_remerged"
-                        if recovered
-                        else "child_branch_remerge_failed"
-                    ),
-                    "task_id": child_id,
-                    "branch": branch,
-                    "target": target,
-                    "detail": (
-                        m_detail
-                        if recovered
-                        else f"{m_detail} | recheck: {recheck_detail}"
-                    ),
-                })
-            if recovered:
-                logger.info(
-                    "recovered unmerged passed child %s: re-merged %s into %s",
-                    child_id,
-                    branch,
-                    target,
-                )
-                continue
-            logger.warning(
-                "child branch ancestry verification failed for %s: %s",
-                child_id,
-                detail,
-            )
-            set_verdict(project_dir, child_id, "merge_blocked")
-
-
-def _branch_is_ancestor(project_dir: Path, branch: str, target: str) -> tuple[bool, str]:
-    exists = subprocess.run(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
-        cwd=str(project_dir),
-        capture_output=True,
-    )
-    if exists.returncode != 0:
-        return False, f"branch {branch!r} is missing"
-
-    target_exists = subprocess.run(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target}"],
-        cwd=str(project_dir),
-        capture_output=True,
-    )
-    if target_exists.returncode != 0:
-        return False, f"target branch {target!r} is missing"
-
-    ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", branch, target],
-        cwd=str(project_dir),
-        capture_output=True,
-        text=True,
-    )
-    if ancestor.returncode == 0:
-        return True, f"{branch} reaches {target}"
-    detail = (ancestor.stderr or ancestor.stdout or "").strip()
-    suffix = f": {detail}" if detail else ""
-    return False, f"{branch} is not an ancestor of {target}{suffix}"
+# `_verify_child_branches_reached_parent` and `_branch_is_ancestor` were
+# defined locally here pre-Phase-2c but always shadowed by the
+# `from otto.v5.merge import ...` block further below — production always
+# called the merge.py versions. T1-3 (2026-05-21) deleted the local dead
+# copies; consumers still reach `otto.v5_runner._verify_child_branches_
+# reached_parent` and `otto.v5_runner._branch_is_ancestor` via the
+# re-exports at the bottom of this file.
 
 
 def _foundation_clean_boot_probe_targets(
@@ -3804,7 +3694,6 @@ from otto.v5.repair import (  # noqa: E402, F401
     _persist_successful_contract_amendment_retry,
     _preserve_timed_out_repair_work,
     _reenter_or_block_architect_contract,
-    _refresh_child_result_from_verdict_file,
     _refresh_contract_amendment_retry_heartbeat_until_stopped,
     _repair_child_merge_conflict_once,
     _repair_child_stale_target_gate_once,
@@ -3824,6 +3713,7 @@ from otto.v5.merge import (  # noqa: E402, F401
     TerminalAction,
     TerminalCause,
     _block_child_before_upward_merge,
+    _branch_is_ancestor,
     _cause_from_origin,
     _child_result_allows_upward_merge,
     _commit_integration_agent_changes,
