@@ -402,7 +402,7 @@ async def test_merge_retry_window_is_durably_non_ready_before_pass(
         }
         assert "leaf" not in ready_ids
 
-    monkeypatch.setattr(v5_runner, "_merge_child_branch", observe_window)
+    monkeypatch.setattr(v5_runner, "_commit_child_for_integration", observe_window)
 
     result = await v5_runner._run_child(
         project_dir=tmp_path,
@@ -506,7 +506,7 @@ async def test_live_long_running_merge_retry_heartbeat_prevents_false_reclaim(
             )
         )
 
-    monkeypatch.setattr(v5_runner, "_merge_child_branch", long_running_merge)
+    monkeypatch.setattr(v5_runner, "_commit_child_for_integration", long_running_merge)
 
     result = await v5_runner._run_child(
         project_dir=tmp_path,
@@ -581,7 +581,7 @@ async def test_merge_retry_atomic_claim_allows_exactly_one_merger(
             )
         )
 
-    monkeypatch.setattr(v5_runner, "_merge_child_branch", merge_once)
+    monkeypatch.setattr(v5_runner, "_commit_child_for_integration", merge_once)
 
     winner = await v5_runner._run_child(
         project_dir=tmp_path,
@@ -615,7 +615,7 @@ async def test_stale_merge_retry_is_recovered_or_bounded_terminal(
     async def successful_merge(**kwargs: object) -> None:
         recovered_merges.append(str(kwargs["child_task_id"]))
 
-    monkeypatch.setattr(v5_runner, "_merge_child_branch", successful_merge)
+    monkeypatch.setattr(v5_runner, "_commit_child_for_integration", successful_merge)
 
     for leaf_id in ("recover-leaf", "exhausted-leaf"):
         _enqueue_known(tmp_path, task_id=leaf_id, owned_paths=[f"frontend/src/features/{leaf_id}/"])

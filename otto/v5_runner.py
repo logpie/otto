@@ -3836,6 +3836,7 @@ from otto.v5.merge import (  # noqa: E402, F401
     _integration_union_guard_error_feedback,
     _integration_union_missing_contributions,
     _integration_union_reason_text,
+    _commit_child_for_integration,
     _line_hash,
     _merge_child_branch,
     _merge_integration_union_state,

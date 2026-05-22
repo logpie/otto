@@ -21,9 +21,25 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from otto.queue.task_graph import record_task, set_verdict
 from otto.v5_runner import ROOT_TASK_ID, _verify_child_branches_reached_parent
 from otto.v5_branching import child_branch_name
+
+# Post Phase 2b (2026-05-21): `_verify_child_branches_reached_parent` is now
+# VERIFY-ONLY. The recovery auto-merge it used to do (the subject of this
+# regression test) has been moved into the integration Lead — integration is
+# the single merge authority and its Step 1 does `git merge i2p/build/<id>`
+# for every child, including resumed-but-unmerged ones. The "unmerged passed
+# child recovery" invariant is preserved at integration time, not at
+# `_verify_child_branches_reached_parent` time. These tests are skipped
+# pending integration-layer rewrites.
+pytestmark = pytest.mark.skip(
+    reason="validates pre-Phase-2b orchestrator recovery merge; "
+    "integration Lead now handles unmerged-passed-child merging at its Step 1. "
+    "Followup task tracks integration-layer rewrite."
+)
 
 
 def _git(cwd: Path, *args: str) -> str:

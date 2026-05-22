@@ -1314,14 +1314,12 @@ async def _run_child(
                 )
             )
             try:
-                await _v5r._merge_child_branch(
+                await _v5r._commit_child_for_integration(
                     project_dir=project_dir,
                     child_task_id=tid,
                     child_worktree=child_worktree,
-                    child_session_dir=retry_session_dir,
                     parent_integration_branch=parent_integration_branch,
                     result=retry_result,
-                    config=config,
                     on_event=on_event,
                 )
             finally:
@@ -1456,14 +1454,12 @@ async def _run_child(
             on_event=on_event,
         )
         if _v5r._child_result_allows_upward_merge(project_dir, tid, result):
-            await _v5r._merge_child_branch(
+            await _v5r._commit_child_for_integration(
                 project_dir=project_dir,
                 child_task_id=tid,
                 child_worktree=child_worktree,
-                child_session_dir=child_session_dir,
                 parent_integration_branch=parent_integration_branch,
                 result=result,
-                config=config,
                 on_event=on_event,
             )
 

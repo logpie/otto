@@ -771,7 +771,18 @@ def _verify_child_branches_reached_parent(
     parent_task_id: str,
     on_event: Any = None,
 ) -> None:
-    """Verify terminal child branch tips are reachable from their parent target."""
+    """Verify-only: emit an event for each passed child's branch state.
+
+    Post Phase 2b (2026-05-21): the orchestrator no longer merges children
+    into the parent integration branch — the integration Lead is the single
+    merge authority (`lead-integration.md` Step 1). This function used to
+    auto-recover unmerged children with `merge_child_into_integration`;
+    that recovery is now gone. Integration will surface real merge conflicts
+    when it runs its own `git merge i2p/build/<id>` for each child.
+
+    We still emit the ancestry signal so resume logic / debugging can see
+    where each child branch sits relative to the parent.
+    """
     from otto.v5_branching import child_branch_name, integration_branch_name
 
     target = "main" if parent_task_id == _v5r.ROOT_TASK_ID else integration_branch_name(parent_task_id)
@@ -787,71 +798,16 @@ def _verify_child_branches_reached_parent(
         for branch in dict.fromkeys(branches):
             ok, detail = _branch_is_ancestor(project_dir, branch, target)
             _v5r._emit(on_event, {
-                "event": "child_branch_ancestry_ok" if ok else "child_branch_ancestry_failed",
+                "event": (
+                    "child_branch_ancestry_ok"
+                    if ok
+                    else "child_branch_pending_integration_merge"
+                ),
                 "task_id": child_id,
                 "branch": branch,
                 "target": target,
                 "detail": detail,
             })
-            if ok:
-                continue
-            # The child built and PASSED (guarded by _task_entry_allows_
-            # upward_merge above) but its branch never reached the parent
-            # integration branch — almost always because a prior run's
-            # children_and_subtree_integration was interrupted/budget-killed
-            # AFTER the child passed but BEFORE its upward merge, or this is a
-            # resumed run that skipped the already-passed child (its merge
-            # only ever ran inside _run_child for freshly-built children).
-            # The work is done and on the branch; it just needs merging.
-            # Re-attempt the canonical upward merge before demoting — only a
-            # GENUINE conflict (merge fails / still unreachable) becomes
-            # merge_blocked. Demoting-without-merging silently drops a
-            # completed, passing feature and ships an incomplete product.
-            recovered = False
-            if branch == child_branch_name(child_id):
-                try:
-                    from otto.v5_branching import merge_child_into_integration
-
-                    m_ok, m_detail = merge_child_into_integration(
-                        project_dir=project_dir,
-                        child_task_id=child_id,
-                        parent_integration_branch=target,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    m_ok, m_detail = False, f"{type(exc).__name__}: {exc}"
-                recheck_ok, recheck_detail = _branch_is_ancestor(
-                    project_dir, branch, target
-                )
-                recovered = bool(m_ok) and recheck_ok
-                _v5r._emit(on_event, {
-                    "event": (
-                        "child_branch_remerged"
-                        if recovered
-                        else "child_branch_remerge_failed"
-                    ),
-                    "task_id": child_id,
-                    "branch": branch,
-                    "target": target,
-                    "detail": (
-                        m_detail
-                        if recovered
-                        else f"{m_detail} | recheck: {recheck_detail}"
-                    ),
-                })
-            if recovered:
-                logger.info(
-                    "recovered unmerged passed child %s: re-merged %s into %s",
-                    child_id,
-                    branch,
-                    target,
-                )
-                continue
-            logger.warning(
-                "child branch ancestry verification failed for %s: %s",
-                child_id,
-                detail,
-            )
-            set_verdict(project_dir, child_id, "merge_blocked")
 
 def _branch_is_ancestor(project_dir: Path, branch: str, target: str) -> tuple[bool, str]:
     exists = _v5r.subprocess.run(
@@ -1360,6 +1316,80 @@ def _child_merge_conflict_smoke_failed_feedback(
             "message": str(exc),
         }
     return feedback
+
+async def _commit_child_for_integration(
+    *,
+    project_dir: Path,
+    child_task_id: str,
+    child_worktree: Path,
+    parent_integration_branch: str,
+    result: LeadResult,
+    on_event: Any = None,
+) -> None:
+    """Commit any uncommitted worktree changes onto the child's build
+    branch and record the worktree-level foundation-contract annotation.
+
+    Does NOT merge into the parent integration branch — that's the
+    integration Lead's job (Step 1 of `lead-integration.md`). This
+    function is the orchestrator's only post-child-finish job: leave
+    the child's branch in a state where integration can `git merge
+    i2p/build/<task_id>` and see all the work.
+    """
+    from otto.v5_branching import child_branch_name, commit_worktree
+
+    source_branch = child_branch_name(child_task_id)
+    commit_msg = f"v5 task {child_task_id}: {result.verdict}"
+    worktree_contract_violation = _v5r._foundation_contract_write_feedback(
+        project_dir=project_dir,
+        acting_task_id=child_task_id,
+        parent_integration_branch=parent_integration_branch,
+        changed_paths=_v5r._git_diff_name_only(child_worktree),
+        operation="child_worktree_commit",
+    )
+    ok, detail = commit_worktree(worktree_path=child_worktree, message=commit_msg)
+    if not ok:
+        logger.warning("commit_worktree(%s) failed: %s", child_task_id, detail)
+        feedback = {
+            "kind": "child_commit_failed",
+            "step_id": "child_commit",
+            "message": detail,
+            "task_id": child_task_id,
+            "source_branch": source_branch,
+            "parent_integration_branch": parent_integration_branch,
+            "_written_at": iso_timestamp(),
+        }
+        _record_structured_merge_failed(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=detail,
+            origin="commit",
+            phase="commit",
+            structured_reason=feedback,
+            on_event=on_event,
+        )
+        return
+    if worktree_contract_violation is not None:
+        annotate_detail = _v5r._foundation_contract_write_block_detail(
+            worktree_contract_violation
+        )
+        _record_structured_merge_failed(
+            project_dir=project_dir,
+            task_id=child_task_id,
+            result=result,
+            reason=annotate_detail,
+            origin="foundation_contract_write_gate",
+            phase="post_commit_annotation",
+            structured_reason=worktree_contract_violation,
+            on_event=on_event,
+        )
+    _v5r._emit(on_event, {
+        "event": "child_committed_merge_deferred_to_integration",
+        "task_id": child_task_id,
+        "source_branch": source_branch,
+        "parent_integration_branch": parent_integration_branch,
+    })
+
 
 async def _merge_child_branch(
     *,

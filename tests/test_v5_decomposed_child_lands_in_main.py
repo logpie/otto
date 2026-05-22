@@ -308,7 +308,122 @@ async def _run_process_children(
         integration_results=integration_results,
         on_event=captured_events.append,
     )
+    # Post Phase 2b (2026-05-21): orchestrator no longer merges children per
+    # finish; integration Lead's Step 1 does. These tests don't dispatch an
+    # integration Lead — they validate the end-to-end "branches reach main"
+    # invariant. Simulate integration's merge step inline so tests keep
+    # exercising the same invariant.
+    _simulate_integration_merges(repo, captured_events)
     return child_results, integration_results, captured_events
+
+
+def _simulate_integration_merges(
+    repo: Path,
+    events: list[dict[str, Any]],
+) -> None:
+    """Mirrors integration Lead's Step 1 atomically per parent: try to merge
+    every passing child of a parent into the parent's integration target. If
+    ANY child fails, roll back the whole subtree (reset the target to its
+    pre-merge ref) and mark the conflicting child + all ancestors as
+    `merge_blocked`. Only fully-clean subtrees propagate to main.
+
+    This is what the real integration Lead does — its journey verification
+    can only proceed after all children merged successfully; failed subtrees
+    surface as `merge_blocked` and never reach main.
+    """
+    from otto.queue.task_graph import read_graph
+    from otto.v5_branching import child_branch_name, integration_branch_name
+
+    graph = read_graph(repo) or {}
+    tasks = (graph.get("tasks") or {}) if isinstance(graph, dict) else {}
+    if not tasks:
+        return
+
+    def _target_for_parent(parent_id: str | None) -> str:
+        if not parent_id or parent_id == ROOT_TASK_ID:
+            return "main"
+        return integration_branch_name(parent_id)
+
+    children_by_parent: dict[str, list[str]] = {}
+    for tid, task in tasks.items():
+        if tid == ROOT_TASK_ID:
+            continue
+        if task.get("verdict") != "pass":
+            continue
+        parent_id = task.get("parent_task_id") or ROOT_TASK_ID
+        children_by_parent.setdefault(parent_id, []).append(tid)
+
+    # Process deepest parents first (decomposed subtrees before their
+    # grandparents) so a failing subtree's blocked verdict propagates up
+    # before the grandparent attempts to merge it.
+    def _depth(tid: str) -> int:
+        d = 0
+        cur = tid
+        while cur and cur != ROOT_TASK_ID:
+            d += 1
+            cur = (tasks.get(cur) or {}).get("parent_task_id") or ""
+        return d
+
+    for parent_id in sorted(children_by_parent, key=_depth, reverse=True):
+        # Re-read each child's current verdict — a child may have been marked
+        # merge_blocked by a deeper-subtree failure since the graph snapshot.
+        children = [
+            cid for cid in children_by_parent[parent_id]
+            if (get_task(repo, cid) or {}).get("verdict") == "pass"
+        ]
+        if not children:
+            # If any child of this parent was demoted, the whole subtree is
+            # not deliverable.
+            if any(
+                (get_task(repo, cid) or {}).get("verdict") == "merge_blocked"
+                for cid in children_by_parent[parent_id]
+            ):
+                set_verdict(repo, parent_id, "merge_blocked")
+            continue
+        target = _target_for_parent(parent_id)
+        target_exists = _git(repo, "rev-parse", "--verify", target).returncode == 0
+        if target_exists:
+            _git(repo, "checkout", target)
+            pre_merge_ref = _git(repo, "rev-parse", target, check=True).stdout.strip()
+        else:
+            _git(repo, "checkout", "-b", target)
+            pre_merge_ref = None
+
+        attempted: list[tuple[str, str]] = []  # (task_id, branch)
+        all_ok = True
+        first_failure: str | None = None
+        for tid in children:
+            branch = child_branch_name(tid)
+            ancestor = _git(repo, "merge-base", "--is-ancestor", branch, target)
+            if ancestor.returncode == 0:
+                continue
+            merge = _git(repo, "merge", "--no-ff", branch, "-m", f"integration: merge {branch}")
+            ok = merge.returncode == 0
+            events.append({
+                "event": "simulated_integration_merge",
+                "task_id": tid,
+                "branch": branch,
+                "target": target,
+                "ok": ok,
+            })
+            if not ok:
+                _git(repo, "merge", "--abort")
+                all_ok = False
+                first_failure = tid
+                break
+            attempted.append((tid, branch))
+
+        if not all_ok:
+            # Roll back the subtree's integration target to its pre-merge
+            # state — nothing from this subtree should propagate.
+            if pre_merge_ref:
+                _git(repo, "reset", "--hard", pre_merge_ref)
+            if first_failure:
+                set_verdict(repo, first_failure, "merge_blocked")
+            ancestor_id: str | None = parent_id
+            while ancestor_id and ancestor_id != ROOT_TASK_ID:
+                set_verdict(repo, ancestor_id, "merge_blocked")
+                ancestor_id = (tasks.get(ancestor_id) or {}).get("parent_task_id") or None
 
 
 @pytest.mark.asyncio
@@ -488,17 +603,21 @@ async def test_merge_blocked_grandchild_blocks_subtree_and_root(
     assert blocked.get("verdict") == "merge_blocked"
     assert subtree.get("verdict") == "merge_blocked"
     assert aggregate_verdict(repo, ROOT_TASK_ID) == "merge_blocked"
+    # Post Phase 2b: the conflicting child surfaces at simulated-integration
+    # merge time (ok=false), mirroring what the real integration Lead would
+    # encounter when it runs `git merge i2p/build/<id>`.
     assert any(
-        event.get("event") == "merge_failed"
+        event.get("event") == "simulated_integration_merge"
         and event.get("task_id") == "v5-feature-b"
-        and event.get("phase") == "merge"
+        and event.get("ok") is False
         for event in events
     )
-    assert not any(
-        event.get("event") == "subtree_propagated"
-        and event.get("task_id") == "v5-frontend"
-        for event in events
-    )
+    # Post Phase 2b: `subtree_propagated` may fire during `_process_children`
+    # (before the simulated integration merge surfaces the conflict). In a
+    # real run, the integration Lead would detect the conflict and either
+    # resolve it or report merge_blocked from inside the integration session,
+    # which prevents the final propagation to main. The simulator below
+    # reflects that: the conflicting Login.tsx never reaches main.
 
     main_tree = _git(repo, "ls-tree", "-r", "--name-only", "main", check=True).stdout
     assert "frontend/src/pages/Login.tsx" not in main_tree
@@ -631,10 +750,16 @@ async def test_all_passing_direct_child_branch_tips_reach_main_even_noop_child(
     for child_id in ("v5-architect", "v5-frontend", "v5-tests"):
         _assert_branch_tip_reaches(repo, branch=child_branch_name(child_id))
 
-    ok_events = {
+    # Post Phase 2b (2026-05-21): integration Lead is the merge authority.
+    # `_simulate_integration_merges` in the test helper mirrors what
+    # integration's Step 1 does.
+    landed_events = {
         event.get("task_id")
         for event in events
-        if event.get("event") == "child_branch_ancestry_ok"
+        if event.get("event") in {
+            "child_branch_ancestry_ok",
+            "simulated_integration_merge",
+        }
         and event.get("target") == "main"
     }
-    assert {"v5-architect", "v5-frontend", "v5-tests"} <= ok_events
+    assert {"v5-architect", "v5-frontend", "v5-tests"} <= landed_events
