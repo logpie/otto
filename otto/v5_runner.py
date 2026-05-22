@@ -2819,21 +2819,23 @@ def _foundation_isolation_feedback(
                     "owner_task_id": owner_id,
                 })
 
-    for index, (task_id, owned_paths) in enumerate(feature_owners):
-        for other_id, other_paths in feature_owners[index + 1:]:
-            overlaps = [
-                {"path": path, "other_path": other}
-                for path in owned_paths
-                for other in other_paths
-                if _path_overlaps(path, other)
-            ]
-            if overlaps:
-                findings.append({
-                    "kind": "feature_owned_paths_overlap",
-                    "task_id": task_id,
-                    "other_task_id": other_id,
-                    "overlaps": overlaps,
-                })
+    # Sibling-owned-path overlap detection extracted into a pure helper
+    # (Phase 3, plan-phase-3-sibling-ownership.md). The helper case-folds
+    # for macOS/Windows-correct comparison and accepts a `suppressed_paths`
+    # set so post-degrade callers can filter out paths the parent has
+    # already annotated as `decomposition_overlap_unresolved`.
+    parent_task = tasks.get(parent_task_id) if isinstance(tasks, dict) else None
+    suppressed_paths: set[str] = set()
+    if isinstance(parent_task, dict):
+        for entry in parent_task.get("decomposition_overlap_unresolved") or []:
+            if isinstance(entry, dict):
+                path_value = entry.get("path")
+                if isinstance(path_value, str) and path_value:
+                    suppressed_paths.add(_casefold_path(path_value))
+    findings.extend(_compute_sibling_owned_path_overlap_findings(
+        feature_owners=feature_owners,
+        suppressed_paths=suppressed_paths or None,
+    ))
 
     # Structural backstop (audit-prompts.md task #72 / F-3): the partition can
     # be self-consistent on paper but the foundation may still have COMMITTED
@@ -2935,6 +2937,134 @@ def _compute_foundation_seeded_findings(
                     "those files genuinely belong to the foundation."
                 ),
             })
+    return findings
+
+
+_GLOB_METACHARS = ("*", "?", "[", "]")
+
+
+def _validate_owned_path(path: str) -> dict[str, Any] | None:
+    """Validate a single owned_path string from the CHARTER.
+
+    Returns `None` if the path is acceptable, or a finding dict describing
+    why it's not. Does NOT mutate the caller's path; non-breaking — see
+    `_normalize_contract_path` for the permissive normalizer used elsewhere.
+
+    Phase 3 contract (plan-phase-3-sibling-ownership.md):
+    - Reject globs (`*`, `?`, `[`, `]`) as `unsupported_owned_path_glob`.
+    - Reject POSIX absolute (`/...`), Windows drive (`X:\\...`), UNC
+      (`\\\\...`) as `invalid_owned_path`.
+    - Reject `.` / `..` segments (after normalization) as `invalid_owned_path`.
+    - Reject empty / whitespace-only as `invalid_owned_path`.
+
+    Note: callers should `_normalize_contract_path` BEFORE comparing for
+    overlap, but pass the RAW string to this validator so we can flag
+    issues that normalization would silently strip (leading `./`, etc.
+    aren't pathological — leading `/` is).
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        return {"kind": "invalid_owned_path", "path": path, "reason": "empty"}
+    if any(ch in raw for ch in _GLOB_METACHARS):
+        return {
+            "kind": "unsupported_owned_path_glob",
+            "path": raw,
+            "reason": (
+                "globs/wildcards are not supported in owned_paths; "
+                "list each path literally"
+            ),
+        }
+    # POSIX absolute
+    if raw.startswith("/"):
+        return {"kind": "invalid_owned_path", "path": raw, "reason": "absolute path"}
+    # Windows UNC
+    if raw.startswith("\\\\") or raw.startswith("//"):
+        return {"kind": "invalid_owned_path", "path": raw, "reason": "UNC path"}
+    # Windows drive (single-letter colon prefix)
+    if len(raw) >= 2 and raw[1] == ":" and raw[0].isalpha():
+        return {
+            "kind": "invalid_owned_path",
+            "path": raw,
+            "reason": "Windows drive prefix",
+        }
+    # Parent-traversal / dot-only segments
+    normalized = raw.replace("\\", "/").strip("/")
+    segments = [seg for seg in normalized.split("/") if seg]
+    for seg in segments:
+        if seg in (".", ".."):
+            return {
+                "kind": "invalid_owned_path",
+                "path": raw,
+                "reason": f"forbidden segment {seg!r}",
+            }
+    return None
+
+
+def _casefold_path(path: str) -> str:
+    """Case-folded normalized path for case-insensitive overlap comparison.
+
+    macOS/Windows filesystems are case-insensitive; even on Linux a
+    `core.ignorecase` repo can introduce false negatives. False positives
+    on case-collision are safer than false negatives for a partition check.
+    """
+    return _normalize_contract_path(path).casefold()
+
+
+def _compute_sibling_owned_path_overlap_findings(
+    *,
+    feature_owners: list[tuple[str, list[str]]],
+    suppressed_paths: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Pure helper: emit `feature_owned_paths_overlap` finding for each
+    pair of sibling features whose declared `owned_paths` collide.
+
+    Uses case-folded normalized comparison (see `_casefold_path`). Treats
+    a feature's same-path duplicate listings as a single ownership claim;
+    only ACROSS-feature collisions are reported.
+
+    `suppressed_paths` is a set of case-folded normalized paths to filter
+    out — used post-degrade so we don't keep re-emitting findings the
+    parent task has already annotated as `decomposition_overlap_unresolved`.
+    """
+    suppressed = suppressed_paths or set()
+    findings: list[dict[str, Any]] = []
+    # Pre-fold each feature's owned paths once. Keep both raw + folded so
+    # we can report the raw path in findings (better signal) but compare
+    # on the folded form.
+    folded_owners: list[tuple[str, list[tuple[str, str]]]] = []
+    for feature_id, owned_paths in feature_owners:
+        fold_pairs: list[tuple[str, str]] = []
+        seen_folds: set[str] = set()
+        for raw_path in owned_paths:
+            folded = _casefold_path(str(raw_path))
+            if not folded or folded in seen_folds:
+                continue
+            seen_folds.add(folded)
+            fold_pairs.append((str(raw_path), folded))
+        folded_owners.append((str(feature_id), fold_pairs))
+
+    for index, (task_id, pairs) in enumerate(folded_owners):
+        for other_id, other_pairs in folded_owners[index + 1:]:
+            overlaps: list[dict[str, str]] = []
+            for raw_path, folded in pairs:
+                if folded in suppressed:
+                    continue
+                for other_raw, other_folded in other_pairs:
+                    if other_folded in suppressed:
+                        continue
+                    if folded == other_folded or folded.startswith(
+                        f"{other_folded}/"
+                    ) or other_folded.startswith(f"{folded}/"):
+                        overlaps.append(
+                            {"path": raw_path, "other_path": other_raw}
+                        )
+            if overlaps:
+                findings.append({
+                    "kind": "feature_owned_paths_overlap",
+                    "task_id": task_id,
+                    "other_task_id": other_id,
+                    "overlaps": overlaps,
+                })
     return findings
 
 
