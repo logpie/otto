@@ -43,6 +43,19 @@ to bring all their work together and resolve any conflicts. Concretely:
    to merge cleanly in most cases; children with verdict=partial or
    landed_with_annotation may have known issues their session noted.
    Either way, attempt the merge.
+2a. **Sibling-overlap annotation (Phase 3).** If `{integration_packet_path}`
+   contains `parent.decomposition_overlap_unresolved`, those paths are
+   *expected* sibling conflicts that root's decomposition couldn't avoid.
+   For each child branch that touches a listed path:
+   - Use `git merge --no-commit <build_branch>` (not the default `--no-edit`)
+     so you can review the conflict before committing.
+   - Manually union both contributions on the listed paths. Both features
+     are right; neither side wins outright.
+   - Commit with `integration: union of <path> for features <ids>` so the
+     resolution is greppable.
+   The annotation is the orchestrator telling you "expect this conflict,
+   resolve via union" — don't treat it as a bug in the children's work.
+
 3. **Resolve conflicts by hand.** Common conflict shapes:
    - Two features both wrote to a shared file (e.g.,
      `backend/tests/conftest.py`, a shared API client, a shared style

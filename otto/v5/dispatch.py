@@ -1824,10 +1824,23 @@ def _write_integration_packet(
             "decisions_appended": verdict_payload.get("decisions_appended") if verdict_payload else [],
             "runner_checks": verdict_payload.get("runner_checks") if verdict_payload else [],
         })
+    # Phase 3: surface graceful-degrade annotations from the parent task so
+    # integration's Step 1 knows which paths are expected sibling conflicts
+    # (union the contributions instead of picking one side).
+    # Additive optional under schema_version=1 — no version bump.
+    parent_task = get_task(project_dir, parent_task_id) or {}
+    parent_block: dict[str, Any] = {
+        "task_id": parent_task_id,
+        "intent": parent_task.get("intent", ""),
+    }
+    unresolved = parent_task.get("decomposition_overlap_unresolved")
+    if unresolved:
+        parent_block["decomposition_overlap_unresolved"] = unresolved
     packet = {
         "schema_version": 1,
         "_written_at": iso_timestamp(),
         "parent_task_id": parent_task_id,
+        "parent": parent_block,
         "integration_branch": integration_branch,
         "integration_worktree": str(integration_worktree),
         "child_summaries": child_summaries,

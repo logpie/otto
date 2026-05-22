@@ -46,6 +46,30 @@ inline, AND what your architect child must do if you emit one:
   any child re-create them. The architect/foundation child only fills product
   code and `CHARTER.md` AROUND the seeded scaffold (it may add dependencies
   to the existing manifests); features build against it.
+- **Feature `owned_paths` MUST be disjoint and LITERAL** (Phase 3 contract,
+  plan-phase-3-sibling-ownership.md). When you declare each feature's
+  `owned_paths` in the CHARTER:
+  - Use **literal file paths** only — no globs (`*`, `?`, `[...]`), no
+    wildcards. Globs will be rejected as `unsupported_owned_path_glob`.
+  - No two features may claim the same path (including by prefix
+    containment — listing a directory in feature A while feature B lists
+    a file inside it). Overlaps are rejected as `feature_owned_paths_overlap`
+    and trigger a plan-amendment retry.
+  - No absolute paths (`/etc/...`), Windows drives (`C:\...`), UNC paths
+    (`\\server\...`), or `.`/`..` segments — rejected as
+    `invalid_owned_path`.
+  - If two features genuinely need the SAME file, choose one of:
+    (1) **HOIST**: foundation owns the file and exposes an extension
+        point. Only valid if foundation actually has the extension point.
+    (2) **AUTO_LOADER**: foundation provides runtime discovery (pkgutil
+        iter_modules for Python; import.meta.glob for Vite). Features
+        drop files; the loader picks them up. Only valid if foundation's
+        auto-loader is already in place.
+    (3) **CANONICAL_OWNER**: one feature owns the file; sibling imports
+        the public interface. Update CHARTER so only one feature lists
+        the path. Always available.
+    (4) **RE_PARTITION**: re-shape feature scopes so neither needs the
+        file. Often signals the partition itself is wrong.
 - CHARTER should contain operational facts, shared contracts, and one
   `## Information Architecture Contract` JSON block when this is a webapp.
   For non-webapp project kinds, still emit an Information Architecture

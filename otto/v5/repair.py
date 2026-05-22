@@ -1447,7 +1447,56 @@ async def _reenter_or_block_architect_contract(
         feedback.get("kind") == "shared_foundation_not_isolated"
         and _v5r._feature_overlap_findings(feedback)
         and config is not None
+        and parent_id
     ):
+        # Phase 3 (plan-phase-3-sibling-ownership.md): bounded retry budget
+        # for sibling-overlap plan-amendments. Track attempts on parent task;
+        # at MAX, graceful-degrade with `decomposition_overlap_unresolved`
+        # annotation so feature dispatch proceeds and integration's Step 1
+        # knows the listed paths need union work at merge time.
+        parent_task = (read_graph(project_dir).get("tasks") or {}).get(parent_id) or {}
+        attempts = int(parent_task.get("sibling_overlap_attempts") or 0)
+        if attempts >= _v5r.MAX_CONTRACT_AMENDMENT_ATTEMPTS:
+            # Already at budget — annotate and proceed.
+            overlap_findings = _v5r._feature_overlap_findings(feedback)
+            unresolved_paths: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for finding in overlap_findings:
+                for overlap in finding.get("overlaps") or []:
+                    if not isinstance(overlap, dict):
+                        continue
+                    raw_path = str(overlap.get("path") or "").strip()
+                    if not raw_path or raw_path in seen:
+                        continue
+                    seen.add(raw_path)
+                    unresolved_paths.append({
+                        "path": raw_path,
+                        "claiming_features": sorted({
+                            str(finding.get("task_id") or ""),
+                            str(finding.get("other_task_id") or ""),
+                        }),
+                    })
+            if unresolved_paths:
+                update_task_metadata(
+                    project_dir,
+                    parent_id,
+                    decomposition_overlap_unresolved=unresolved_paths,
+                )
+                _v5r._emit(on_event, {
+                    "event": "sibling_overlap_unresolved_degrade",
+                    "parent_task_id": parent_id,
+                    "architect_task_id": architect_tid,
+                    "unresolved_paths": unresolved_paths,
+                    "attempts": attempts,
+                })
+            return False  # proceed to feature dispatch with annotation
+        # Increment attempts BEFORE dispatching plan-amendment so a crash
+        # during the agent run doesn't loop forever.
+        update_task_metadata(
+            project_dir,
+            parent_id,
+            sibling_overlap_attempts=attempts + 1,
+        )
         repair = await _run_plan_amendment_repair_packet(
             project_dir=project_dir,
             architect_tid=architect_tid,
@@ -1456,6 +1505,26 @@ async def _reenter_or_block_architect_contract(
             on_event=on_event,
         )
         if repair.verdict == VERDICT_PASS and parent_id:
+            # Phase 3 (Codex round-2 finding #2): plan-amendment commits
+            # CHARTER.md only — re-derive feature owned_paths from the
+            # amended CHARTER before re-checking, or the task graph stays
+            # stale and the overlap check sees the OLD partition.
+            try:
+                from otto.v5_capability_inventory import (
+                    persist_feature_owned_paths_from_charter,
+                    persist_foundation_contracts_from_charter,
+                )
+
+                persist_foundation_contracts_from_charter(
+                    project_dir, parent_task_id=parent_id,
+                )
+                persist_feature_owned_paths_from_charter(
+                    project_dir, parent_task_id=parent_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort re-derive
+                logger.warning(
+                    "post-plan-amendment re-persist failed: %s", exc
+                )
             contracts = _v5r._foundation_contracts_for_parent(
                 project_dir,
                 parent_id,
