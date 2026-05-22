@@ -53,35 +53,44 @@ the diagnose-and-fix loop is the same either way.
 
 ---
 
-## Finding 2 — Foundation_gate clean-boot probe
+## Finding 2 — Foundation_gate clean-boot probe (REVISED — keep for now)
 
-**Location:** `otto/v5/dispatch.py:784` (after architect/foundation
-child finishes).
+**Original recommendation (REVISED 2026-05-21):** "drop the probe, trust
+the platform-verify prompt." User pushed back: this contradicts the
+shipped Task #72 reasoning ("prompt-only enforcement is provably
+insufficient; the LinkBoard root Lead violated [the partition rule]
+knowingly").
 
-**What happens today:**
+**Honest answer:** trust is earned. The platform-verify prompt was
+added 2 commits ago and observed in 1 partial run. Until it's
+validated across multiple diverse end-to-end runs where the foundation
+Lead actually drives its declared contracts pre-yield, the orchestrator
+backstop is the cheaper-than-debugging insurance.
 
-1. Foundation Lead declares pass (and per the new "verify as platform"
-   prompt, has self-verified by hitting its own endpoints)
-2. Orchestrator independently runs a clean-deploy probe in a separate
-   foundation_gate session dir
-3. If probe fails → dispatches `_run_oracle_repair_agent`
-4. Repair agent's no-op pattern we documented earlier surfaced in
-   `linkboard-validate-pass-105752`: oracle passed on retry without
-   any agent action; agent burned $0.36 for nothing
+**What to do instead (middle ground):**
 
-**Why redundant:** lead-architect.md "Verify the foundation AS A
-PLATFORM" prompt makes the foundation Lead RESPONSIBLE for proving
-its own platform boots and serves its declared contracts. The
-orchestrator's independent re-probe duplicates that responsibility.
+1. **Keep the probe.** It catches the "foundation declared pass without
+   actually working" class — cheap insurance.
+2. **Drop the repair-agent dispatch on probe-fail.** That's where the
+   no-op pattern bites ($0.36 wasted when failure is transient or
+   when the agent would have caught it on its own start.sh anyway).
+   Replace with: re-dispatch the foundation Lead with the specific
+   probe failure as feedback. Same fix shape as the architect-contract
+   retry — the responsible agent gets a chance to repair, not a
+   generic repair-agent.
+3. **Revisit dropping the probe entirely** once platform-verify has
+   passed cleanly ≥4 diverse end-to-end runs.
 
-**Agentic fix:** trust the foundation Lead's verdict. If the foundation
-Lead says pass after platform-verify, that IS the platform check. If
-it lied (declared pass without driving its contracts), that's a
-foundation-Lead prompt issue, not an orchestrator backstop concern.
+**Risk of original "drop" recommendation:** medium-high. A foundation
+that boots cleanly is the precondition for every downstream step;
+catching its failure costs $0.36 vs wasting 25 min of feature work +
+$3-5 in dispatched-then-blocked agents.
 
-**Risk:** low. The platform-verify prompt is the trust contract.
-Orchestrator backstop creates the no-op-repair pattern at $0.36 per
-run.
+**Principle this finding teaches us (added to the meta-pattern below):**
+not all orchestrator pre-flight is duplication. CHEAP probes that
+catch CLASSES OF BUGS the prompt can't reliably prevent stay. The
+duplication-to-drop is EXPENSIVE probes that re-derive things the
+agent JUST DID. Foundation_gate is the former, not the latter.
 
 ---
 
