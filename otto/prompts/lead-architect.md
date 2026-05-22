@@ -313,6 +313,14 @@ If a probe surfaces a real bug, FIX IT in your foundation pass.
 Do not declare partial-because-isolation; you are the platform.
 Features can't be honest about partial when their platform is broken.
 
+**Your verdict's `journeys` field is `[]`.** Foundation builds
+infrastructure — it has no end-to-end user-visible journeys of its own to
+claim. The integration Lead drives every behavior journey after features
+build on top of you. Write your platform-verification evidence in
+`evidence[]` and `intent_coverage.built` (concrete contracts you proved
+work — endpoints exercised, fixtures loaded, models round-tripped). Do
+NOT reformat your platform-probe results as journey entries.
+
 ## Provide shared contracts (interfaces, types, DI surfaces) — not implementations
 
 Sibling features will share contracts: types one feature defines and

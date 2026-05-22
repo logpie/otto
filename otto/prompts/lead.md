@@ -217,8 +217,20 @@ If you built inline, write `<session_dir>/verdict.json` as a real file:
 
 Your verdict MUST include all of: `verdict`, `summary`, `journeys` (array,
 may be empty if your scope has no applicable journeys), `intent_coverage`,
-and either `evidence` or `test_command` (preferably both). Field-shape
-requirements:
+and either `evidence` or `test_command` (preferably both).
+
+**About `journeys` at leaf/feature/foundation scope**: end-to-end behavioral
+journeys (multi-screen UI flows, full-stack request lifecycles) are the
+integration Lead's job — it drives them live with browser/CLI tooling in
+the merged product. Your `journeys` array is for **end-to-end journeys you
+actually drove yourself** (rare at leaf time — most leaves can't run the
+whole stack). Do NOT reformat your unit/component/API test results as
+journey entries; those belong in `evidence` + `test_command` + an honest
+`intent_coverage.built` list. If your scope has no journey you genuinely
+ran end-to-end, write `"journeys": []` — integration will produce the
+authoritative journey verdicts.
+
+Field-shape requirements:
 - `intent_coverage` MUST be an object with keys `built`, `partial`, and
   `skipped`. Each `partial` entry MUST be an object with `feature` and
   `gap` (and optionally `what_works`). Each `skipped` entry MUST be an

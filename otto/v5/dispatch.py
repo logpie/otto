@@ -1690,55 +1690,56 @@ async def _run_integration(
         return result
 
     integration_cwd = integration_worktree
-    preflight_result = await _v5r._run_integration_smoke_preflight_with_repair(
-        project_dir=project_dir,
-        worktree_path=integration_cwd,
-        task_id=task_id,
-        phase="pre_agent",
-        session_dir=integration_session_dir,
-        config=config,
-        integration_branch=parent_integration_branch,
-        on_event=on_event,
-    )
+    # Phase 2 follow-up (T1-1, audit-pre-flight-duplication.md Finding 1):
+    # the pre_agent integration smoke preflight is deferred to the
+    # integration Lead's Step 2 (`./start.sh` + journey verification). The
+    # Lead's first action in its own session runs the same checks this
+    # preflight would have run, with the same tools (Bash, chrome-devtools).
+    # Pre-flighting the same work pre-emptively wastes ~$0.20+ per
+    # integration on a repair-agent dispatch that usually no-ops because by
+    # the time it runs, integration is about to do the same thing anyway.
+    preflight_result = {
+        "check": "smoke_clean_deploy",
+        "passed": True,
+        "deferred_to_integration_step_2": True,
+        "summary": (
+            "pre_agent smoke preflight deferred to integration Lead's "
+            "Step 2 start.sh (single-source-of-truth verifier)"
+        ),
+    }
 
     _v5r._emit(on_event, {"event": "integration_start", "task_id": task_id})
-    if _v5r._preflight_repair_escalated(preflight_result):
-        result = _v5r._preflight_blocked_result(
-            task_id=task_id,
-            preflight_result=preflight_result,
-        )
-    else:
-        integration_packet_path = _write_integration_packet(
-            project_dir=project_dir,
-            parent_task_id=task_id,
-            session_dir=integration_session_dir,
-            child_results=child_results,
-            integration_results=integration_results,
-            child_summaries=summaries,
-            preflight_result=preflight_result,
-            integration_branch=parent_integration_branch,
-            integration_worktree=integration_cwd,
-        )
-        result = await _v5r.run_lead(
-            task_id=task_id,
-            intent=intent,
-            project_dir=project_dir,
-            session_dir=integration_session_dir,
-            integration_branch=parent_integration_branch,
-            config=config,
-            kind="integration",
-            child_summaries=summaries,
-            preflight_result=preflight_result,
-            integration_packet_path=str(integration_packet_path),
-            execution_scope="subtree_integration",
-        )
-        _v5r._commit_integration_agent_changes(
-            project_dir=project_dir,
-            task_id=task_id,
-            worktree_path=integration_cwd,
-            result=result,
-            on_event=on_event,
-        )
+    integration_packet_path = _write_integration_packet(
+        project_dir=project_dir,
+        parent_task_id=task_id,
+        session_dir=integration_session_dir,
+        child_results=child_results,
+        integration_results=integration_results,
+        child_summaries=summaries,
+        preflight_result=preflight_result,
+        integration_branch=parent_integration_branch,
+        integration_worktree=integration_cwd,
+    )
+    result = await _v5r.run_lead(
+        task_id=task_id,
+        intent=intent,
+        project_dir=project_dir,
+        session_dir=integration_session_dir,
+        integration_branch=parent_integration_branch,
+        config=config,
+        kind="integration",
+        child_summaries=summaries,
+        preflight_result=preflight_result,
+        integration_packet_path=str(integration_packet_path),
+        execution_scope="subtree_integration",
+    )
+    _v5r._commit_integration_agent_changes(
+        project_dir=project_dir,
+        task_id=task_id,
+        worktree_path=integration_cwd,
+        result=result,
+        on_event=on_event,
+    )
     # Phase-1 unified verifier: the integration Lead drove the journeys
     # itself via chrome-devtools MCP in the same session it made edits.
     # We trust its verdict; no separate post-agent journey runner +
